@@ -1,0 +1,85 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# codegen
+generated
+
+# testing
+/coverage
+
+# dev
+/dist/
+
+.twenty
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+!.env.example
+
+# local credentials, recovery points and private client fixtures
+.mahabbat-*
+*.credentials.txt
+*.credentials.json
+*.secret
+*.key
+*.dump
+*.sql
+*.bak
+backups/
+recovery/
+fixtures/private/
+fixtures/**/*.xlsx
+fixtures/**/*.xls
+fixtures/**/*.csv
+*.log
+
+# local tooling state
+.twenty/
+!.env.example
+
+# local credentials, recovery points and private client fixtures
+.mahabbat-*
+*.credentials.txt
+*.credentials.json
+*.secret
+*.key
+*.dump
+*.sql
+*.bak
+backups/
+recovery/
+fixtures/private/
+fixtures/**/*.xlsx
+fixtures/**/*.xls
+fixtures/**/*.csv
+*.log
+
+# typescript
+*.tsbuildinfo
+*.d.ts
+
+# python adapter checks
+/scripts/__pycache__/

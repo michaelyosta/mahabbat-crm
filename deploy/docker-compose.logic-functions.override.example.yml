@@ -1,0 +1,16 @@
+# Apply this override together with Twenty's pinned self-hosted compose file.
+# Keep the real .env outside Git and provide ENCRYPTION_KEY there.
+services:
+  server:
+    image: mahabbat-twenty:v2.29.0-branding
+    environment:
+      LOGIC_FUNCTION_TYPE: LOCAL
+      STORAGE_TYPE: local
+      SERVER_URL: ${SERVER_URL:-http://localhost:3000}
+      FRONT_AUTO_BASE_URL: "true"
+  worker:
+    image: mahabbat-twenty:v2.29.0-branding
+    environment:
+      LOGIC_FUNCTION_TYPE: LOCAL
+      STORAGE_TYPE: local
+      SERVER_URL: http://server:3000

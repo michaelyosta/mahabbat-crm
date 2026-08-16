@@ -1,0 +1,40 @@
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Twenty API URL for the explicitly selected deployment target'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TWENTY_DEPLOY_URL: ${{ inputs.target_url }}
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-and-install:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Deploy
+        uses: twentyhq/twenty/.github/actions/deploy-twenty-app@main
+        with:
+          api-url: ${{ env.TWENTY_DEPLOY_URL }}
+          api-key: ${{ secrets.TWENTY_DEPLOY_API_KEY }}
+
+      - name: Install
+        uses: twentyhq/twenty/.github/actions/install-twenty-app@main
+        with:
+          api-url: ${{ env.TWENTY_DEPLOY_URL }}
+          api-key: ${{ secrets.TWENTY_DEPLOY_API_KEY }}

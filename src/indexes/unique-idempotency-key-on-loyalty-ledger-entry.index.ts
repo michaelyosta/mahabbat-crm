@@ -1,0 +1,22 @@
+import { defineIndex } from 'twenty-sdk/define';
+
+import {
+  LOYALTY_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER,
+  LOYALTY_LEDGER_ENTRY_UNIVERSAL_IDENTIFIER,
+  LOYALTY_UNIQUE_IDEMPOTENCY_KEY_INDEX_FIELD_UNIVERSAL_IDENTIFIER,
+  LOYALTY_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER,
+} from 'src/objects/loyalty-ledger-entry.object';
+
+export default defineIndex({
+  universalIdentifier: LOYALTY_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER,
+  objectUniversalIdentifier: LOYALTY_LEDGER_ENTRY_UNIVERSAL_IDENTIFIER,
+  isUnique: true,
+  fields: [
+    {
+      universalIdentifier:
+        LOYALTY_UNIQUE_IDEMPOTENCY_KEY_INDEX_FIELD_UNIVERSAL_IDENTIFIER,
+      fieldUniversalIdentifier:
+        LOYALTY_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER,
+    },
+  ],
+});
