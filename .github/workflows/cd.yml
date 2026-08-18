@@ -1,3 +1,13 @@
+# Deployment workflow for the Mahabbat app onto a selected Twenty instance.
+#
+# One-time setup:
+# 1. Create a GitHub Environment named `production` (Settings > Environments).
+# 2. Add `TWENTY_DEPLOY_API_KEY` to that environment's secrets (NOT repo-level),
+#    so only release managers can deploy using it.
+# 3. Enable "Required reviewers" on the environment to gate deploys ahead of time.
+# 4. Review the destination: this workflow only deploys to the exact
+#    `target_url` supplied on workflow_dispatch — it is not wired to any
+#    production host. See docs/DISTRIBUTION_DECISION.md for distribution status.
 name: CD
 
 on:
@@ -21,6 +31,7 @@ concurrency:
 jobs:
   deploy-and-install:
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,13 +39,13 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Deploy
-        uses: twentyhq/twenty/.github/actions/deploy-twenty-app@main
+        uses: twentyhq/twenty/.github/actions/deploy-twenty-app@80fb91c033dfd367f17ba58e2095526faa016e70
         with:
           api-url: ${{ env.TWENTY_DEPLOY_URL }}
           api-key: ${{ secrets.TWENTY_DEPLOY_API_KEY }}
 
       - name: Install
-        uses: twentyhq/twenty/.github/actions/install-twenty-app@main
+        uses: twentyhq/twenty/.github/actions/install-twenty-app@80fb91c033dfd367f17ba58e2095526faa016e70
         with:
           api-url: ${{ env.TWENTY_DEPLOY_URL }}
           api-key: ${{ secrets.TWENTY_DEPLOY_API_KEY }}
