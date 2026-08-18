@@ -4,6 +4,8 @@ import * as path from 'path';
 
 import { appDevOnce, appUninstall } from 'twenty-sdk/cli';
 
+import { assertAllowedTestTarget } from '../utils/test-target.util';
+
 const APP_PATH = process.cwd();
 const CONFIG_DIR = path.join(os.homedir(), '.twenty');
 
@@ -57,6 +59,8 @@ function writeConfig(apiUrl: string, apiKey: string) {
 
 export async function setup() {
   const { apiUrl, apiKey } = validateEnv();
+
+  assertAllowedTestTarget(apiUrl);
 
   await checkServer(apiUrl);
 
