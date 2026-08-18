@@ -1,40 +1,33 @@
-# Publishes the app to npm with provenance (npm trusted publishing).
+# Publish workflow for the Mahabbat app.
 #
-# One-time setup:
-# 1. On npmjs.com open your package > Settings > Trusted Publisher and register
-#    this repository and this workflow file (publish.yml).
-#    See https://docs.npmjs.com/trusted-publishers
-# 2. Push a version tag (e.g. `git tag v0.1.0 && git push --tags`) or run the
-#    workflow manually from the Actions tab.
+# Distribution status: NOT DISTRIBUTED (see docs/DISTRIBUTION_DECISION.md — the
+# authoritative record, maintained by the product owner).
 #
-# Safety gate: the publish step only runs when the requested version exactly
-# matches package.json `version` (see "Verify version gate" step). This
-# prevents accidental releases from mismatched tags/dispatches.
+# The real publish step is impossible while the fail-closed distribution gate
+# below is `false`. The gate is a hard value committed in this workflow file; a
+# version tag cannot change it. Enabling distribution requires a deliberate PR
+# that flips the gate to `true` AND updates docs/DISTRIBUTION_DECISION.md.
 #
-# Distribution status: see docs/DISTRIBUTION_DECISION.md — this app is NOT
-# distributed; the gate is a guardrail, not an active publishing pipeline.
-#
-# Publishing with provenance certifies which GitHub repository the package is
-# built from. This is also how you claim ownership of your app in a Twenty
-# marketplace: the claim flow verifies you own the GitHub account or
-# organization the provenance points to.
+# There is intentionally no automatic `push`/tag trigger: a `v*` tag never
+# starts a publication.
 name: Publish
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Exact version to publish (must equal package.json version, e.g. 0.1.0)'
+        description: 'Exact version to verify against package.json (e.g. 0.1.0)'
         required: true
         type: string
 
 permissions:
   contents: read
-  # Required for npm trusted publishing (OIDC provenance).
+  # Required for npm trusted publishing (OIDC provenance). Kept declared only so
+  # an explicit distribution decision does not require a separate permission PR.
   id-token: write
+
+env:
+  DISTRIBUTION_ENABLED: 'false'
 
 jobs:
   publish:
@@ -42,6 +35,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Distribution gate (fail-closed)
+        shell: bash
+        run: |
+          if [ "$DISTRIBUTION_ENABLED" != "true" ]; then
+            echo "::error::distribution is frozen (docs/DISTRIBUTION_DECISION.md = NOT DISTRIBUTED); publication is disabled"
+            exit 1
+          fi
+          echo "distribution enabled"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -61,20 +63,15 @@ jobs:
         shell: bash
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          if [ -n "${{ github.event.inputs.release_version }}" ]; then
-            EXPECTED="${{ github.event.inputs.release_version }}"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
-            EXPECTED="${TAG#v}"
-          fi
+          EXPECTED="${{ github.event.inputs.release_version }}"
           if [ "$VERSION" != "$EXPECTED" ]; then
             echo "::error::package.json version ($VERSION) does not match the requested release ($EXPECTED)"
             exit 1
           fi
-          echo "Publishing v$VERSION (gate ok)"
+          echo "version gate ok: v$VERSION"
 
       - name: Publish to npm
-        # Gated by the "Verify version gate" step above; will not run on a mismatch.
+        # Cannot run while the distribution gate is `false`.
         # Uncomment if publishing from a private source repo: npm rejects
         # OIDC provenance for private repos
         # env:

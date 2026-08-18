@@ -1,28 +1,27 @@
-# Deployment workflow for the Mahabbat app onto a selected Twenty instance.
+# Deployment workflow for the Mahabbat app onto the environment-owned target.
+#
+# The production credential and the production URL belong to the same GitHub
+# Environment named `production`. The workflow never accepts an operator-entered
+# URL, so the environment-scoped `TWENTY_DEPLOY_API_KEY` cannot be directed at
+# an arbitrary host.
 #
 # One-time setup:
 # 1. Create a GitHub Environment named `production` (Settings > Environments).
-# 2. Add `TWENTY_DEPLOY_API_KEY` to that environment's secrets (NOT repo-level),
-#    so only release managers can deploy using it.
-# 3. Enable "Required reviewers" on the environment to gate deploys ahead of time.
-# 4. Review the destination: this workflow only deploys to the exact
-#    `target_url` supplied on workflow_dispatch — it is not wired to any
-#    production host. See docs/DISTRIBUTION_DECISION.md for distribution status.
+# 2. Set the environment variable `TWENTY_DEPLOY_URL` to the Twenty API URL.
+# 3. Add the secret `TWENTY_DEPLOY_API_KEY` to the same environment.
+# 4. Enable "Required reviewers" on the environment to gate deploys.
+#
+# There is no configured production target today (see
+# docs/DISTRIBUTION_DECISION.md). The workflow stays safely unusable until the
+# `production` environment defines `TWENTY_DEPLOY_URL`; the guard step fails the
+# job otherwise. No live deployment is performed by this repository.
 name: CD
 
 on:
   workflow_dispatch:
-    inputs:
-      target_url:
-        description: 'Twenty API URL for the explicitly selected deployment target'
-        required: true
-        type: string
 
 permissions:
   contents: read
-
-env:
-  TWENTY_DEPLOY_URL: ${{ inputs.target_url }}
 
 concurrency:
   group: cd-${{ github.ref }}
@@ -38,14 +37,23 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Verify environment-owned target
+        shell: bash
+        run: |
+          if [ -z "${{ vars.TWENTY_DEPLOY_URL }}" ]; then
+            echo "::error::production environment has no TWENTY_DEPLOY_URL set; refusing to deploy to an arbitrary target"
+            exit 1
+          fi
+          echo "Deploying to the production environment-owned target"
+
       - name: Deploy
         uses: twentyhq/twenty/.github/actions/deploy-twenty-app@80fb91c033dfd367f17ba58e2095526faa016e70
         with:
-          api-url: ${{ env.TWENTY_DEPLOY_URL }}
+          api-url: ${{ vars.TWENTY_DEPLOY_URL }}
           api-key: ${{ secrets.TWENTY_DEPLOY_API_KEY }}
 
       - name: Install
         uses: twentyhq/twenty/.github/actions/install-twenty-app@80fb91c033dfd367f17ba58e2095526faa016e70
         with:
-          api-url: ${{ env.TWENTY_DEPLOY_URL }}
+          api-url: ${{ vars.TWENTY_DEPLOY_URL }}
           api-key: ${{ secrets.TWENTY_DEPLOY_API_KEY }}
