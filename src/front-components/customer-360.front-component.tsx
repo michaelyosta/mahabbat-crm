@@ -10,9 +10,15 @@ import { defineFrontComponent } from 'twenty-sdk/define';
 import { useRecordId } from 'twenty-sdk/front-component';
 
 import { CUSTOMER_360_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
+import {
+  LOYALTY_BALANCE_PAGE_SIZE,
+  computeLoyaltyBalance,
+  fetchAllLoyaltyLedgerEntries,
+  loyaltyLedgerNodes,
+} from 'src/utils/loyalty-balance.util';
 
 type Money = { amountMicros?: number | string | null; currencyCode?: string | null };
-type Connection<T> = { edges?: Array<{ node?: T | null } | null> | null };
+type Connection<T> = { edges?: Array<{ node?: T | null } | null> | null; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null };
 type OrderItem = { id: string; orderId?: string | null; name?: string | null; quantity?: number | null; total?: Money | null };
 type Order = { id: string; name?: string | null; channel?: string | null; status?: string | null; orderedAt?: string | null; total?: Money | null; items?: OrderItem[] | null };
 type Reservation = { id: string; reservationTime?: string | null; guestCount?: number | null; status?: string | null; zone?: string | null; table?: string | null };
@@ -220,13 +226,26 @@ const Customer360 = () => {
 
     const loadLoyalty = async () => {
       try {
-        const ledgerResult = await client.query<{ loyaltyLedgerEntries?: Connection<LedgerEntry> | null }>({
-          loyaltyLedgerEntries: {
-            __args: { filter: { customerId: { eq: recordId } }, first: 100 },
-            edges: { node: { id: true, entryType: true, amount: true, occurredAt: true, reason: true } },
-          },
+        const entries = await fetchAllLoyaltyLedgerEntries(async (after) => {
+          const ledgerResult = await client.query<{ loyaltyLedgerEntries?: Connection<LedgerEntry> | null }>({
+            loyaltyLedgerEntries: {
+              __args: {
+                filter: { customerId: { eq: recordId } },
+                first: LOYALTY_BALANCE_PAGE_SIZE,
+                ...(after ? { after } : {}),
+              },
+              edges: { node: { id: true, entryType: true, amount: true, occurredAt: true, reason: true } },
+              pageInfo: { hasNextPage: true, endCursor: true },
+            },
+          });
+          const connection = ledgerResult.loyaltyLedgerEntries;
+          return {
+            nodes: loyaltyLedgerNodes(connection),
+            hasNextPage: connection?.pageInfo?.hasNextPage ?? false,
+            endCursor: connection?.pageInfo?.endCursor ?? null,
+          };
         });
-        setLedger(nodes(ledgerResult.loyaltyLedgerEntries));
+        setLedger(entries);
         setLoyaltyStatus('ready');
       } catch (loyaltyFailure) {
         setLoyaltyError(loyaltyFailure instanceof Error ? loyaltyFailure.message : 'Не удалось загрузить операции лояльности.');
@@ -352,7 +371,7 @@ const Customer360 = () => {
   const reservationsList = [...reservations].sort((a, b) => String(b.reservationTime).localeCompare(String(a.reservationTime)));
   const ledgerList = [...ledger].sort((a, b) => String(b.occurredAt).localeCompare(String(a.occurredAt)));
   const balance = loyaltyStatus === 'ready'
-    ? ledgerList.reduce((sum, entry) => sum + (Number.isInteger(entry.amount) ? Number(entry.amount) : 0), 0)
+    ? computeLoyaltyBalance(ledgerList)
     : null;
   const title = [customer.name?.firstName, customer.name?.lastName].filter(Boolean).join(' ') || 'Клиент';
 
