@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  TWENTY_VERSION: latest
+  TWENTY_VERSION: v2.29.0
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -25,7 +25,7 @@ jobs:
 
       - name: Spawn Twenty test instance
         id: twenty
-        uses: twentyhq/twenty/.github/actions/spawn-twenty-app-dev-test@main
+        uses: twentyhq/twenty/.github/actions/spawn-twenty-app-dev-test@80fb91c033dfd367f17ba58e2095526faa016e70
         with:
           twenty-version: ${{ env.TWENTY_VERSION }}
 
