@@ -3,10 +3,11 @@ import { defineLogicFunction } from 'twenty-sdk/define';
 import type {
   DatabaseEventPayload,
   ObjectRecordCreateEvent,
+  ObjectRecordUpdateEvent,
 } from 'twenty-sdk/logic-function';
 
 import { MAINTAIN_LAST_ACTIVITY_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
-import { mergeLastActivityAt } from 'src/utils/last-activity.util';
+import { normalizeActivityTimestamp } from 'src/utils/last-activity.util';
 
 type OrderRecord = {
   id?: string;
@@ -14,59 +15,76 @@ type OrderRecord = {
   createdAt?: string | null;
 };
 
-type OrderEvent = DatabaseEventPayload<ObjectRecordCreateEvent<OrderRecord>>;
+type OrderEvent = DatabaseEventPayload<
+  ObjectRecordCreateEvent<OrderRecord> | ObjectRecordUpdateEvent<OrderRecord>
+>;
 
 type CoreApiClientLike = {
-  query: (query: unknown) => Promise<unknown>;
   mutation: (mutation: unknown) => Promise<unknown>;
 };
+
+type MaintainedResult = { updated: boolean; lastActivityAt: string | null };
 
 const asClient = (): CoreApiClientLike =>
   new CoreApiClient() as unknown as CoreApiClientLike;
 
-const findCustomer = async (
+// Each call is a single guarded conditional mutation: the server evaluates the
+// filter as the WHERE clause of one UPDATE statement, so the stored value only
+// changes when the guard holds atomically (see the readiness experiment in
+// docs/QA.md). Two guards cover the two possible stored states.
+const guardedUpdate = async (
   client: CoreApiClientLike,
-  customerId: string,
-): Promise<{ id: string; lastActivityAt?: string | null } | null> => {
-  const result = (await client.query({
-    people: {
-      __args: { filter: { id: { eq: customerId } }, first: 1 },
-      edges: { node: { id: true, lastActivityAt: true } },
+  filter: Record<string, unknown>,
+  candidate: string,
+): Promise<number> => {
+  const result = (await client.mutation({
+    updatePeople: {
+      __args: { filter, data: { lastActivityAt: candidate } },
+      id: true,
     },
-  })) as {
-    people?: {
-      edges?: Array<{ node?: { id: string; lastActivityAt?: string | null } | null } | null>;
-    };
-  };
+  })) as { updatePeople?: Array<{ id: string }> };
 
-  return result.people?.edges?.[0]?.node ?? null;
+  return result.updatePeople?.length ?? 0;
 };
 
 export const maintainLastActivity = async (
   client: CoreApiClientLike,
   customerId: string,
-  activityAt: string,
-): Promise<{ updated: boolean; lastActivityAt: string | null }> => {
-  const customer = await findCustomer(client, customerId);
+  activityAt: string | Date,
+): Promise<MaintainedResult> => {
+  const candidate = normalizeActivityTimestamp(activityAt);
 
-  if (!customer) {
+  if (candidate === null) {
     return { updated: false, lastActivityAt: null };
   }
 
-  const merged = mergeLastActivityAt(customer.lastActivityAt ?? null, activityAt);
+  const idFilter = { id: { eq: customerId } };
 
-  if (merged === (customer.lastActivityAt ?? null)) {
-    return { updated: false, lastActivityAt: merged };
+  // First write: only proceeds while the stored value is still NULL.
+  const nullSet = await guardedUpdate(
+    client,
+    { ...idFilter, lastActivityAt: { is: 'NULL' } },
+    candidate,
+  );
+
+  if (nullSet > 0) {
+    return { updated: true, lastActivityAt: candidate };
   }
 
-  await client.mutation({
-    updatePerson: {
-      __args: { id: customerId, data: { lastActivityAt: merged } },
-      id: true,
-    },
-  });
+  // Bump: only proceeds while the stored value is strictly older.
+  const bumped = await guardedUpdate(
+    client,
+    { ...idFilter, lastActivityAt: { lt: candidate } },
+    candidate,
+  );
 
-  return { updated: true, lastActivityAt: merged };
+  if (bumped > 0) {
+    return { updated: true, lastActivityAt: candidate };
+  }
+
+  // The customer is missing or an equal/newer value is already stored; a
+  // concurrent newer write must never be overwritten (no lost update).
+  return { updated: false, lastActivityAt: null };
 };
 
 const handler = async (event: OrderEvent): Promise<void> => {
@@ -94,8 +112,8 @@ export default defineLogicFunction({
   handler,
   databaseEventTriggerSettings: {
     eventName: 'order.*',
-    // Only creation (and the rare creation-timestamp repair) should bump
-    // activity; unrelated order edits must not re-fire maintenance.
-    updatedFields: ['createdAt'],
+    // Creation always fires; creation timestamps are immutable, so the only
+    // update that carries a maintenance signal is a late customer assignment.
+    updatedFields: ['createdAt', 'customerId'],
   },
 });

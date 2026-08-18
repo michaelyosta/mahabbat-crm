@@ -2,172 +2,137 @@ import { describe, expect, it } from 'vitest';
 
 import { maintainLastActivity } from 'src/logic-functions/maintain-last-activity.logic-function';
 
-type Person = { id: string; lastActivityAt?: string | null };
+type PersonStore = { lastActivityAt: string | null } | null;
 
-type FakeClient = {
-  people: Person[] | null;
-  queries: number;
-  mutations: Array<{ id: string; data: { lastActivityAt: string } }>;
-  query: (query: unknown) => Promise<unknown>;
-  mutation: (query: unknown) => Promise<unknown>;
+type GuardMutationArgs = {
+  updatePeople?: {
+    __args?: {
+      filter?: {
+        id?: { eq?: string };
+        lastActivityAt?: Record<string, unknown>;
+      };
+      data?: { lastActivityAt?: string };
+    };
+  };
 };
 
-const makeClient = (contact: Person | null): FakeClient => {
-  const client: FakeClient = {
-    people: contact ? [contact] : null,
-    queries: 0,
-    mutations: [],
-    query: async (query) => {
-      client.queries += 1;
-      if (!client.people) {
-        return {
-          people: { edges: [] },
-        };
+// Models the server-side guarded conditional update: filter evaluation and the
+// value set happen in one synchronous slice (single SQL UPDATE), which is why a
+// concurrent older candidate can never overwrite a newer stored value.
+const makeClient = (customerId: string, store: PersonStore) => {
+  const client = {
+    customerId,
+    store,
+    operations: 0,
+    writes: 0,
+    mutation: async (mutation: unknown): Promise<unknown> => {
+      client.operations += 1;
+      const args = (mutation as GuardMutationArgs).updatePeople?.__args;
+      if (!args) return { updatePeople: [] };
+
+      const filter = args.filter ?? {};
+      const idEq = filter.id?.eq;
+      const isNull = filter.lastActivityAt?.is as 'NULL' | undefined;
+      const lt = filter.lastActivityAt?.lt as string | undefined;
+      const candidate = args.data?.lastActivityAt;
+
+      if (client.store === null) return { updatePeople: [] };
+      if (idEq !== undefined && client.customerId !== idEq) {
+        return { updatePeople: [] };
       }
-      const args = (query as {
-        people?: { __args?: { filter?: { id?: { eq?: string } } } };
-      }).people?.__args;
-      const requestedId = args?.filter?.id?.eq;
-      if (requestedId !== undefined && client.people[0].id !== requestedId) {
-        return {
-          people: { edges: [] },
-        };
+
+      let match = false;
+      if (isNull === 'NULL') {
+        match = client.store.lastActivityAt === null;
+      } else if (typeof lt === 'string') {
+        const current = client.store.lastActivityAt;
+        match = current !== null && Date.parse(current) < Date.parse(lt);
       }
-      return {
-        people: {
-          edges: [{ node: client.people[0] }],
-        },
-      };
-    },
-    mutation: async (query) => {
-      const args = (query as { updatePerson?: { __args?: { id: string; data: { lastActivityAt: string } } } })
-        .updatePerson?.__args;
-      if (!args) return { updatePerson: { id: undefined } };
-      client.mutations.push({ id: args.id, data: args.data });
-      return { updatePerson: { id: args.id } };
+
+      if (!match) return { updatePeople: [] };
+
+      client.writes += 1;
+      client.store.lastActivityAt = candidate ?? null;
+      return { updatePeople: [{ id: client.customerId }] };
     },
   };
   return client;
 };
 
-describe('maintainLastActivity', () => {
+const T = (day: number) =>
+  new Date(Date.UTC(2026, 7, day, 10, 0, 0)).toISOString();
+
+describe('maintainLastActivity (guarded conditional update)', () => {
+  it('writes the candidate when the stored value is NULL', async () => {
+    const client = makeClient('customer-1', { lastActivityAt: null });
+    const result = await maintainLastActivity(client, 'customer-1', T(10));
+
+    expect(result).toEqual({ updated: true, lastActivityAt: T(10) });
+    expect(client.store?.lastActivityAt).toBe(T(10));
+    expect(client.writes).toBe(1);
+  });
+
   it('does not write when the customer does not exist', async () => {
-    const client = makeClient(null);
-    const result = await maintainLastActivity(
-      client,
-      'missing-customer',
-      '2026-08-10T10:00:00.000Z',
-    );
+    const client = makeClient('customer-1', null);
+    const result = await maintainLastActivity(client, 'customer-1', T(10));
 
     expect(result).toEqual({ updated: false, lastActivityAt: null });
-    expect(client.mutations).toHaveLength(0);
+    expect(client.writes).toBe(0);
   });
 
-  it('writes the activity timestamp when a customer has none', async () => {
-    const client = makeClient({ id: 'customer-1', lastActivityAt: null });
-    const result = await maintainLastActivity(
-      client,
-      'customer-1',
-      '2026-08-10T10:00:00.000Z',
+  it('never regresses an existing stored value with an earlier candidate', async () => {
+    const client = makeClient('customer-1', { lastActivityAt: T(10) });
+    const result = await maintainLastActivity(client, 'customer-1', T(1));
+
+    expect(result).toEqual({ updated: false, lastActivityAt: null });
+    expect(client.store?.lastActivityAt).toBe(T(10));
+    expect(client.writes).toBe(0);
+  });
+
+  it('advances when the candidate is strictly later', async () => {
+    const client = makeClient('customer-1', { lastActivityAt: T(10) });
+    const result = await maintainLastActivity(client, 'customer-1', T(12));
+
+    expect(result).toEqual({ updated: true, lastActivityAt: T(12) });
+    expect(client.store?.lastActivityAt).toBe(T(12));
+  });
+
+  it('does not write on an equal candidate', async () => {
+    const client = makeClient('customer-1', { lastActivityAt: T(10) });
+    const result = await maintainLastActivity(client, 'customer-1', T(10));
+
+    expect(result).toEqual({ updated: false, lastActivityAt: null });
+    expect(client.store?.lastActivityAt).toBe(T(10));
+    expect(client.writes).toBe(0);
+  });
+
+  it('never mutates on an invalid candidate', async () => {
+    const client = makeClient('customer-1', { lastActivityAt: T(10) });
+    const result = await maintainLastActivity(client, 'customer-1', 'garbage');
+
+    expect(result).toEqual({ updated: false, lastActivityAt: null });
+    expect(client.operations).toBe(0);
+  });
+
+  it('concurrent events converge to the max candidate (no lost update)', async () => {
+    const client = makeClient('customer-1', { lastActivityAt: T(1) });
+    const candidates = Array.from({ length: 12 }, (_, i) => T(i + 2));
+
+    await Promise.all(
+      candidates.map((candidate) => maintainLastActivity(client, 'customer-1', candidate)),
     );
 
-    expect(result).toEqual({
-      updated: true,
-      lastActivityAt: '2026-08-10T10:00:00.000Z',
-    });
-    expect(client.mutations).toEqual([
-      {
-        id: 'customer-1',
-        data: { lastActivityAt: '2026-08-10T10:00:00.000Z' },
-      },
-    ]);
+    expect(client.store?.lastActivityAt).toBe(T(13));
   });
 
-  it('does not regress an existing activity timestamp', async () => {
-    const client = makeClient({
-      id: 'customer-1',
-      lastActivityAt: '2026-08-10T10:00:00.000Z',
-    });
-    const result = await maintainLastActivity(
-      client,
-      'customer-1',
-      '2026-08-01T10:00:00.000Z',
+  it('older concurrent events cannot beat a newer stored value', async () => {
+    const client = makeClient('customer-1', { lastActivityAt: T(7) });
+    const candidates = [T(3), T(4), T(5), T(6), T(7), T(8), T(9)];
+
+    await Promise.all(
+      candidates.map((candidate) => maintainLastActivity(client, 'customer-1', candidate)),
     );
 
-    expect(result).toEqual({
-      updated: false,
-      lastActivityAt: '2026-08-10T10:00:00.000Z',
-    });
-    expect(client.mutations).toHaveLength(0);
-  });
-
-  it('advances when the activity timestamp is strictly later', async () => {
-    const client = makeClient({
-      id: 'customer-1',
-      lastActivityAt: '2026-08-10T10:00:00.000Z',
-    });
-    const result = await maintainLastActivity(
-      client,
-      'customer-1',
-      '2026-08-12T10:00:00.000Z',
-    );
-
-    expect(result).toEqual({
-      updated: true,
-      lastActivityAt: '2026-08-12T10:00:00.000Z',
-    });
-    expect(client.mutations).toEqual([
-      {
-        id: 'customer-1',
-        data: { lastActivityAt: '2026-08-12T10:00:00.000Z' },
-      },
-    ]);
-  });
-
-  it('does not write on an equal timestamp', async () => {
-    const client = makeClient({
-      id: 'customer-1',
-      lastActivityAt: '2026-08-10T10:00:00.000Z',
-    });
-    const result = await maintainLastActivity(
-      client,
-      'customer-1',
-      '2026-08-10T10:00:00.000Z',
-    );
-
-    expect(result).toEqual({
-      updated: false,
-      lastActivityAt: '2026-08-10T10:00:00.000Z',
-    });
-    expect(client.mutations).toHaveLength(0);
-  });
-
-  it('repairs an invalid stored timestamp with a valid candidate', async () => {
-    const client = makeClient({ id: 'customer-1', lastActivityAt: 'garbage' });
-    const result = await maintainLastActivity(
-      client,
-      'customer-1',
-      '2026-08-10T10:00:00.000Z',
-    );
-
-    expect(result).toEqual({
-      updated: true,
-      lastActivityAt: '2026-08-10T10:00:00.000Z',
-    });
-    expect(client.mutations).toEqual([
-      {
-        id: 'customer-1',
-        data: { lastActivityAt: '2026-08-10T10:00:00.000Z' },
-      },
-    ]);
-  });
-
-  it('does not clamp a null customer id', async () => {
-    const client = makeClient({ id: 'customer-1', lastActivityAt: null });
-
-    await expect(
-      maintainLastActivity(client, '', '2026-08-10T10:00:00.000Z'),
-    ).resolves.toEqual({ updated: false, lastActivityAt: null });
-    expect(client.queries).toBe(1);
+    expect(client.store?.lastActivityAt).toBe(T(9));
   });
 });

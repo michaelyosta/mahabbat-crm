@@ -7,24 +7,12 @@ export const parseActivityTimestamp = (value: unknown): number | null => {
   return Number.isFinite(time) ? time : null;
 };
 
-// Returns the candidate ISO timestamp only when it is strictly later than the
-// current value, otherwise the current value. Activity time is monotonic: it
-// never regresses, and invalid input never overwrites a valid value.
-export const mergeLastActivityAt = (
-  current: string | null | undefined,
-  candidate: string | Date,
+// Returns a valid ISO-8601 timestamp for a candidate, or null when the input
+// cannot be interpreted as a timestamp. Invalid input never reaches the store.
+export const normalizeActivityTimestamp = (
+  value: string | Date | null | undefined,
 ): string | null => {
-  const candidateTime = parseActivityTimestamp(candidate);
+  const time = value == null ? null : parseActivityTimestamp(value);
 
-  if (candidateTime === null) {
-    return current ?? null;
-  }
-
-  const currentTime = current == null ? null : parseActivityTimestamp(current);
-
-  if (currentTime !== null && candidateTime <= currentTime) {
-    return current ?? null;
-  }
-
-  return new Date(candidateTime).toISOString();
+  return time === null ? null : new Date(time).toISOString();
 };
