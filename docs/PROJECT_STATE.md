@@ -49,6 +49,40 @@
   setup, the supported native object entry plus view picker is retained for
   these views and for `Не возвращались 30 дней`/`Ближайшие бронирования`.
 
+# PRE-POS hardening (FINAL PASS)
+
+- Loyalty balance: Customer 360 computes the balance from the **full ledger**
+  via cursor pagination (`first:100` + `after`, up to 10 000 pages) instead of
+  a truncated `first:100` client-side sum. `computeLoyaltyBalance` and the
+  paginated fetch are unit-tested (14 tests).
+- Loyalty processor regression suite is executable (11 tests): happy path,
+  retry, crash recovery, tamper repair, concurrent convergence, foreign
+  idempotency rejection, invalid input, missing customer/request, terminal
+  REJECTED state and cursor fallback beyond page 1.
+- Roles: Mahabbat Staff `canDestroyObjectRecords=false` and
+  `canSoftDeleteObjectRecords=false` for Person, Order, OrderItem and
+  Reservation (7 boundary tests). Demo User stays read-only; ledger/request
+  surfaces stay non-writable.
+- `Person.lastActivityAt`: server-owned, **atomic guarded monotonic** update —
+  two single-statement conditional mutations (`is: 'NULL'` for the first write,
+  `lt: candidate` for bumps) so a concurrent older event cannot overwrite a
+  newer value (proven live on `:2020`, see `docs/QA.md`; 8 tests including
+  12-way concurrency convergence to max). Exact guarantee is recorded in
+  `docs/DECISIONS.md`.
+- CI is pinned and reproducible (`TWENTY_VERSION: v2.29.0`, Twenty composite
+  action at commit `80fb91c0`). CD binds the production URL and credential to
+  one GitHub Environment (`production`) and accepts no operator-entered URL.
+  Distribution is frozen: `publish.yml` has no tag trigger and a fail-closed
+  gate; `docs/DISTRIBUTION_DECISION.md = NOT DISTRIBUTED`.
+- Destructive integration-test setup is fail-closed (target allowlist guard,
+  11 tests). Branding overlay is fail-closed (7 tests) and fails the build when
+  a target literal is missing.
+- POS boundary is documented in `docs/POS_BOUNDARY.md` and is not implemented
+  ahead of an explicit `MAHABBAT POS DOMAIN DISCOVERY` phase.
+- Gate totals after the corrective checkpoint: `yarn lint` 0/0, `yarn typecheck`
+  clean, `yarn test:unit` 176/176, `yarn seed:demo:dry` PASS, SDK plan/apply on
+  `:2020` clean with sequential replan `No changes`.
+
 # Сейчас не работает
 
 - The private workbook remains outside Git; no aggregate line is converted into
@@ -140,6 +174,10 @@
 
 # Известные проблемы
 
+- POS, payments, fiscalisation and full restaurant operations are not
+  implemented. The expected POS model and its invariants are documented in
+  `docs/POS_BOUNDARY.md`; building them requires an explicit
+  `MAHABBAT POS DOMAIN DISCOVERY` phase.
 - Native Windows Apps SDK paths are a development-environment limitation.
   Standard development is Linux/WSL; it is not a Twenty architectural blocker.
 - Twenty v2.29.0 cannot plan a composite App index on standard Person; the

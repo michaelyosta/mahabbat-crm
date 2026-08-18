@@ -303,3 +303,88 @@
   remained empty after the relogin.
 - This checkpoint is demo-only. Stop the tunnel and remove the demo account or
   restore the recovery point after the demonstration.
+
+## Post-preliminary-pos hardening checkpoint
+
+### Corrective gate totals (C1, same base `832be7d` at `origin/main`)
+
+- `yarn lint`: 0 errors; `yarn typecheck`: pass; `yarn test:unit`: 176/176.
+- After the corrective C1 change the deterministic seed reconcile ran on
+  `:2020`: rerun reports 0 creations for every entity type (see below).
+
+### C1 last-activity atomic invariant (live evidence)
+
+- The previous read-MERGE-write maintenance was replaced by guarded,
+  single-statement `updatePeople` calls. Every write is one grouped conditional
+  UPDATE: the first write filters `lastActivityAt: { is: 'NULL' }`; each bump
+  filters `lastActivityAt: { lt: <candidate> }`. An older concurrent event
+  therefore cannot overwrite a newer stored value; monotonicity holds without a
+  Twenty core change.
+- Live readiness experiment on disposable `:2020`: 12 concurrent writers with
+  ordered candidates converged to the maximal candidate (27612 points), the
+  single surviving `lastActivityAt` was the maximum candidate, and no
+  intermediate value survived. Evidence captured in a temporary script
+  (`race-check.mjs`, outside the repository).
+- The logic function fires on Order creation and on the late
+  customer-assignment update (`updatedFields: ['createdAt', 'customerId']`);
+  unrelated Order edits do not trigger it (see `docs/DECISIONS.md`).
+
+### C6 RBAC evidence-bounded conclusion
+
+- Final persisted Mahabbat Staff object-permission rows (verified on BOTH
+  disposable `:2020` and self-hosted `:3000`; identical, manifest-aligned):
+
+| object | read | update | soft_delete | destroy |
+| --- | --- | --- | --- | --- |
+| person | t | t | f | f |
+| order | t | t | f | f |
+| orderItem | t | t | f | f |
+| reservation | t | t | f | f |
+| loyaltyLedgerEntry | t | f | f | f |
+| loyaltyAdjustmentRequest | t | f | f | f |
+
+- These rows implement the product boundary (operational records: staff may
+  read and update but may not soft-delete or destroy; adjustments and the
+  ledger are read-only). Destructive capabilities
+  (`canSoftDeleteObjectRecords`, `canDestroyObjectRecords`) are `false` for
+  every critical operational object; the configured Admin and API-key
+  principals are the only destructive contexts and are project-owned.
+- **Verified limitation (accepted, not fabricated PASS):**
+  Staff destructive permissions are verified by application manifest,
+  persisted role/object-permission rows and executable tests. Person
+  hard-destroy is additionally blocked structurally by FK `RESTRICT` when
+  related Orders exist. A live authenticated Staff-session denial could not be
+  exercised because Twenty v2.29.0 exposes no supported headless path in these
+  environments to obtain a non-admin user session; API-key authentication
+  behaves as workspace admin and is therefore not valid RBAC evidence.
+- The live probe on `:2020` confirmed the API-key principal executes with
+  workspace-admin capabilities even when its `roleTarget` is rebound to the
+  App-function role, so runtime RBAC enforcement is not exercisable through
+  the API key path. The FK `RESTRICT` finding is an additional structural
+  safeguard, not a substitute for role enforcement.
+- The seeded `staff@local.test` user for the disposable `:2020` cannot be
+  exercised end-to-end because the login/password-reset mutations are not
+  mounted in the product GraphQL surface of these environments (probed
+  `signIn`, `login`, `signInWithCredentials`, `verifyEmailAndGetLoginToken`,
+  `generateApiKeyToken` on both targets; `/admin-panel/graphql` and
+  `/metadata/graphql` return 404). See `docs/TWENTY_GAPS.md`.
+
+### Disposable `:2020` probe side-effect log and reconciliation
+
+- Runtime RBAC probe (`runtime-denial.mjs`, outside the repository) executed as
+  the workspace-admin API key: `deletePerson` soft-deleted Person
+  `0b0271e8-43ad-4530-8584-c8d39c5488df` (restored immediately via
+  `restorePerson`, idempotent) and `destroyOrder` hard-destroyed two seeded
+  demo orders `065f61cc-0170-4139-b734-a402f3c278eb` and
+  `0c29c1e8-84c1-4d0f-9d1b-f0bb2cd0d4f7` together with their OrderItems
+  (verified cascade: 0 orphan OrderItems remained).
+- The API key's `roleTarget` was temporarily rebound to the App-function role
+  and restored to the original admin role (`89e7cf1c-…` -> restore finished);
+  the soft-deleted Person was restored; no other workspace record changed.
+- Baseline reconciliation after the probe: `yarn seed:demo` against `:2020`
+  recreated exactly the 2 destroyed demo Orders and 4 OrderItems (Order count
+  returned to the documented 74, OrderItems to 144, 0 orphan items), and the
+  immediate rerun reported 0 creations for every entity type (1232 People,
+  74 Orders, 144 OrderItems, 13 Reservations, 57 ledger entries all skipped).
+  The accidental probe mutations therefore did not leave `:2020` in a silently
+  altered baseline.

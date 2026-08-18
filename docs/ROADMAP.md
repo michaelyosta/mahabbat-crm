@@ -69,3 +69,18 @@ temporary handoff and wait for the user's decision on the next phase.
   recovery point outside Git, configure the self-hosted server for the
   temporary HTTPS origin and complete the external-browser route smoke. See
   `docs/EXTERNAL_DEMO.md`.
+
+- [x] PRE-POS HARDENING (H1–H10) plus the final corrective checkpoint
+  (C1–C7): full-ledger loyalty balance, executable processor regressions, Staff
+  destroy revocation, concurrency-safe `lastActivityAt`, pinned/reproducible
+  CI, environment-owned CD, frozen distribution, fail-closed test setup and
+  branding overlay, aligned source-of-truth docs and documented POS boundary.
+  Status: **FINAL PASS** — see `docs/PRE-POS-CHECKLIST.md`.
+
+## NEXT
+
+- `MAHABBAT POS DOMAIN DISCOVERY` — operational phase: define POS order
+  identity, zones/tables, payments/fiscalisation and server-command invariants
+  against `docs/POS_BOUNDARY.md`. This is **domain discovery**, not an
+  implementation sprint; it starts only on an explicit
+  `MAHABBAT POS DOMAIN DISCOVERY` prompt.

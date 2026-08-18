@@ -16,10 +16,13 @@
 The exact compose path and branding overlay are examples under `deploy/`;
 Twenty's upstream compose file is not copied into this repository.
 
-The repository's deployment workflow is manual (`workflow_dispatch`) and
-requires an explicitly supplied target URL plus the GitHub secret
-`TWENTY_DEPLOY_API_KEY`. It does not auto-deploy on push and should never be
-pointed at production without a separate approval/checkpoint.
+The repository's deployment workflow is manual (`workflow_dispatch`) and is
+driven by the `production` GitHub Environment: the deploy target
+(`TWENTY_DEPLOY_URL` environment variable) and the deploy credential
+(`TWENTY_DEPLOY_API_KEY` secret) belong to that environment, and the run fails
+closed until `TWENTY_DEPLOY_URL` is set. No operator-entered URL is accepted.
+It does not auto-deploy on push and should never be pointed at production
+without a separate approval/checkpoint.
 
 ## Shutdown and restart
 
@@ -111,3 +114,32 @@ secrets review and recovery point.
   path recover it.
 - **Lost encryption key:** stop and recover from the matching private runtime
   secret/recovery point; do not replace it casually for an existing database.
+
+## SDK v2.29.0 objectPermission reconciliation gap (runbook)
+
+Twenty `twenty-sdk@2.29.0` installs and updates role/object metadata but does
+**not** reconciliate persisted `objectPermission` rows for existing roles on a
+live workspace: a fresh install creates them from the manifest, while `plan`
+and `apply` on an already-installed workspace leave pre-existing permission rows
+alone (`apply` reports "No changes"). A role manifest change is therefore not
+enough to converge an existing workspace.
+
+This was hit once on self-hosted `:3000`: stale pre-manifest rows allowed
+Mahabbat Staff to `canDestroyObjectRecords` for person/order/orderItem/
+reservation. A one-off corrective run was applied (documented in
+`docs/QA.md`), the rows were rewritten to the manifest values, and a follow-up
+`twenty apply` confirmed "No changes" for metadata. After such a manual
+corrective edge, re-verify against the manifest and keep the corrective SQL
+outside the application codebase:
+
+1. Confirm the current role id and the six critical
+   object rows (`canReadObjectRecords`, `canUpdateObjectRecords`,
+   `canSoftDeleteObjectRecords`, `canDestroyObjectRecords`).
+2. Delete the stale rows for the affected role, re-run `yarn twenty apply`
+   (function/object flags re-sync), then re-insert the rows with the exact
+   manifest flags.
+3. Compare with `src/roles/mahabbat-staff.role.ts` and the table in
+   `docs/QA.md`; a subsequent `plan` must show no metadata drift.
+
+This is a v2.29.0 platform limitation (see `docs/TWENTY_GAPS.md`), not a
+Mahabbat core change; re-evaluate on a future Twenty upgrade.

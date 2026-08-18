@@ -33,3 +33,31 @@ The first Dashboard is also an App extension: a native standalone page layout
 with graph widgets. Historical widgets read `SalesSnapshotLine`, while order
 totals and status counts read `Order`; the dashboard does not merge these
 datasets into a synthetic operational history.
+
+## PRE-POS hardening state
+
+- Loyalty balance in Customer 360 is computed from the **full ledger** through
+  cursor pagination (`first:100` + `after`), not from a truncated first page;
+  the ledger remains the source of truth.
+- `Person.lastActivityAt` is maintained by a server-side logic function using
+  **atomic guarded conditional updates** (`updatePeople` with
+  `lastActivityAt: { is: 'NULL' }` / `{ lt: candidate }` filters — single-statement
+  `UPDATE ... WHERE`). Stored activity can only move forward; concurrent older
+  events cannot overwrite a newer value. See `docs/QA.md` for the live race
+  experiment and `docs/DECISIONS.md` for its exact semantics.
+- Mahabbat Staff cannot soft-delete or destroy Person, Order, OrderItem or
+  Reservation records; ledger/request surfaces remain read-only for Staff.
+- CI is pinned (`TWENTY_VERSION: v2.29.0`, Twenty action at a fixed commit).
+  CD binds the production URL and credential to one GitHub Environment; no
+  operator-entered URL is accepted. npm distribution is frozen by a fail-closed
+  workflow gate (see `docs/DISTRIBUTION_DECISION.md`).
+- Destructive integration-test setup is fail-closed (disposable-target
+  allowlist), and the branding overlay fails the build when a target literal is
+  missing.
+
+## POS boundary
+
+The foundation does not implement POS entities or operations. The expected POS
+model (order identity, zones/tables, payments, fiscalisation, server commands)
+and its invariants are documented in `docs/POS_BOUNDARY.md`; they are not built
+before an explicit `MAHABBAT POS DOMAIN DISCOVERY` phase.

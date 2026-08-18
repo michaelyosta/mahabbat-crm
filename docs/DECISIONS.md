@@ -230,3 +230,60 @@ The upstream social-card image is intentionally removed so link previews do
 not identify the product as Twenty. Internal package names and non-demo-only
 legal/auth/404 copy remain unchanged until an app-owned asset or a separately
 bounded copy pass is justified.
+
+## 2026-08-18 — lastActivityAt semantics and atomic maintenance
+
+CURRENT SEMANTICS: `Person.lastActivityAt` is the time of the customer's most
+recent **Order creation** recorded in Mahabbat, derived from `Order.createdAt`
+for the customer currently linked to the Order. It is a server-maintained
+recency proxy for the `Не возвращались 30 дней` segment, not a confirmed-visit
+or paid-order event. It is monotonic by construction: stored activity can never
+move backwards. A cancelled, historical/imported or later-reassigned order still
+counts as creation-time activity and never regresses the segment.
+
+TARGET POS SEMANTICS (requirement for the future POS phase): an authoritative
+activity event should be a **completed/confirmed order or confirmed visit** at
+the POS stage, decided as part of POS domain discovery, not here. Until then the
+CRM guarantees only order-creation recency.
+
+INSERT-INTO: the maintenance handler fires on Order creation and on a late
+customer-assignment update (`updatedFields: ['createdAt', 'customerId']`), so an
+Order created without a customer and linked later bumps the newly assigned
+customer with the Order's creation time (bounded; the monitor stays monotonic).
+The trigger deliberately does not fire on unrelated Order edits.
+
+CONCURRENCY GUARANTEE: monotonicity is enforced atomically, without a Twenty
+core change, by guarded conditional updates on the supported Apps API. Each
+write is a single-statement `updatePeople` whose filter (
+`lastActivityAt: { is: 'NULL' }` for the first write; `lastActivityAt: { lt:
+candidate }` for bumps) is the WHERE clause of one `UPDATE`, so an older
+concurrent event cannot overwrite a newer stored value. The live readiness
+experiment on `:2020` (12 concurrent writers, ordered candidates) converged to
+the maximal candidate; see `docs/QA.md`.
+
+## 2026-08-18 — CD target belongs to its environment
+
+The `production` GitHub Environment owns both the deploy target (`TWENTY_DEPLOY_URL`
+environment variable) and the deploy credential (`TWENTY_DEPLOY_API_KEY` secret).
+The CD workflow accepts no operator-entered URL, so an environment-scoped
+production secret can never be directed at an arbitrary host after approval.
+Because no real production target exists yet, the workflow stays safely
+unusable (guard step fails) until the environment defines `TWENTY_DEPLOY_URL`.
+
+## 2026-08-18 — Distribution frozen
+
+The app is `NOT DISTRIBUTED` (authoritative record:
+`docs/DISTRIBUTION_DECISION.md`, owned by the product owner). `publish.yml` has
+no automatic tag trigger and enforces a fail-closed distribution gate committed
+in the workflow source; a version tag cannot enable publication. Enabling
+distribution requires a deliberate PR that flips the gate AND updates the
+decision record. No npm artifact is published by this repository.
+
+## 2026-08-18 — CRM/POS boundary
+
+The Backoffice Foundation does not implement POS entities (zones/tables,
+payments, fiscalisation, shifts, menu/stop-list, POS orders) or POS UI. The
+expected POS model and its invariants (order identity, server commands, money
+only as CURRENCY, idempotency, no destruction of operational records) are
+recorded in `docs/POS_BOUNDARY.md`. POS is a future operational phase (domain
+discovery first), not a permanent exclusion and not a current implementation.

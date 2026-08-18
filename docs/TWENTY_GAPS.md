@@ -72,4 +72,33 @@ timeline events without a workspace member still show "Twenty" as the system
 author, and the import preview badge still renders
 `/images/integrations/twenty-logo.svg`. The favicon can already be replaced
 through workspace metadata by uploading a Mahabbat logo in Settings; the other
-residuals need app-owned copy/icon assets or a broader upstream copy patch.
+  residuals need app-owned copy/icon assets or a broader upstream copy patch.
+
+## SDK does not reconciliate objectPermissions for existing roles (v2.29.0)
+
+`twenty-sdk@2.29.0` resolves manifest role/object metadata for a **fresh
+install** but a `plan`/`apply` cycle on an existing workspace leaves persisted
+`core.objectPermission` rows untouched, so a role manifest change does not
+converge a live install. This is the reason a stale self-hosted `:3000` role
+once allowed Mahabbat Staff to destroy records until a documented corrective SQL
+run rewrote the rows to the manifest values (`docs/OPERATIONS.md` runbook,
+`docs/QA.md`). Platform limitation, not a Mahabbat core change; re-evaluate on a
+future Twenty upgrade.
+
+## RBAC live-session verification gap (v2.29.0 headless, app-mode)
+
+In these environments the product `/graphql` surface serves only the app/core
+schema from the server build with the core AuthResolver module **not mounted**:
+none of `signIn`, `signInWithCredentials`, `login`, `verifyEmailAndGetLoginToken`,
+`generateApiKeyToken` is reachable, and `/admin-panel/graphql` and
+`/metadata/graphql` return 404 on self-hosted `:3000`. A real non-admin user
+session therefore cannot be minted through any supported headless product path.
+API-key authentication executes with workspace-admin capabilities in this build
+(verified live on `:2020` even when the key's `roleTarget` is rebound to a
+restricted role), so it is not valid evidence for role-RBAC behavior. The Staff
+destructive deny is verified at the manifest, persisted-permission-row and
+executable-test level plus an FK `RESTRICT` structural safeguard for Person with
+related Orders; a live Staff-context runtime denial remains a documented
+verification limitation, not fabricated PASS evidence. Re-evaluate on a future
+Twenty upgrade or when the core AuthResolver module is mounted in the App server
+build.
