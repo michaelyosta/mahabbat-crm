@@ -102,3 +102,14 @@ related Orders; a live Staff-context runtime denial remains a documented
 verification limitation, not fabricated PASS evidence. Re-evaluate on a future
 Twenty upgrade or when the core AuthResolver module is mounted in the App server
 build.
+
+## REST cursor pagination does not advance beyond one page (v2.29.0)
+
+`GET /rest/<object>?limit=N&starting_after=<cursor>` in self-hosted v2.29.0 does
+not advance across pages once a collection exceeds `N` (the same `endCursor` is
+returned and `hasNextPage` stays true). Collections below one page behave
+normally, which is why the deterministic seed loop worked earlier. The product
+front end uses GraphQL cursor pagination which is implemented correctly, and
+Mahabbat reads today stay within supported sizes; for large REST reads use
+GraphQL pagination or page with filters until a Twenty upgrade fixes the REST
+cursor.

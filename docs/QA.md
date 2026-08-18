@@ -388,3 +388,62 @@
   74 Orders, 144 OrderItems, 13 Reservations, 57 ledger entries all skipped).
   The accidental probe mutations therefore did not leave `:2020` in a silently
   altered baseline.
+
+### C5 large-ledger Customer 360 correctness
+
+- Disposable `:2020` only: a synthetic Customer (`HARDENING C5`,
+  externalIdentityKey `HARDENING::MAHABBAT-C5-SYNTHETIC`) was created and 120
+  ledger entries were loaded through the real `/rest/batch/loyaltyLedgerEntries`
+  path (100 `EARN` of `+10`, 20 `REDEEM` of `-5`; unique
+  customer+occurredAt+reason and idempotency-compatible keys, respecting the
+  persisted unique indexes).
+- The app-equivalent of the Customer 360 balance read (cursor-paginated
+  `loyaltyLedgerEntries` filtered by `customerId`, the same pagination the
+  front component uses for relations) returned **n=120, sum=900** on two full
+  passes; the balance is the complete ledger sum and reload-stable. PostgreSQL
+  cross-check: 120 rows, `sum(amount)=900`, matching the API exactly.
+- The fixture is disposable and confined to `:2020`; `:3000` was not seeded.
+- Platform note surfaced during the check: `GET /rest/<object>` cursor
+  pagination (`starting_after`) does not advance in this build once the
+  collection exceeds one page, so the REST read path is not safe for >100-row
+  reads; the GraphQL cursor pagination used by the product is sound. Recorded
+  in `docs/TWENTY_GAPS.md`.
+
+### C7 workflow static verification
+
+- `ci.yml`: triggers only `push: main` and `pull_request` — no tag trigger;
+  `permissions: contents: read`; `TWENTY_VERSION: v2.29.0`; `actions/checkout@v4`,
+  `actions/setup-node@v4` and the Twenty action pinned to
+  `80fb91c033dfd367f17ba58e2095526faa016e70`; runs lint, typecheck, unit tests
+  and the disposable-instance integration suite (`yarn test` is safe there
+  because it spawns its own App target, unlike a dev workstation).
+- `cd.yml`: `workflow_dispatch` only; runs on the `production` GitHub
+  Environment; the guard step fails unless the environment owns
+  `TWENTY_DEPLOY_URL`; deploy/install use `vars.TWENTY_DEPLOY_URL` +
+  `secrets.TWENTY_DEPLOY_API_KEY` (no operator-entered URL); Twenty actions
+  pinned to `80fb91c033dfd367f17ba58e2095526faa016e70`. No production target is
+  configured, so the job remains unusable by construction.
+- `publish.yml`: `workflow_dispatch` only with a required `release_version`
+  input; no automatic tag/push trigger; `DISTRIBUTION_ENABLED: 'false'`
+  fail-closed gate committed in the workflow; a version tag cannot enable
+  publication; `npm@11.5.1` pinned; version gate compares `package.json` to the
+  requested release. Distribution remains `NOT DISTRIBUTED`
+  (`docs/DISTRIBUTION_DECISION.md`).
+
+### Final convergence and smoke
+
+- Linux Node 24 + `twenty-sdk@2.29.0` against disposable `:2020`: sequential
+  `plan` -> `No changes`, `apply` -> "No changes. Twenty metadata matches your
+  manifest." + "Synced Mahabbat CRM (14 files)", replan -> `No changes`.
+  Metadata is fully converged with the repository manifest.
+- Contract checks after the corrective pass: `yarn lint` 0/0, `yarn typecheck`
+  pass, `yarn test:unit` 176/176 (including the 7 `roles-permission-boundary`
+  contract tests), `yarn seed:demo:dry` valid + no records sent. The live
+  integration suite (`yarn test`) is covered in CI against the spawned
+  disposable App instance and is intentionally not run on a workstation (it
+  installs/uninstalls an App; documented above).
+- Bounded smoke, safe: `:2020/healthz` 200, `:3000/healthz` 200, both roots
+  serve 200. On `:2020` a third full cursor-paginated Customer 360 read of the
+  C5 persona returned rows=120, sum=900 (reload-stable, matching the two
+  earlier passes and the PostgreSQL `sum(amount)=900`). `:3000` was not written
+  and its seeded `staff@local.test`/demo fixtures were left untouched.
