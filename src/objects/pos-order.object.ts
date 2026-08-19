@@ -36,10 +36,20 @@ export const POS_ORDER_KITCHEN_TICKETS_FIELD_UNIVERSAL_IDENTIFIER =
   'f1e6d6a2-7b63-4c9a-8d21-1e5f4a6b7c80';
 export const POS_ORDER_PRECHECKS_FIELD_UNIVERSAL_IDENTIFIER =
   'a2b3c4d5-e6f7-4890-8123-456789abcdef';
+export const POS_ORDER_PAID_TOTAL_FIELD_UNIVERSAL_IDENTIFIER =
+  '8a4d7f10-2b3c-4d5e-8f60-1234567890d0';
+export const POS_ORDER_PAYMENTS_FIELD_UNIVERSAL_IDENTIFIER =
+  '8a4d7f10-2b3c-4d5e-8f60-1234567890d1';
+export const POS_ORDER_CLOSED_BY_STAFF_ID_FIELD_UNIVERSAL_IDENTIFIER =
+  '8a4d7f10-2b3c-4d5e-8f60-1234567890d2';
+export const POS_ORDER_CLOSE_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER =
+  '8a4d7f10-2b3c-4d5e-8f60-1234567890d3';
 export const POS_ORDER_UNIQUE_TABLE_CLAIM_INDEX_UNIVERSAL_IDENTIFIER =
   '20629f11-1305-4671-b7f7-0ddd4028afd6';
 export const POS_ORDER_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
   '5b54a079-10c4-43fa-9635-466219e19c20';
+export const POS_ORDER_UNIQUE_CLOSE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
+  '8a4d7f10-2b3c-4d5e-8f60-1234567890d4';
 
 export default defineObject({
   universalIdentifier: POS_ORDER_UNIVERSAL_IDENTIFIER,
@@ -258,6 +268,17 @@ export default defineObject({
       defaultValue: null,
     },
     {
+      universalIdentifier: POS_ORDER_PAID_TOTAL_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.CURRENCY,
+      name: 'paidTotal',
+      label: 'Оплачено',
+      description: 'Server-owned сумма успешных POS платежей',
+      icon: 'IconCashBanknotes',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
+    },
+    {
       universalIdentifier: POS_ORDER_NOTES_FIELD_UNIVERSAL_IDENTIFIER,
       type: FieldType.TEXT,
       name: 'notes',
@@ -295,6 +316,43 @@ export default defineObject({
       relationTargetFieldMetadataUniversalIdentifier:
         '9e3c4f56-7a89-4f01-8123-456789abcdf1',
       universalSettings: { relationType: RelationType.ONE_TO_MANY },
+    },
+    {
+      universalIdentifier: POS_ORDER_PAYMENTS_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'payments',
+      label: 'Платежи',
+      description: 'История controlled POS платежей',
+      icon: 'IconReceipt',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890c1',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890c3',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
+    },
+    {
+      universalIdentifier:
+        POS_ORDER_CLOSED_BY_STAFF_ID_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'closedByStaffId',
+      label: 'Закрыл',
+      description: 'Actor из PosSession при closeOrder',
+      icon: 'IconUserCheck',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
+    },
+    {
+      universalIdentifier:
+        POS_ORDER_CLOSE_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'closeIdempotencyKey',
+      label: 'Ключ закрытия',
+      description: 'Server-owned retry-safe closeOrder key',
+      icon: 'IconRepeat',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
     },
   ],
 });

@@ -1,6 +1,6 @@
 # Mahabbat POS — Domain
 
-Слой документации и контрактов POS. Реализованы **Slice 1** (Shift → Table → Order → Guests → Lines), **Slice 2** (Stop List + Kitchen Tickets) и **Slice 3** (Precheck + Order Lock) через server-side command boundary. Слайсы 4–6 остаются отдельными bounded slices.
+Слой документации и контрактов POS. Реализованы **Slice 1** (Shift → Table → Order → Guests → Lines), **Slice 2** (Stop List + Kitchen Tickets), **Slice 3** (Precheck + Order Lock) и **Slice 4** (Payments + Close) через server-side command boundary. Слайсы 5–6 остаются отдельными bounded slices.
 
 ## Граница (ADR-2026-08-POS-1)
 
@@ -111,8 +111,13 @@ POS — **отдельный операционный слой** на собст
   возвращает заказ в `IN_PROGRESS`; retry/crash recovery не создаёт второй
   snapshot.
 
-### 11–16. Future (задокументированы, не реализованы)
-- **PaymentMethod** / **Payment** (слайс 4): конфигурируемые методы (Cash/Card база; Kaspi/Halyk/Freedom — не хардкодить), платежи, remaining=0 ⇒ close.
+### 11. PosPaymentMethod / PosPayment — Slice 4 РЕАЛИЗОВАН
+- `PosPaymentMethod`: `name`, `methodType` (`CASH|CARD|OTHER`), `isActive`, `sortOrder`; seed создаёт Наличные и Карту, но домен не хардкодит банки.
+- `PosPayment`: `order`, `paymentMethod`, `amount`, `status` (`PENDING|SUCCESS|REJECTED`), actor и method snapshots, `orderPaidTotalBefore`, `appliedToOrder`, unique `idempotencyKey` и per-order `lockKey`.
+- `recordPayment` принимает только положительные целые micros на `PRECHECK_PRINTED`, сервер повторно считает remaining и отклоняет overpayment. Один pending payment сериализует concurrent writes; retry после crash завершает ровно одну запись.
+- `closeOrder` разрешён только при remaining = 0, guarded `updatePosOrders` переводит заказ в `CLOSED`, записывает actor/time и освобождает table claim. Payment records immutable для operational UI; физический refund/void пока не реализован.
+
+### 12–16. Future (задокументированы, не реализованы)
 - **Reservation** (слайс 5): все поля optional, протухшие NOT auto-deleted, negative-timer UI.
 - **Prepayment** (слайс 5): авто-применяется к remaining, не скидка.
 - **OperationalEvent** (аудит): append-only журнал критичных действий.
@@ -135,3 +140,15 @@ order/guest/menu/quantity/creator для Line). Повтор с изменённ
 - Один активный заказ на стол: UNIQUE(`tableId`, `claimToken`), `claimToken`=tableId пока открыт.
 - Повторная сеть-команда: idempotency unique.
 - `changeLineQuantity` last-write-wins (безопасно: безусловно меняет количество; документированное допущение слайса 1).
+
+## Идемпотентность и деньги (слайс 4)
+- `PosPayment.idempotencyKey` уникален и проверяется вместе с order, method,
+  amount и authenticated actor; foreign reuse возвращает конфликт.
+- `PosPayment.lockKey = orderId` существует только у одного `PENDING` payment,
+  поэтому два терминала получают один успешный semantic result либо честный
+  `PAYMENT_IN_PROGRESS`, после чего обычный retry re-reads победителя.
+- `PosOrder.paidTotal` — server-owned aggregate успешных платежей. Он меняется
+  guarded bulk update по id/status/текущему paidTotal; `remaining = total -
+  paidTotal`, переплата и close при ненулевом остатке отклоняются.
+- `PaymentMethod` snapshots сохраняются в payment и не позволяют изменению
+  настройки метода задним числом переписать историю.

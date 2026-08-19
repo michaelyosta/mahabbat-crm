@@ -342,6 +342,23 @@ distinct from the authenticated actor.
 Twenty v2.29.0 reserves the persisted field name `role` in this App metadata
 path. The storage fields therefore use `staffRole`; the in-process authenticated
 context still exposes the domain property `role`.
+
+## 2026-08-19 — ADR-2026-08-POS-4: server-authoritative payments and close
+
+POS payment state is separate from the CRM `Order.paymentMethod`. Configurable
+`PosPaymentMethod` records support CASH/CARD/OTHER, while immutable `PosPayment`
+records snapshot method/amount/actor and carry a unique idempotency key. Only
+successful controlled commands advance `PosOrder.paidTotal`; the resolver
+rejects overpayment and never trusts a client total. A unique per-order pending
+lock serializes concurrent terminals and allows retry repair after an aggregate
+update but before payment finalization.
+
+`closeOrder` is a controlled command, not a generic status edit: it requires a
+printed precheck, no pending payment and server-calculated remaining `0`, then
+uses a guarded bulk update to set CLOSED, record actor/time and clear the table
+claim. Refunds, change, fiscalization and real bank-terminal integrations are
+explicitly outside this slice. This is App-only metadata/logic; Twenty core
+modifications remain `0`. Live acceptance: `:2020` and `:3000`, 68/68 each.
 ## 2026-08-19 — POS Slice 1 live acceptance fixtures
 
 The live acceptance contract uses two synthetic POS credentials only: PIN A maps

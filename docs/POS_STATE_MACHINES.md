@@ -50,7 +50,7 @@ authenticatePosStaff ─► ACTIVE ─► EXPIRED
 | IN_PROGRESS    | addLine         | owner  | OPEN или IN_PROGRESS; нет активной стоп-лист записи; гости уже добавлены (кроме snack addLine) |
 | IN_PROGRESS    | changeLineQuantity | owner | только ACTIVE строки, qty ≥ 1, незакрытый заказ      |
 | PRECHECK_PRINTED | createPrecheck | owner/ADMIN | server snapshot; add/change/guest/print locked |
-| CLOSED         | close (полная оплата) | ADMIN | slice 4, НЕ реализовано                              |
+| CLOSED         | closeOrder (remaining=0) | WAITER/ADMIN | Slice 4, server financial guard |
 | (пер. в новый контекст) | transferOrder* | ADMIN | slice 6, НЕ реализовано                              |
 
 *) Конфликт claim: второй `openOrder` на занятый стол — детерминированный уникальный конфликт; запись не создаётся. При ошибках доказуемо не создаётся частичный заказ (transaction + серии пересчётов идемпотентны).
@@ -83,6 +83,23 @@ unique), переводит заказ в `PRECHECK_PRINTED` и вызывает
 snapshot и repair-ит статус заказа. `cancelPrecheck` — ADMIN-only; он сохраняет
 историческую запись как `CANCELLED`, очищает active lock и возвращает заказ в
 `IN_PROGRESS`. Отмена также идемпотентна по отдельному ключу.
+
+## Payment / Close (Slice 4)
+
+```
+recordPayment ─► PENDING ─► SUCCESS
+                    │          │
+                    └──────► REJECTED (overpayment/invalid state)
+
+PRECHECK_PRINTED + remaining>0 ──► order remains open
+PRECHECK_PRINTED + remaining=0 ──closeOrder─► CLOSED
+```
+
+- Только `SUCCESS` входит в server-owned `PosOrder.paidTotal`; `PENDING`
+  сериализует concurrent requests через unique order lock.
+- Сервер отклоняет положительный платёж, превышающий `total - paidTotal`, и
+  повторно проверяет остаток перед закрытием. `closeOrder` атомарно фиксирует
+  actor/time и освобождает table claim; повтор ключа возвращает тот же результат.
 
 ## ESC
 Выход из flow (пункт 6 спеки) — **клиентская симуляция**: закрывает модалку, ничего с итогами не делает. Никакого серверного состояния не трогает (слайс 1).

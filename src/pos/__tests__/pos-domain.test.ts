@@ -6,6 +6,8 @@ import {
   executeClearStopListEntry,
   executeCancelPrecheck,
   executeCreatePrecheck,
+  executeCloseOrder,
+  executeRecordPayment,
   executeOpenOrder,
   executeOpenShift,
   executePrintKitchenTicket,
@@ -23,7 +25,9 @@ type TableKind =
   | 'posStopListEntries'
   | 'posKitchenTickets'
   | 'posKitchenTicketLines'
-  | 'posPrechecks';
+  | 'posPrechecks'
+  | 'posPaymentMethods'
+  | 'posPayments';
 
 class UniqueViolationError extends Error {
   constructor(message: string) {
@@ -44,6 +48,8 @@ class FakePosDb {
     posKitchenTickets: [],
     posKitchenTicketLines: [],
     posPrechecks: [],
+    posPaymentMethods: [],
+    posPayments: [],
   };
 
   seed(kind: TableKind, row: Row): Row {
@@ -124,6 +130,17 @@ class FakePosDb {
       return;
     }
 
+    if (kind === 'posPayments') {
+      this.assertIdempotencyUnique(this.rows.posPayments, data);
+      if (
+        typeof data.lockKey === 'string' &&
+        this.rows.posPayments.some((row) => row.lockKey === data.lockKey)
+      ) {
+        throw new UniqueViolationError('duplicate payment lockKey');
+      }
+      return;
+    }
+
     this.assertIdempotencyUnique(this.rows[kind], data);
   }
 
@@ -192,14 +209,34 @@ class FakePosDb {
     }
 
     if (updateKind) {
-      const index = this.rows[updateKind].findIndex((row) => row.id === id);
-
-      if (index === -1) {
-        throw new Error(`${updateKind} record not found`);
+      const filter = (args?.filter ?? {}) as Record<string, unknown>;
+      const matchesCondition = (value: unknown, condition: unknown): boolean => {
+        const predicate = condition as Record<string, unknown>;
+        if (typeof predicate !== 'object' || predicate === null) return true;
+        if ('eq' in predicate) return JSON.stringify(value) === JSON.stringify(predicate.eq);
+        if (typeof value !== 'object' || value === null) return true;
+        return Object.entries(predicate).every(([nestedField, nestedCondition]) =>
+          matchesCondition((value as Record<string, unknown>)[nestedField], nestedCondition),
+        );
+      };
+      const matches = this.rows[updateKind].filter((row) =>
+        Object.entries(filter).every(([field, condition]) => {
+          return matchesCondition(row[field], condition);
+        }),
+      );
+      const indices = id
+        ? [this.rows[updateKind].findIndex((row) => row.id === id)]
+        : matches.map((row) => this.rows[updateKind].indexOf(row));
+      if (indices.length === 0 || indices.every((index) => index === -1)) {
+        return Promise.resolve({ [root]: id ? null : [] });
       }
-
-      this.rows[updateKind][index] = { ...this.rows[updateKind][index], ...data };
-      return Promise.resolve({ [root]: { ...this.rows[updateKind][index] } });
+      const updatedRows = indices
+        .filter((index) => index >= 0)
+        .map((index) => {
+          this.rows[updateKind][index] = { ...this.rows[updateKind][index], ...data };
+          return { ...this.rows[updateKind][index] };
+        });
+      return Promise.resolve({ [root]: id ? updatedRows[0] : updatedRows });
     }
 
     throw new Error(`Unsupported mutation root: ${root}`);
@@ -214,6 +251,7 @@ class FakePosDb {
       updatePosShift: 'posShifts',
       createPosOrder: 'posOrders',
       updatePosOrder: 'posOrders',
+      updatePosOrders: 'posOrders',
       createPosOrderGuest: 'posOrderGuests',
       updatePosOrderGuest: 'posOrderGuests',
       createPosOrderLine: 'posOrderLines',
@@ -225,6 +263,10 @@ class FakePosDb {
       updatePosKitchenTicket: 'posKitchenTickets',
       createPosPrecheck: 'posPrechecks',
       updatePosPrecheck: 'posPrechecks',
+      createPosPaymentMethod: 'posPaymentMethods',
+      updatePosPaymentMethod: 'posPaymentMethods',
+      createPosPayment: 'posPayments',
+      updatePosPayment: 'posPayments',
     };
 
     const kind = map[root];
@@ -251,6 +293,8 @@ class FakePosDb {
       posKitchenTickets: 'posKitchenTickets',
       posKitchenTicketLines: 'posKitchenTicketLines',
       posPrechecks: 'posPrechecks',
+      posPaymentMethods: 'posPaymentMethods',
+      posPayments: 'posPayments',
     };
 
     return map[root] ?? 'posOrders';
@@ -269,6 +313,8 @@ const OTHER_STAFF = '10000000-0000-4000-8000-000000000002';
 const TABLE = '20000000-0000-4000-8000-000000000001';
 const MENU_A = '20000000-0000-4000-8000-000000000010';
 const MENU_B = '20000000-0000-4000-8000-000000000011';
+const CASH_METHOD = '20000000-0000-4000-8000-000000000020';
+const CARD_METHOD = '20000000-0000-4000-8000-000000000021';
 
 const waiter = { staffId: STAFF, role: 'WAITER' as const };
 
@@ -293,6 +339,20 @@ const dbWithBaseline = () => {
     name: 'Чай',
     price: { amountMicros: 500_000_000, currencyCode: 'KZT' },
     isActive: true,
+  });
+  db.seed('posPaymentMethods', {
+    id: CASH_METHOD,
+    name: 'Наличные',
+    methodType: 'CASH',
+    isActive: true,
+    sortOrder: 0,
+  });
+  db.seed('posPaymentMethods', {
+    id: CARD_METHOD,
+    name: 'Карта',
+    methodType: 'CARD',
+    isActive: true,
+    sortOrder: 1,
   });
   return db;
 };
@@ -704,6 +764,63 @@ describe('pos domain happy path', () => {
       waiter,
     );
     expect(restored.status).toBe(201);
+  });
+
+  it('serializes partial payments, rejects overpayment, and closes the table only at zero remaining', async () => {
+    const db = dbWithBaseline();
+    await executeOpenShift(db, { idempotencyKey: key(103) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(104) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(105) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 2, idempotencyKey: key(106) },
+      waiter,
+    );
+    await executeCreatePrecheck(db, { orderId, idempotencyKey: key(107) }, waiter);
+
+    const first = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 1_000_000_000, idempotencyKey: key(108) },
+      waiter,
+    );
+    expect(first.status).toBe(201);
+    expect((first.body as { remainingMicros: number }).remainingMicros).toBe(2_000_000_000);
+
+    const retry = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 1_000_000_000, idempotencyKey: key(108) },
+      waiter,
+    );
+    expect(retry.status).toBe(200);
+    expect(db.rows.posPayments.filter((row) => row.status === 'SUCCESS')).toHaveLength(1);
+
+    const overpay = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CARD_METHOD, amountMicros: 2_100_000_000, idempotencyKey: key(109) },
+      waiter,
+    );
+    expect(overpay.status).toBe(400);
+    expect((overpay.body as { code: string }).code).toBe('OVERPAYMENT');
+
+    const second = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CARD_METHOD, amountMicros: 2_000_000_000, idempotencyKey: key(110) },
+      waiter,
+    );
+    expect(second.status).toBe(201);
+    expect((second.body as { remainingMicros: number }).remainingMicros).toBe(0);
+
+    const closed = await executeCloseOrder(db, { orderId, idempotencyKey: key(111) }, waiter);
+    expect(closed.status).toBe(201);
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.status).toBe('CLOSED');
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.claimToken).toBeNull();
+
+    const closeRetry = await executeCloseOrder(db, { orderId, idempotencyKey: key(111) }, waiter);
+    expect(closeRetry.status).toBe(200);
+    expect(db.rows.posPayments.filter((row) => row.status === 'SUCCESS')).toHaveLength(2);
   });
 });
 

@@ -12,6 +12,8 @@ export const POS_COMMANDS = [
   'printKitchenTicket',
   'createPrecheck',
   'cancelPrecheck',
+  'recordPayment',
+  'closeOrder',
 ] as const;
 
 export type PosCommand = (typeof POS_COMMANDS)[number];

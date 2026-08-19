@@ -51,6 +51,8 @@ POS UI (2nd terminal / web)
 | `printKitchenTicket` | `{ orderId, idempotencyKey }` | order owner/admin, editable order | immutable `NEW_ITEMS` ticket with unsent deltas only |
 | `createPrecheck` | Slice 3 | `{ orderId, idempotencyKey }` | server snapshot; ACTIVE precheck locks order |
 | `cancelPrecheck` | Slice 3 | `{ orderId, idempotencyKey }` | ADMIN-only; cancelled snapshot unlocks order |
+| `recordPayment` | Slice 4 | `{ orderId, paymentMethodId, amountMicros, idempotencyKey }` | PRECHECK_PRINTED; positive integer micros; server remaining/actor; retry-safe |
+| `closeOrder` | Slice 4 | `{ orderId, idempotencyKey }` | remaining must be zero; guarded close releases table claim |
 | `voidLines`/`transfer*` | slice 6 | — | НЕ реализовано |
 
 ### Хранение
@@ -82,11 +84,18 @@ authenticated staff, table, order, guest or line payload returns
 - Kitchen print: `PosOrderLine.kitchenSentQuantity` — server-owned cursor. `printKitchenTicket` строит semantic hash текущих unsent deltas и сохраняет его в unique `PosKitchenTicket.idempotencyKey`; request key также unique. Retry/два терминала re-read уже созданную фишу и не создают duplicate ticket/line.
 - `KitchenPrintAdapter` (`src/pos/kitchen-print-adapter.ts`) отделяет домен от физического принтера. В Slice 2 применяется `MockKitchenPrintAdapter`; printable ticket immutable в data plane.
 - Precheck: `createPrecheck` пересчитывает totals на сервере, сохраняет immutable guest/order snapshot и переводит заказ в `PRECHECK_PRINTED`. Повтор repair-ит lock после crash; `cancelPrecheck` доступен только ADMIN, помечает snapshot `CANCELLED` и возвращает заказ в `IN_PROGRESS`.
+- Payment: `recordPayment` creates one server-owned PENDING record per order,
+  advances `paidTotal` through a guarded `updatePosOrders` filter and finalizes
+  it as SUCCESS. The unique idempotency key and per-order pending lock make
+  retry, crash repair and concurrent requests converge without double charge.
+  `closeOrder` requires zero remaining and atomically sets CLOSED/clears claim.
 
-## Открытые вопросы (за пределами Slice 3)
+## Открытые вопросы (за пределами Slice 4)
 - 2FA, refresh rotation и distributed rate limiting (pilot session boundary уже реализован).
 - Канал между терминалами (WebSocket или polling вероятность открытых жизненных кейсов).
 - Физическая печать: текущие `KitchenPrintAdapter` и `PrecheckPrintAdapter` — mock/debug boundaries.
+- Payments deliberately stop at CASH/CARD/OTHER records and server remaining;
+  refunds, change and bank-terminal integrations are outside the pilot.
 - `x-mahabbat-signature`: HMAC-ключ на канал; в slice 1 — статический секрет, документированный в конфиг env `MAHABBAT_POS_HMAC_SECRET`.
 
 ## QA-указания

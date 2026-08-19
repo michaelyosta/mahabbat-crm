@@ -104,6 +104,21 @@
   including lock, waiter denial, ADMIN cancel, retries and CRM smoke. Unit total:
   226 passed.
 
+## POS Slice 4 — Payments + Partial Payments + Close Order (PASS)
+
+- Added configurable `PosPaymentMethod` (`CASH`, `CARD`, `OTHER`) and
+  immutable controlled `PosPayment` records. The server owns accepted actor,
+  amount, method snapshots, payment status and the paid aggregate.
+- `recordPayment` requires `PRECHECK_PRINTED`, rejects invalid/overpaying
+  amounts, serializes one pending payment per order, repairs a crash after the
+  aggregate update and is context-bound by a unique idempotency key.
+  `closeOrder` requires remaining `0`, uses a guarded bulk update, clears the
+  active table claim and is retry-safe.
+- Live acceptance passed on both `:2020` and `:3000` with 68/68 checks each:
+  parallel payment retry, partial cash/card payments, overpayment rejection,
+  zero-remaining close, close retry, reload/shared state, previous POS races
+  and CRM smoke. Unit total: 227 passed.
+
 # PRE-POS hardening (FINAL PASS)
 
 - Loyalty balance: Customer 360 computes the balance from the **full ledger**
@@ -132,21 +147,21 @@
 - Destructive integration-test setup is fail-closed (target allowlist guard,
   11 tests). Branding overlay is fail-closed (7 tests) and fails the build when
   a target literal is missing.
-- POS Foundation Slices 1–3 are implemented after the documented boundary
-  decision; payments, reservations/prepayment, void/transfer and operational
-  audit remain future slices. Kitchen and precheck output use mock adapters only.
+- POS Foundation Slices 1–4 are implemented after the documented boundary
+  decision; reservations/prepayment, void/transfer and operational audit
+  remain future slices. Kitchen and precheck output use mock adapters only.
 - Gate totals after the corrective checkpoint: `yarn lint` 0/0, `yarn typecheck`
   clean, `yarn test:unit` 226/226, `yarn seed:pos:dry` PASS. Slice 3 live
   acceptance is recorded below.
 
-# POS Slice 3 live checkpoint — 2026-08-19
+# POS Slice 4 live checkpoint — 2026-08-19
 
-- Disposable `:2020`: `scripts/accept-pos.mjs` PASS 62/62 after Linux
-  plan/apply/replan. It proved Slice 1/2 behavior plus precheck snapshot,
-  server lock, ADMIN cancel and retry repair.
-- Self-hosted `:3000`: the same manifest and deterministic harness PASS 62/62;
+- Disposable `:2020`: `scripts/accept-pos.mjs` PASS 68/68 after Linux
+  plan/apply/replan. It proved Slice 1–3 behavior plus payment concurrency,
+  partial payments, overpayment rejection, close and retry.
+- Self-hosted `:3000`: the same manifest and deterministic harness PASS 68/68;
   plan after apply returned `No changes`.
-- No physical printer, fiscal or payment behavior is implied by this checkpoint;
+- No physical printer, fiscal or bank-terminal integration is implied;
   Twenty core modifications remain 0.
 
 # Сейчас не работает
@@ -158,10 +173,11 @@
 
 # Последняя проверка
 
-- 2026-08-19 POS Slice 3 live acceptance: `:2020` PASS (62/62) and `:3000`
-  PASS (62/62). This includes the prior Slice 1/2 checks plus precheck snapshot,
-  server lock, ADMIN cancel, retry repair and CRM smoke. Final local gates:
-  `yarn lint`, `yarn typecheck`, `yarn test:unit` (226/226) PASS.
+- 2026-08-19 POS Slice 4 live acceptance: `:2020` PASS (68/68) and `:3000`
+  PASS (68/68). This includes the prior Slice 1–3 checks plus payment
+  concurrency, partial payments, overpayment rejection, close and retry.
+  Final local gates: `yarn lint`, `yarn typecheck`, `yarn test:unit` (227/227)
+  PASS.
 - On 2026-08-09 Linux `twenty-sdk@2.29.0` plan/apply updated Customer 360 on
   pinned Twenty `v2.29.0` without a core change; the same update was applied
   to disposable `:2020` and ordinary self-hosted `:3000`.

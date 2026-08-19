@@ -82,6 +82,23 @@ const menuItems = MENU.map(([name, category, price], i) => ({
   isActive: true,
 }));
 
+const paymentMethods = [
+  {
+    id: idFor('posPaymentMethod', 0),
+    name: 'Наличные',
+    methodType: 'CASH',
+    isActive: true,
+    sortOrder: 0,
+  },
+  {
+    id: idFor('posPaymentMethod', 1),
+    name: 'Карта',
+    methodType: 'CARD',
+    isActive: true,
+    sortOrder: 1,
+  },
+];
+
 const normalizeSeedPin = (value) => {
   const pin = value?.trim();
   if (!pin) return null;
@@ -167,6 +184,16 @@ function validate() {
     }
     if (item.price.currencyCode !== CURRENCY) errors.push(`menuItems[${i}]: bad currencyCode`);
     if (item.isActive !== true) errors.push(`menuItems[${i}]: isActive must be true`);
+  });
+
+  paymentMethods.forEach((method, i) => {
+    checkId(method.id, `paymentMethods[${i}]`);
+    if (!method.name || !['CASH', 'CARD', 'OTHER'].includes(method.methodType)) {
+      errors.push(`paymentMethods[${i}]: name and methodType must be valid`);
+    }
+    if (method.isActive !== true || !Number.isSafeInteger(method.sortOrder)) {
+      errors.push(`paymentMethods[${i}]: active integer sortOrder required`);
+    }
   });
 
   posStaffs.forEach((staff, i) => {
@@ -264,13 +291,13 @@ async function main() {
   }
 
   console.log('REST assumptions (verified against Twenty v2.29.0 source):');
-  console.log('  endpoints: /rest/posZones, /rest/posTables, /rest/posMenuItems, /rest/posStaffs');
+  console.log('  endpoints: /rest/posZones, /rest/posTables, /rest/posMenuItems, /rest/posPaymentMethods, /rest/posStaffs');
   console.log('  relations via join columns: zoneId');
   console.log('  money: { amountMicros, currencyCode: "KZT" } (integer, no floats)');
   console.log('  idempotent: fixed UUID v4 ids, existing records skipped, nothing deleted');
   console.log('');
   console.log('POS seed plan:');
-  console.log(`  ${zones.length} zones, ${tables.length} tables, ${menuItems.length} menu items, ${posStaffs.length} POS staff records`);
+  console.log(`  ${zones.length} zones, ${tables.length} tables, ${menuItems.length} menu items, ${paymentMethods.length} payment methods, ${posStaffs.length} POS staff records`);
   if (posStaffs.length === 0) {
     console.log('  POS staff skipped: set MAHABBAT_POS_SEED_WAITER_PIN and/or MAHABBAT_POS_SEED_ADMIN_PIN privately to provision login identities');
   }
@@ -288,6 +315,7 @@ async function main() {
   await sync(apiUrl, getEnv().apiKey, 'PosZone', 'posZones', zones);
   await sync(apiUrl, getEnv().apiKey, 'PosTable', 'posTables', tables);
   await sync(apiUrl, getEnv().apiKey, 'PosMenuItem', 'posMenuItems', menuItems);
+  await sync(apiUrl, getEnv().apiKey, 'PaymentMethod', 'posPaymentMethods', paymentMethods);
   if (posStaffs.length > 0) {
     await sync(apiUrl, getEnv().apiKey, 'PosStaff', 'posStaffs', posStaffs, { reconcile: true });
   }

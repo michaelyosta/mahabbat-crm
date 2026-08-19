@@ -21,6 +21,8 @@ import { EXTERNAL_IDENTITY_KEY_ON_PERSON_FIELD_UNIVERSAL_IDENTIFIER } from 'src/
 import { EXTERNAL_ID_ON_PERSON_FIELD_UNIVERSAL_IDENTIFIER } from 'src/fields/person/external-id-on-person.field';
 import { EXTERNAL_PROVIDER_ON_PERSON_FIELD_UNIVERSAL_IDENTIFIER } from 'src/fields/person/external-provider-on-person.field';
 import { POS_PRECHECK_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-precheck.object';
+import { POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment-method.object';
+import { POS_PAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment.object';
 
 export default defineRole({
   universalIdentifier: MAHABBAT_STAFF_ROLE_UNIVERSAL_IDENTIFIER,
@@ -81,6 +83,20 @@ export default defineRole({
     },
     {
       objectUniversalIdentifier: POS_PRECHECK_UNIVERSAL_IDENTIFIER,
+      canReadObjectRecords: true,
+      canUpdateObjectRecords: false,
+      canSoftDeleteObjectRecords: false,
+      canDestroyObjectRecords: false,
+    },
+    {
+      objectUniversalIdentifier: POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER,
+      canReadObjectRecords: true,
+      canUpdateObjectRecords: false,
+      canSoftDeleteObjectRecords: false,
+      canDestroyObjectRecords: false,
+    },
+    {
+      objectUniversalIdentifier: POS_PAYMENT_UNIVERSAL_IDENTIFIER,
       canReadObjectRecords: true,
       canUpdateObjectRecords: false,
       canSoftDeleteObjectRecords: false,

@@ -136,7 +136,7 @@ const requireUuid = (label, value) => {
 };
 
 const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) => {
-  const [orders, guests, lines, shifts, kitchenTickets, kitchenTicketLines, prechecks] = await Promise.all([
+  const [orders, guests, lines, shifts, kitchenTickets, kitchenTicketLines, prechecks, payments] = await Promise.all([
     restGet(apiUrl, apiKey, 'posOrders'),
     restGet(apiUrl, apiKey, 'posOrderGuests'),
     restGet(apiUrl, apiKey, 'posOrderLines'),
@@ -144,6 +144,7 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
     restGet(apiUrl, apiKey, 'posKitchenTickets'),
     restGet(apiUrl, apiKey, 'posKitchenTicketLines'),
     restGet(apiUrl, apiKey, 'posPrechecks'),
+    restGet(apiUrl, apiKey, 'posPayments'),
   ]);
   const acceptanceOrders = orders.filter((order) => tableIds.has(order.tableId));
   const acceptanceOrderIds = new Set(acceptanceOrders.map((order) => order.id));
@@ -153,6 +154,11 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
   const acceptanceTicketIds = new Set(acceptanceTickets.map((ticket) => ticket.id));
   const acceptanceTicketLines = kitchenTicketLines.filter((line) => acceptanceTicketIds.has(line.ticketId));
   const acceptancePrechecks = prechecks.filter((precheck) => acceptanceOrderIds.has(precheck.orderId));
+  const acceptancePayments = payments.filter((payment) => acceptanceOrderIds.has(payment.orderId));
+
+  for (const payment of acceptancePayments) {
+    await deleteRecord(apiUrl, apiKey, 'posPayments', payment.id);
+  }
 
   for (const precheck of acceptancePrechecks) {
     await deleteRecord(apiUrl, apiKey, 'posPrechecks', precheck.id);
@@ -201,6 +207,7 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
     lines: acceptanceLines.length,
     shifts: openAcceptanceShifts.length,
     prechecks: acceptancePrechecks.length,
+    payments: acceptancePayments.length,
   };
 };
 
@@ -764,6 +771,113 @@ const main = async () => {
               'order is editable again after ADMIN cancelPrecheck',
               [200, 201].includes(postCancelLine.status),
               `status ${postCancelLine.status}`,
+            );
+
+            const paymentPrecheckKey = randomUUID();
+            const paymentPrecheck = await postCommand(apiUrl, apiKey, 'createPrecheck', admin, {
+              orderId: order2Id,
+              idempotencyKey: paymentPrecheckKey,
+            });
+            const paymentOrder = (await restGet(apiUrl, apiKey, 'posOrders')).find((order) => order.id === order2Id);
+            const paymentMethods = (await restGet(apiUrl, apiKey, 'posPaymentMethods'))
+              .filter((method) => method.isActive !== false)
+              .sort((left, right) => (left.sortOrder ?? 0) - (right.sortOrder ?? 0));
+            const paymentTotalMicros = paymentOrder?.total?.amountMicros ?? 0;
+            const firstPaymentMicros = Math.floor(paymentTotalMicros / 3);
+            const paymentKey = randomUUID();
+            const parallelPayments = await Promise.all([
+              postCommand(apiUrl, apiKey, 'recordPayment', admin, {
+                orderId: order2Id,
+                paymentMethodId: paymentMethods[0]?.id,
+                amountMicros: firstPaymentMicros,
+                idempotencyKey: paymentKey,
+              }),
+              postCommand(apiUrl, apiKey, 'recordPayment', admin, {
+                orderId: order2Id,
+                paymentMethodId: paymentMethods[0]?.id,
+                amountMicros: firstPaymentMicros,
+                idempotencyKey: paymentKey,
+              }),
+            ]);
+            const paymentsAfterParallel = (await restGet(apiUrl, apiKey, 'posPayments'))
+              .filter((payment) => payment.orderId === order2Id && payment.status === 'SUCCESS');
+            const successfulParallelPayment = parallelPayments.find((result) => result.body?.paymentId);
+            check(
+              'createPrecheck before payment and parallel payment retry are safe',
+              [200, 201].includes(paymentPrecheck.status) &&
+                paymentMethods.length >= 2 &&
+                firstPaymentMicros > 0 &&
+                parallelPayments.some((result) => [200, 201].includes(result.status)) &&
+                parallelPayments.every((result) =>
+                  [200, 201].includes(result.status) || result.body?.code === 'PAYMENT_IN_PROGRESS',
+                ) &&
+                paymentsAfterParallel.length === 1,
+              `precheck=${paymentPrecheck.status}, methods=${paymentMethods.length}, paymentStatuses=${parallelPayments.map((result) => `${result.status}:${result.body?.paymentId ? 'success' : result.body?.code ?? 'unknown'}`).join('/')}, successPayments=${paymentsAfterParallel.length}`,
+            );
+
+            const paymentRetry = await postCommand(apiUrl, apiKey, 'recordPayment', admin, {
+              orderId: order2Id,
+              paymentMethodId: paymentMethods[0]?.id,
+              amountMicros: firstPaymentMicros,
+              idempotencyKey: paymentKey,
+            });
+            check(
+              'recordPayment retry returns the same payment without duplication',
+              paymentRetry.status === 200 &&
+                paymentRetry.body?.paymentId === successfulParallelPayment?.body?.paymentId &&
+                (await restGet(apiUrl, apiKey, 'posPayments')).filter((payment) => payment.orderId === order2Id && payment.status === 'SUCCESS').length === 1,
+              `status ${paymentRetry.status}, paymentId ${paymentRetry.body?.paymentId}`,
+            );
+
+            const remainingAfterFirst = paymentRetry.body?.remainingMicros;
+            const overpayment = await postCommand(apiUrl, apiKey, 'recordPayment', admin, {
+              orderId: order2Id,
+              paymentMethodId: paymentMethods[1]?.id,
+              amountMicros: remainingAfterFirst + 1,
+              idempotencyKey: randomUUID(),
+            });
+            check(
+              'recordPayment rejects overpayment server-side',
+              overpayment.status === 400 && overpayment.body?.code === 'OVERPAYMENT',
+              `status ${overpayment.status}, code ${overpayment.body?.code}`,
+            );
+
+            const finalPayment = await postCommand(apiUrl, apiKey, 'recordPayment', admin, {
+              orderId: order2Id,
+              paymentMethodId: paymentMethods[1]?.id,
+              amountMicros: remainingAfterFirst,
+              idempotencyKey: randomUUID(),
+            });
+            check(
+              'partial cash/card payments reach remaining=0',
+              [200, 201].includes(finalPayment.status) && finalPayment.body?.remainingMicros === 0,
+              `status ${finalPayment.status}, remaining ${finalPayment.body?.remainingMicros}`,
+            );
+
+            const closeOrderKey = randomUUID();
+            const closeOrder = await postCommand(apiUrl, apiKey, 'closeOrder', admin, {
+              orderId: order2Id,
+              idempotencyKey: closeOrderKey,
+            });
+            const closedOrder = (await restGet(apiUrl, apiKey, 'posOrders')).find((order) => order.id === order2Id);
+            const activeAfterClose = (await restGet(apiUrl, apiKey, 'posOrders'))
+              .filter((order) => order.tableId === secondFreeTable && ['OPEN', 'IN_PROGRESS', 'PRECHECK_PRINTED'].includes(order.status));
+            check(
+              'closeOrder requires zero remaining and releases the table',
+              [200, 201].includes(closeOrder.status) &&
+                closedOrder?.status === 'CLOSED' &&
+                (closedOrder?.claimToken == null || closedOrder?.claimToken === '') &&
+                activeAfterClose.length === 0,
+              `status ${closeOrder.status}, orderStatus=${closedOrder?.status}, claimToken=${closedOrder?.claimToken ?? 'null'}, activeOnTable=${activeAfterClose.length}`,
+            );
+            const closeRetry = await postCommand(apiUrl, apiKey, 'closeOrder', admin, {
+              orderId: order2Id,
+              idempotencyKey: closeOrderKey,
+            });
+            check(
+              'closeOrder retry is idempotent',
+              closeRetry.status === 200 && closeRetry.body?.orderId === order2Id,
+              `status ${closeRetry.status}`,
             );
           }
         }

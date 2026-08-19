@@ -77,8 +77,19 @@
 - Kitchen output uses `MockKitchenPrintAdapter`; no physical printer or fiscal
   integration is claimed. Twenty core modifications remain `0`.
 
+## Slice 4 live result — 2026-08-19
+
+- `:2020`: PASS, 68/68 checks. `recordPayment` accepts configurable methods,
+  serializes parallel same-key requests, rejects overpayment, reaches remaining
+  zero with partial payments, and `closeOrder` releases the table with retry.
+- `:3000`: PASS, the same 68/68 deterministic checks after the same plan/apply;
+  CRM smoke and all prior Slice 1–3 checks remained green.
+- Unit: 227/227; lint and typecheck PASS. Twenty core modifications: 0.
+  Payments remain non-fiscal records; no bank terminal or refund semantics are
+  claimed.
+
 ## Не входит в этот маршрут
-Платежи, предоплаты, precheck, void, transfer и аудит — следующие bounded
-слайсы. POS PIN/card auth context и Slice 1–2 уже реализованы; полноценные
+Предоплаты, void, transfer и аудит — следующие bounded слайсы. POS PIN/card
+auth context and Slice 1–4 are implemented; полноценные
 Internet auth controls (2FA, refresh rotation, distributed rate limiting) и
 физическая печать остаются отдельными инициативами.

@@ -17,6 +17,7 @@ import {
 import {
   microsToCurrency,
   normalizeCurrency,
+  POS_CURRENCY_CODE,
   sumActiveLinesMicros,
 } from 'src/pos/pos-money';
 import { kitchenPrintAdapter } from 'src/pos/kitchen-print-adapter';
@@ -59,6 +60,9 @@ type OrderRecord = ExistingRecord & {
   idempotencyKey?: string | null;
   subtotal?: unknown;
   total?: unknown;
+  paidTotal?: unknown;
+  closedByStaffId?: string | null;
+  closeIdempotencyKey?: string | null;
 };
 
 type GuestRecord = ExistingRecord & {
@@ -127,6 +131,27 @@ type PrecheckRecord = ExistingRecord & {
   printStatus?: string | null;
 };
 
+type PaymentMethodRecord = ExistingRecord & {
+  name?: string | null;
+  methodType?: string | null;
+  isActive?: boolean | null;
+  sortOrder?: number | null;
+};
+
+type PaymentRecord = ExistingRecord & {
+  orderId?: string | null;
+  paymentMethodId?: string | null;
+  amount?: unknown;
+  status?: string | null;
+  acceptedByStaffId?: string | null;
+  idempotencyKey?: string | null;
+  lockKey?: string | null;
+  paymentMethodNameSnapshot?: string | null;
+  paymentMethodTypeSnapshot?: string | null;
+  orderPaidTotalBefore?: unknown;
+  appliedToOrder?: boolean | null;
+};
+
 type CommandResult = { status: number; body: unknown };
 
 export const POS_ERROR_CODES = [
@@ -156,6 +181,14 @@ export const POS_ERROR_CODES = [
   'KITCHEN_TICKET_NOT_FOUND',
   'PRECHECK_NOT_FOUND',
   'PRECHECK_NOT_ACTIVE',
+  'PAYMENT_METHOD_NOT_FOUND',
+  'PAYMENT_METHOD_INACTIVE',
+  'PAYMENT_NOT_FOUND',
+  'PAYMENT_IN_PROGRESS',
+  'PAYMENT_ORDER_STATE',
+  'OVERPAYMENT',
+  'PAYMENT_AMOUNT_INVALID',
+  'ORDER_NOT_PAID',
   'IDEMPOTENCY_CONFLICT',
   'CONFLICT',
 ] as const;
@@ -225,6 +258,9 @@ const ORDER_FIELDS: NodeSelection = {
   idempotencyKey: true,
   subtotal: { amountMicros: true, currencyCode: true },
   total: { amountMicros: true, currencyCode: true },
+  paidTotal: { amountMicros: true, currencyCode: true },
+  closedByStaffId: true,
+  closeIdempotencyKey: true,
 };
 
 const GUEST_FIELDS: NodeSelection = {
@@ -297,6 +333,29 @@ const PRECHECK_FIELDS: NodeSelection = {
   idempotencyKey: true,
   cancelIdempotencyKey: true,
   printStatus: true,
+};
+
+const PAYMENT_METHOD_FIELDS: NodeSelection = {
+  id: true,
+  name: true,
+  methodType: true,
+  isActive: true,
+  sortOrder: true,
+};
+
+const PAYMENT_FIELDS: NodeSelection = {
+  id: true,
+  orderId: true,
+  paymentMethodId: true,
+  amount: { amountMicros: true, currencyCode: true },
+  status: true,
+  acceptedByStaffId: true,
+  idempotencyKey: true,
+  lockKey: true,
+  paymentMethodNameSnapshot: true,
+  paymentMethodTypeSnapshot: true,
+  orderPaidTotalBefore: { amountMicros: true, currencyCode: true },
+  appliedToOrder: true,
 };
 
 const queryConnection = async <T extends ExistingRecord>(
@@ -534,6 +593,58 @@ const findPrecheckByCancelIdempotencyKey = async (
     PRECHECK_FIELDS,
   );
   return prechecks[0] ?? null;
+};
+
+const findPaymentMethodById = async (
+  client: CoreApiClientLike,
+  paymentMethodId: string,
+): Promise<PaymentMethodRecord | null> => {
+  const methods = await queryConnection<PaymentMethodRecord>(
+    client,
+    'posPaymentMethods',
+    { filter: { id: { eq: paymentMethodId } }, first: 1 },
+    PAYMENT_METHOD_FIELDS,
+  );
+  return methods[0] ?? null;
+};
+
+const findPaymentByIdempotencyKey = async (
+  client: CoreApiClientLike,
+  idempotencyKey: string,
+): Promise<PaymentRecord | null> => {
+  const payments = await queryConnection<PaymentRecord>(
+    client,
+    'posPayments',
+    { filter: { idempotencyKey: { eq: idempotencyKey } }, first: 1 },
+    PAYMENT_FIELDS,
+  );
+  return payments[0] ?? null;
+};
+
+const findPendingPaymentByOrder = async (
+  client: CoreApiClientLike,
+  orderId: string,
+): Promise<PaymentRecord | null> => {
+  const payments = await queryConnection<PaymentRecord>(
+    client,
+    'posPayments',
+    { filter: { lockKey: { eq: orderId }, status: { eq: 'PENDING' } }, first: 1 },
+    PAYMENT_FIELDS,
+  );
+  return payments[0] ?? null;
+};
+
+const findOrderByCloseIdempotencyKey = async (
+  client: CoreApiClientLike,
+  idempotencyKey: string,
+): Promise<OrderRecord | null> => {
+  const orders = await queryConnection<OrderRecord>(
+    client,
+    'posOrders',
+    { filter: { closeIdempotencyKey: { eq: idempotencyKey } }, first: 1 },
+    ORDER_FIELDS,
+  );
+  return orders[0] ?? null;
 };
 
 const findOrderById = async (
@@ -939,6 +1050,7 @@ export const executeOpenOrder = async (
             idempotencyKey: payload.idempotencyKey,
             subtotal: null,
             total: null,
+            paidTotal: microsToCurrency(0),
           },
         },
         id: true,
@@ -1758,6 +1870,328 @@ export const executeCancelPrecheck = async (
   return precheckResponse(cancelled, editableOrder, 200);
 };
 
+const paymentTotals = (order: OrderRecord) => {
+  const totalMicros = normalizeCurrency(order.total).amountMicros;
+  const paidMicros = normalizeCurrency(order.paidTotal).amountMicros;
+  return {
+    totalMicros,
+    paidMicros,
+    remainingMicros: totalMicros - paidMicros,
+  };
+};
+
+const paymentResponse = (
+  payment: PaymentRecord,
+  order: OrderRecord,
+  status: number,
+): CommandResult => {
+  const totals = paymentTotals(order);
+  return okResult(status, {
+    paymentId: payment.id,
+    orderId: order.id,
+    status: payment.status ?? 'PENDING',
+    amount: payment.amount ?? null,
+    remainingMicros: totals.remainingMicros,
+    orderStatus: order.status ?? null,
+  });
+};
+
+const updatePayment = async (
+  client: CoreApiClientLike,
+  paymentId: string,
+  data: Record<string, unknown>,
+): Promise<void> => {
+  await client.mutation({
+    updatePosPayment: {
+      __args: { id: paymentId, data },
+      id: true,
+    },
+  });
+};
+
+const mutationUpdatedRows = (result: unknown, root: string): number => {
+  const value = (result as Record<string, unknown> | null)?.[root];
+  if (Array.isArray(value)) return value.length;
+  return value && typeof value === 'object' && 'id' in value ? 1 : 0;
+};
+
+// Twenty's CurrencyFilterInput compares each component independently; it does
+// not accept the Currency value shape used by create/update inputs.
+const currencyFilter = (amountMicros: number) => ({
+  amountMicros: { eq: amountMicros },
+  currencyCode: { eq: POS_CURRENCY_CODE },
+});
+
+const guardedUpdatePaidTotal = async (
+  client: CoreApiClientLike,
+  order: OrderRecord,
+  expectedPaidMicros: number,
+  nextPaidMicros: number,
+): Promise<boolean> => {
+  const result = await client.mutation({
+    updatePosOrders: {
+      __args: {
+        filter: {
+          id: { eq: order.id },
+          status: { eq: 'PRECHECK_PRINTED' },
+          paidTotal: currencyFilter(expectedPaidMicros),
+        },
+        data: { paidTotal: microsToCurrency(nextPaidMicros) },
+      },
+      id: true,
+    },
+  });
+  return mutationUpdatedRows(result, 'updatePosOrders') > 0;
+};
+
+const closeOrderResponse = (order: OrderRecord, status: number): CommandResult =>
+  okResult(status, {
+    orderId: order.id,
+    status: order.status ?? 'CLOSED',
+    closedAt: order.closedAt ?? null,
+    closedByStaffId: order.closedByStaffId ?? null,
+    remainingMicros: paymentTotals(order).remainingMicros,
+  });
+
+export const executeRecordPayment = async (
+  client: CoreApiClientLike,
+  payload: {
+    orderId: string;
+    paymentMethodId: string;
+    amountMicros: number;
+    idempotencyKey: string;
+  },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  if (!Number.isSafeInteger(payload.amountMicros) || payload.amountMicros <= 0) {
+    return errorResult('PAYMENT_AMOUNT_INVALID', 'Payment amount must be a positive safe integer.');
+  }
+
+  const order = await findOrderById(client, payload.orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+
+  const existing = await findPaymentByIdempotencyKey(client, payload.idempotencyKey);
+  if (existing) {
+    if (
+      existing.orderId !== payload.orderId ||
+      existing.paymentMethodId !== payload.paymentMethodId ||
+      normalizeCurrency(existing.amount).amountMicros !== payload.amountMicros ||
+      existing.acceptedByStaffId !== actor.staffId
+    ) {
+      return idempotencyConflict('The idempotency key belongs to another payment context.');
+    }
+    if (existing.status === 'SUCCESS') return paymentResponse(existing, order, 200);
+    if (existing.status === 'REJECTED') {
+      return errorResult('OVERPAYMENT', 'Payment was rejected because it would overpay the order.');
+    }
+  }
+
+  const method = await findPaymentMethodById(client, payload.paymentMethodId);
+  if (!method) return errorResult('PAYMENT_METHOD_NOT_FOUND', 'Payment method does not exist.');
+  if (method.isActive === false) {
+    return errorResult('PAYMENT_METHOD_INACTIVE', 'Payment method is inactive.');
+  }
+
+  if (order.status !== 'PRECHECK_PRINTED') {
+    return errorResult('PAYMENT_ORDER_STATE', 'Payments require a printed precheck.');
+  }
+
+  let payment = existing;
+  if (!payment) {
+    const totals = paymentTotals(order);
+    if (payload.amountMicros > totals.remainingMicros) {
+      return errorResult('OVERPAYMENT', 'Payment exceeds the remaining amount.');
+    }
+    const lockOwner = await findPendingPaymentByOrder(client, payload.orderId);
+    if (lockOwner) {
+      return errorResult('PAYMENT_IN_PROGRESS', 'Another payment is currently being processed for this order.');
+    }
+
+    try {
+      const result = (await client.mutation({
+        createPosPayment: {
+          __args: {
+            data: {
+              orderId: payload.orderId,
+              paymentMethodId: payload.paymentMethodId,
+              amount: microsToCurrency(payload.amountMicros),
+              status: 'PENDING',
+              acceptedByStaffId: actor.staffId,
+              idempotencyKey: payload.idempotencyKey,
+              lockKey: payload.orderId,
+              paymentMethodNameSnapshot: method.name ?? '',
+              paymentMethodTypeSnapshot: method.methodType ?? 'OTHER',
+              orderPaidTotalBefore: normalizeCurrency(order.paidTotal),
+              appliedToOrder: false,
+            },
+          },
+          id: true,
+          orderId: true,
+          paymentMethodId: true,
+          amount: { amountMicros: true, currencyCode: true },
+          status: true,
+          acceptedByStaffId: true,
+          idempotencyKey: true,
+          lockKey: true,
+          paymentMethodNameSnapshot: true,
+          paymentMethodTypeSnapshot: true,
+          orderPaidTotalBefore: { amountMicros: true, currencyCode: true },
+          appliedToOrder: true,
+        },
+      })) as { createPosPayment?: PaymentRecord };
+      payment = result.createPosPayment ?? null;
+    } catch {
+      const racedByKey = await findPaymentByIdempotencyKey(client, payload.idempotencyKey);
+      if (racedByKey) {
+        payment = racedByKey;
+      } else {
+        return errorResult('PAYMENT_IN_PROGRESS', 'Another payment is currently being processed for this order.');
+      }
+    }
+  }
+
+  if (!payment?.id) return errorResult('PAYMENT_NOT_FOUND', 'Payment could not be read back.');
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const currentOrder = await findOrderById(client, payload.orderId);
+    if (!currentOrder) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+    if (currentOrder.status !== 'PRECHECK_PRINTED') {
+      return errorResult('PAYMENT_ORDER_STATE', 'Payments require a printed precheck.');
+    }
+
+    const currentTotals = paymentTotals(currentOrder);
+    const beforeMicros = normalizeCurrency(payment.orderPaidTotalBefore).amountMicros;
+    const expectedAfterOwnPayment = beforeMicros + payload.amountMicros;
+
+    // If the order aggregate was advanced and the only pending lock belongs to
+    // this payment, a retry can safely finalize the payment after a crash.
+    if (currentTotals.paidMicros === expectedAfterOwnPayment) {
+      await updatePayment(client, payment.id, {
+        status: 'SUCCESS',
+        appliedToOrder: true,
+        lockKey: null,
+      });
+      const refreshed = (await findOrderById(client, payload.orderId)) ?? currentOrder;
+      const finalized = (await findPaymentByIdempotencyKey(client, payload.idempotencyKey)) ?? {
+        ...payment,
+        status: 'SUCCESS',
+      };
+      return paymentResponse(finalized, refreshed, existing ? 200 : 201);
+    }
+
+    if (payload.amountMicros > currentTotals.remainingMicros) {
+      await updatePayment(client, payment.id, {
+        status: 'REJECTED',
+        lockKey: null,
+        appliedToOrder: false,
+      });
+      return errorResult('OVERPAYMENT', 'Payment exceeds the remaining amount.');
+    }
+
+    const updated = await guardedUpdatePaidTotal(
+      client,
+      currentOrder,
+      currentTotals.paidMicros,
+      currentTotals.paidMicros + payload.amountMicros,
+    );
+    if (!updated) continue;
+
+    await updatePayment(client, payment.id, {
+      status: 'SUCCESS',
+      appliedToOrder: true,
+      lockKey: null,
+    });
+    const refreshed = (await findOrderById(client, payload.orderId)) ?? currentOrder;
+    const finalized = (await findPaymentByIdempotencyKey(client, payload.idempotencyKey)) ?? {
+      ...payment,
+      status: 'SUCCESS',
+    };
+    return paymentResponse(finalized, refreshed, existing ? 200 : 201);
+  }
+
+  return errorResult('CONFLICT', 'Payment could not be applied after concurrent updates.');
+};
+
+export const executeCloseOrder = async (
+  client: CoreApiClientLike,
+  payload: { orderId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const replay = await findOrderByCloseIdempotencyKey(client, payload.idempotencyKey);
+  if (replay) {
+    if (replay.id !== payload.orderId || replay.closedByStaffId !== actor.staffId) {
+      return idempotencyConflict('The idempotency key belongs to another close-order context.');
+    }
+    return closeOrderResponse(replay, 200);
+  }
+
+  const order = await findOrderById(client, payload.orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+  if (order.status === 'CLOSED') {
+    return errorResult('ORDER_ALREADY_CLOSED', 'Order is already closed.');
+  }
+  if (order.status !== 'PRECHECK_PRINTED') {
+    return errorResult('PAYMENT_ORDER_STATE', 'Order must have a printed precheck before close.');
+  }
+
+  const pending = await findPendingPaymentByOrder(client, order.id);
+  if (pending) return errorResult('PAYMENT_IN_PROGRESS', 'A payment is still being processed.');
+
+  const totals = paymentTotals(order);
+  if (totals.remainingMicros !== 0) {
+    return errorResult('ORDER_NOT_PAID', `Order still has ${totals.remainingMicros} micros remaining.`);
+  }
+
+  const closedAt = new Date().toISOString();
+  try {
+    const result = await client.mutation({
+      updatePosOrders: {
+        __args: {
+          filter: {
+            id: { eq: order.id },
+            status: { eq: 'PRECHECK_PRINTED' },
+            paidTotal: currencyFilter(totals.paidMicros),
+          },
+          data: {
+            status: 'CLOSED',
+            closedAt,
+            closedByStaffId: actor.staffId,
+            closeIdempotencyKey: payload.idempotencyKey,
+            claimToken: null,
+          },
+        },
+        id: true,
+        status: true,
+        closedAt: true,
+        closedByStaffId: true,
+        closeIdempotencyKey: true,
+        paidTotal: { amountMicros: true, currencyCode: true },
+      },
+    });
+    if (mutationUpdatedRows(result, 'updatePosOrders') === 0) {
+      const raced = await findOrderByCloseIdempotencyKey(client, payload.idempotencyKey);
+      if (raced) return closeOrderResponse(raced, 200);
+      return errorResult('CONFLICT', 'Order close lost a concurrent state transition.');
+    }
+  } catch {
+    const raced = await findOrderByCloseIdempotencyKey(client, payload.idempotencyKey);
+    if (raced) return closeOrderResponse(raced, 200);
+    const refreshed = await findOrderById(client, order.id);
+    if (refreshed?.status === 'CLOSED') return closeOrderResponse(refreshed, 200);
+    return errorResult('CONFLICT', 'Order could not be closed.');
+  }
+
+  const closed = (await findOrderByCloseIdempotencyKey(client, payload.idempotencyKey)) ?? {
+    ...order,
+    status: 'CLOSED',
+    closedAt,
+    closedByStaffId: actor.staffId,
+    closeIdempotencyKey: payload.idempotencyKey,
+    claimToken: null,
+  };
+  return closeOrderResponse(closed, 201);
+};
+
 export const dispatchPosCommand = async (
   client: CoreApiClientLike,
   command: PosCommand,
@@ -1862,6 +2296,26 @@ export const dispatchPosCommand = async (
       );
     case 'cancelPrecheck':
       return executeCancelPrecheck(
+        client,
+        {
+          orderId: payload.orderId as string,
+          idempotencyKey: payload.idempotencyKey as string,
+        },
+        actor,
+      );
+    case 'recordPayment':
+      return executeRecordPayment(
+        client,
+        {
+          orderId: payload.orderId as string,
+          paymentMethodId: payload.paymentMethodId as string,
+          amountMicros: payload.amountMicros as number,
+          idempotencyKey: payload.idempotencyKey as string,
+        },
+        actor,
+      );
+    case 'closeOrder':
+      return executeCloseOrder(
         client,
         {
           orderId: payload.orderId as string,

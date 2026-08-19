@@ -88,6 +88,18 @@ export type PrecheckPayload = {
   idempotencyKey: string;
 };
 
+export type RecordPaymentPayload = {
+  orderId: string;
+  paymentMethodId: string;
+  amountMicros: number;
+  idempotencyKey: string;
+};
+
+export type CloseOrderPayload = {
+  orderId: string;
+  idempotencyKey: string;
+};
+
 const parseIdempotencyKey = (value: unknown): ParseResult<string> => {
   if (!isUuid(value)) {
     return invalid('INVALID_PAYLOAD', 'idempotencyKey must be a UUID');
@@ -331,6 +343,32 @@ const parsePrecheckPayload = (payload: unknown): ParseResult<PrecheckPayload> =>
   return { ok: true, data: { orderId, idempotencyKey: parsedKey.data } };
 };
 
+const parseRecordPaymentPayload = (
+  payload: unknown,
+): ParseResult<RecordPaymentPayload> => {
+  if (typeof payload !== 'object' || payload === null) {
+    return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  }
+  const { orderId, paymentMethodId, amountMicros, idempotencyKey } =
+    payload as Record<string, unknown>;
+  if (!isUuid(orderId) || !isUuid(paymentMethodId)) {
+    return invalid('INVALID_PAYLOAD', 'orderId and paymentMethodId must be UUIDs');
+  }
+  if (
+    typeof amountMicros !== 'number' ||
+    !Number.isSafeInteger(amountMicros) ||
+    amountMicros <= 0
+  ) {
+    return invalid('INVALID_PAYLOAD', 'amountMicros must be a positive safe integer');
+  }
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return {
+    ok: true,
+    data: { orderId, paymentMethodId, amountMicros, idempotencyKey: parsedKey.data },
+  };
+};
+
 export const parsePosCommandEnvelope = (
   body: unknown,
 ): ParseResult<PosCommandEnvelope> => {
@@ -430,6 +468,10 @@ export const parseCommandPayload = <T>(
       return parsePrintKitchenTicket(payload) as unknown as ParseResult<T>;
     case 'createPrecheck':
     case 'cancelPrecheck':
+      return parsePrecheckPayload(payload) as unknown as ParseResult<T>;
+    case 'recordPayment':
+      return parseRecordPaymentPayload(payload) as unknown as ParseResult<T>;
+    case 'closeOrder':
       return parsePrecheckPayload(payload) as unknown as ParseResult<T>;
   }
 };

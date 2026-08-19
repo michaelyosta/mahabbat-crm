@@ -94,9 +94,13 @@ temporary handoff and wait for the user's decision on the next phase.
 - [x] POS Slice 3 — server-side Precheck snapshot, `PRECHECK_PRINTED` order lock,
   ADMIN-only cancel and retry/crash repair. Live acceptance passed on both
   `:2020` and `:3000` (62/62 checks per target); Twenty core changes: 0.
+- [x] POS Slice 4 — configurable payment methods, immutable controlled payments,
+  server-authoritative remaining/overpayment guard, partial cash/card payments,
+  guarded close and retry/concurrency safety. Live acceptance passed on both
+  `:2020` and `:3000` (68/68 checks per target); Twenty core changes: 0.
 
 ## NEXT
 
-- `PAYMENTS + PARTIAL PAYMENTS + CLOSE ORDER` — next bounded slice: configurable
-  payment methods, immutable successful payments, remaining calculation and
-  server-authoritative close.
+- `RESERVATIONS + PREPAYMENT` — next bounded slice: table-linked reservation,
+  overdue preservation, exactly-once prepayment attachment and remaining
+  calculation. Do not begin void/transfer or touch UI until this slice passes.

@@ -21,6 +21,8 @@ import { POS_STOP_LIST_ENTRY_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-stop-l
 import { POS_KITCHEN_TICKET_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-kitchen-ticket.object';
 import { POS_KITCHEN_TICKET_LINE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-kitchen-ticket-line.object';
 import { POS_PRECHECK_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-precheck.object';
+import { POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment-method.object';
+import { POS_PAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment.object';
 import { POS_STAFF_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-staff.object';
 import { POS_SESSION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-session.object';
 import { POS_TABLE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-table.object';
@@ -102,6 +104,8 @@ export default defineApplicationRole({
       POS_KITCHEN_TICKET_UNIVERSAL_IDENTIFIER,
       POS_KITCHEN_TICKET_LINE_UNIVERSAL_IDENTIFIER,
       POS_PRECHECK_UNIVERSAL_IDENTIFIER,
+      POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER,
+      POS_PAYMENT_UNIVERSAL_IDENTIFIER,
       POS_STAFF_UNIVERSAL_IDENTIFIER,
       POS_SESSION_UNIVERSAL_IDENTIFIER,
     ].map((objectUniversalIdentifier) => ({
