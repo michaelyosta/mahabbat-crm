@@ -59,15 +59,23 @@ datasets into a synthetic operational history.
 
 POS is a separate operational layer on `pos*` custom objects, not an extension
 of the CRM `Order`. Slice 1 currently implements `PosShift`, `PosZone`,
-`PosTable`, `PosOrder`, `PosOrderGuest`, `PosOrderLine`, `PosMenuItem` and the
-stop-list read/check surface. Mutations go through the signed `/pos/command`
-route and server dispatcher; generic waiter CRUD is read-only. POS money uses
-Twenty Currency micro-units, and CRM Orders/OrderItems remain untouched.
+`PosTable`, `PosOrder`, `PosOrderGuest`, `PosOrderLine`, `PosMenuItem`, the
+stop-list read/check surface and the operational identity objects `PosStaff`/
+`PosSession`. Mutations go through the signed `/pos/command` route and server
+dispatcher; generic waiter CRUD is read-only. POS money uses Twenty Currency
+micro-units, and CRM Orders/OrderItems remain untouched.
+
+POS authentication is independent from Twenty WorkspaceMember authentication:
+`authenticatePosStaff` verifies a scrypt PIN/card against `PosStaff`, issues a
+short-lived session whose token hash is stored in `PosSession`, and every later
+command resolves actor staff/role from that session. `TWENTY_APP_ACCESS_TOKEN`
+remains only the service credential used by the resolver to access the Twenty
+data plane.
 
 Kitchen printing, prechecks, payments, reservations/prepayments, voids,
 transfers and append-only operational audit remain explicitly deferred. The
 complete boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
-`docs/POS_DOMAIN.md`. The current command actor is an authenticated-route
-payload context because Twenty v2.29.0's App event does not expose a member
-identity; this is documented as a platform limitation and is not an Internet
-security claim.
+`docs/POS_DOMAIN.md`. Twenty v2.29.0's App event still does not expose a member
+identity, so outer route authentication and the Mahabbat POS session are
+deliberately separate layers. The POS session is a pilot operational boundary,
+not a claim that Twenty's outer API-key route is a full Internet auth platform.

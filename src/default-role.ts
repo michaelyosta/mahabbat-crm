@@ -18,6 +18,8 @@ import { POS_ORDER_LINE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-order-line.
 import { POS_ORDER_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-order.object';
 import { POS_SHIFT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-shift.object';
 import { POS_STOP_LIST_ENTRY_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-stop-list-entry.object';
+import { POS_STAFF_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-staff.object';
+import { POS_SESSION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-session.object';
 import { POS_TABLE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-table.object';
 import { POS_ZONE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-zone.object';
 
@@ -94,6 +96,8 @@ export default defineApplicationRole({
       POS_ORDER_LINE_UNIVERSAL_IDENTIFIER,
       POS_MENU_ITEM_UNIVERSAL_IDENTIFIER,
       POS_STOP_LIST_ENTRY_UNIVERSAL_IDENTIFIER,
+      POS_STAFF_UNIVERSAL_IDENTIFIER,
+      POS_SESSION_UNIVERSAL_IDENTIFIER,
     ].map((objectUniversalIdentifier) => ({
       objectUniversalIdentifier,
       canReadObjectRecords: true,

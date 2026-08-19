@@ -50,6 +50,12 @@ Use the corresponding private self-hosted values only when explicitly working
 against `:3000`. Never place real values in this repository or in shell history
 that will be captured by CI.
 
+For POS authentication seed/acceptance, supply waiter/admin PINs only through a
+private environment (`MAHABBAT_POS_SEED_WAITER_PIN`,
+`MAHABBAT_POS_SEED_ADMIN_PIN`, `MAHABBAT_POS_PIN_A`, `MAHABBAT_POS_PIN_B`). The
+repository stores only scrypt hashes; plaintext PINs are never written to
+Twenty or logged by the App.
+
 ## Verifying your setup
 
 - `yarn lint` - Lint the project with oxlint

@@ -319,3 +319,22 @@ Waiter is server-checked as owner of the order/shift it mutates (FORBIDDEN on
 other owners). Because Twenty App exposes no real multi-user RBAC at this
 layer, the actor context is a documented platform limitation, not a full
 auth/security boundary; real authentication/sessions are a future slice.
+
+## 2026-08-19 — ADR-2026-08-POS-3: Mahabbat-owned POS authentication context
+
+ADR-2026-08-POS-2's client-supplied actor context is superseded for runtime
+commands. Twenty `WorkspaceMember` remains the CRM/backoffice identity, while
+POS uses `PosStaff` (`displayName`, `role`, `pinHash`, card identifier and
+active/lock state) and `PosSession` (hashed token, staff, role, issue/expiry,
+revocation and terminal). `authenticatePosStaff` is the only command without a
+session; all other commands resolve actor staff/role via
+`getAuthenticatedPosContext()`. `TWENTY_APP_ACCESS_TOKEN` remains a service
+credential for the Twenty data plane and is never treated as waiter identity.
+
+PIN hashes use Node's built-in memory-hard `scrypt` format, so no external
+hashing dependency is introduced. Raw PINs, raw session tokens and API keys are
+never stored or logged. The pilot includes a five-failure/60-second in-process
+rate boundary; distributed throttling, 2FA and refresh rotation remain outside
+this foundation. `body.staffId`, `body.actorStaffId` and `body.role` are not
+trusted; target staff IDs in future transfer commands remain business targets,
+distinct from the authenticated actor.

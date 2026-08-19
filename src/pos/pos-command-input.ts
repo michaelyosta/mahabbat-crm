@@ -1,8 +1,5 @@
 import {
-  POS_ACTOR_ROLES,
   POS_COMMANDS,
-  type PosActor,
-  type PosActorRole,
   type PosCommand,
 } from 'src/pos/pos-permissions';
 
@@ -34,13 +31,18 @@ const isUuid = (value: unknown): value is string =>
 
 export type PosCommandEnvelope = {
   command: PosCommand;
-  actor: PosActor;
+  sessionToken?: string;
   payload: Record<string, unknown>;
 };
 
 export type OpenShiftPayload = {
-  staffId: string;
   idempotencyKey: string;
+};
+
+export type AuthenticatePosStaffPayload = {
+  pin?: string;
+  cardIdentifier?: string;
+  terminalId?: string;
 };
 
 export type CloseShiftPayload = {
@@ -69,27 +71,6 @@ export type AddLinePayload = {
 export type ChangeLineQuantityPayload = {
   lineId: string;
   quantity: number;
-};
-
-const parseActor = (value: unknown): ParseResult<PosActor> => {
-  if (typeof value !== 'object' || value === null) {
-    return invalid('INVALID_ACTOR', 'actor must be an object');
-  }
-
-  const { staffId, role } = value as Record<string, unknown>;
-
-  if (!isUuid(staffId)) {
-    return invalid('INVALID_ACTOR', 'actor.staffId must be a UUID');
-  }
-
-  if (
-    typeof role !== 'string' ||
-    !POS_ACTOR_ROLES.includes(role as PosActorRole)
-  ) {
-    return invalid('INVALID_ACTOR', 'actor.role must be ADMIN or WAITER');
-  }
-
-  return { ok: true, data: { staffId, role: role as PosActorRole } };
 };
 
 const parseIdempotencyKey = (value: unknown): ParseResult<string> => {
@@ -121,19 +102,54 @@ const parseOpenShift = (payload: unknown): ParseResult<OpenShiftPayload> => {
     return invalid('INVALID_PAYLOAD', 'payload must be an object');
   }
 
-  const { staffId, idempotencyKey } = payload as Record<string, unknown>;
-
-  if (!isUuid(staffId)) {
-    return invalid('INVALID_PAYLOAD', 'staffId must be a UUID');
-  }
+  const { idempotencyKey } = payload as Record<string, unknown>;
 
   const parsedKey = parseIdempotencyKey(idempotencyKey);
   if (!parsedKey.ok) return parsedKey;
 
   return {
     ok: true,
-    data: { staffId, idempotencyKey: parsedKey.data },
+    data: { idempotencyKey: parsedKey.data },
   };
+};
+
+const parseAuthenticatePosStaff = (
+  payload: unknown,
+): ParseResult<AuthenticatePosStaffPayload> => {
+  if (typeof payload !== 'object' || payload === null) {
+    return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  }
+
+  const { pin, cardIdentifier, terminalId } = payload as Record<string, unknown>;
+
+  if (pin !== undefined && typeof pin !== 'string') {
+    return invalid('INVALID_PAYLOAD', 'pin must be a string');
+  }
+
+  if (cardIdentifier !== undefined && typeof cardIdentifier !== 'string') {
+    return invalid('INVALID_PAYLOAD', 'cardIdentifier must be a string');
+  }
+
+  if (terminalId !== undefined && typeof terminalId !== 'string') {
+    return invalid('INVALID_PAYLOAD', 'terminalId must be a string');
+  }
+
+  const hasPin = typeof pin === 'string';
+  const hasCard = typeof cardIdentifier === 'string';
+  if (hasPin === hasCard) {
+    return invalid('INVALID_PAYLOAD', 'provide exactly one of pin or cardIdentifier');
+  }
+  if (hasPin && !/^\d{4,8}$/.test(pin as string)) {
+    return invalid('INVALID_PAYLOAD', 'pin must contain 4 to 8 digits');
+  }
+  if (hasCard && !(cardIdentifier as string).trim()) {
+    return invalid('INVALID_PAYLOAD', 'cardIdentifier must not be blank');
+  }
+  if (typeof terminalId === 'string' && terminalId.length > 128) {
+    return invalid('INVALID_PAYLOAD', 'terminalId is too long');
+  }
+
+  return { ok: true, data: { pin, cardIdentifier, terminalId } };
 };
 
 const parseCloseShift = (payload: unknown): ParseResult<CloseShiftPayload> => {
@@ -262,7 +278,8 @@ export const parsePosCommandEnvelope = (
     return invalid('INVALID_BODY', 'Request body must be a JSON object');
   }
 
-  const { command, actor, payload } = body as Record<string, unknown>;
+  const { command, actor, payload, sessionToken, staffId, actorStaffId, role } =
+    body as Record<string, unknown>;
 
   if (
     typeof command !== 'string' ||
@@ -275,14 +292,27 @@ export const parsePosCommandEnvelope = (
     return invalid('INVALID_COMMAND', 'command must be a string');
   }
 
-  const parsedActor = parseActor(actor);
-  if (!parsedActor.ok) return parsedActor;
+  if (
+    actor !== undefined ||
+    staffId !== undefined ||
+    actorStaffId !== undefined ||
+    role !== undefined
+  ) {
+    return invalid(
+      'INVALID_ACTOR',
+      'actor is server-derived; authenticate a POS session instead.',
+    );
+  }
+
+  if (sessionToken !== undefined && typeof sessionToken !== 'string') {
+    return invalid('INVALID_ACTOR', 'sessionToken must be a string');
+  }
 
   return {
     ok: true,
     data: {
       command: command as PosCommand,
-      actor: parsedActor.data,
+      ...(typeof sessionToken === 'string' ? { sessionToken } : {}),
       payload:
         typeof payload === 'object' && payload !== null
           ? (payload as Record<string, unknown>)
@@ -295,7 +325,32 @@ export const parseCommandPayload = <T>(
   command: PosCommand,
   payload: unknown,
 ): ParseResult<T> => {
+  if (typeof payload === 'object' && payload !== null) {
+    const suppliedIdentityField = [
+      'actor',
+      'staffId',
+      'actorStaffId',
+      'ownerStaffId',
+      'openedByStaffId',
+      'role',
+    ].find((field) => field in (payload as Record<string, unknown>));
+
+    if (suppliedIdentityField) {
+      return invalid(
+        'INVALID_ACTOR',
+        `${suppliedIdentityField} is server-derived and cannot be supplied by the client.`,
+      ) as ParseResult<T>;
+    }
+  }
+
   switch (command) {
+    case 'authenticatePosStaff':
+      return parseAuthenticatePosStaff(payload) as unknown as ParseResult<T>;
+    case 'logoutPosStaff':
+      if (typeof payload !== 'object' || payload === null) {
+        return invalid('INVALID_PAYLOAD', 'payload must be an object');
+      }
+      return { ok: true, data: {} as T };
     case 'openShift':
       return parseOpenShift(payload) as unknown as ParseResult<T>;
     case 'closeShift':

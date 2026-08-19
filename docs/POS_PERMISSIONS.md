@@ -3,13 +3,27 @@
 ## Правило (ультра-премиум, но честное)
 На всех «Ультра-премиум» разрешениях действует максимально широкое-but-derived правило: владелец заказа = `ownerStaffId` == токен аутентификации. Реализация только на **level 1 (app-wide)** в `canUserAccessX`/roles; N/A на workspace-member level.
 
-## Platform ограничение (документировано)
-Twenty App на своём слое доверяет `staffId` из контекста команды. У нас это **не настоящие роли**: это клиент postлает `x-mahabbat-signature` (HMAC), которым сервер подписывает посылку, а роль `{staffId, role: WAITER|ADMIN}` идёт в контексте payload. Это документированный компромисс «лучше, чем ничего, а настоящая auth — за рамками FOUNDATION LOOP».
+## Operational auth boundary
+
+`Twenty WorkspaceMember` используется для CRM/backoffice, но не является POS
+identity. `TWENTY_APP_ACCESS_TOKEN` — service credential data plane и не является
+identity официанта.
+
+POS login выполняется командой `authenticatePosStaff` по PIN или card identifier.
+Сервер ищет `PosStaff`, проверяет `isActive`, scrypt PIN hash и rate/backoff
+boundary, затем создаёт короткую `PosSession`. В Twenty хранится только
+`tokenHash`; raw token возвращается только login-клиенту.
+
+Для каждой команды, кроме login, resolver вызывает
+`getAuthenticatedPosContext()`. Поэтому `actorStaffId` и `actorRole` всегда
+получаются из verified session. Поля `body.staffId`, `body.actorStaffId` и
+`body.role` отсутствуют в рабочем контракте и client-supplied `actor` отвергается.
 
 ### Что это НЕ значит
 - Не «роли платформы» (их нет).
 - Не «полноценная server-side RBAC» для multi-user одноранговой сети.
-- Не безопасная API-граница для интернета (слайс 6 должен ввести реальный auth/сессии).
+- Не полноценная Internet auth platform: внешний route всё ещё требует Twenty
+  route authentication, а pilot rate limit хранится в памяти процесса.
 
 ### Что это значит на практике
 - Все POS-объекты на уровне ролей — read-only для WAITER (кроме явных exceptions, кк-бд).
@@ -35,18 +49,18 @@ Twenty App на своём слое доверяет `staffId` из контек
 Всё из WAITER + команды ADMIN-only (слайсы 3–6): checkPrecheck, cancelPrecheck, close, transfer*, cancelOrder, voidLines. Слайс 1 — только WAITER-набор (ADMIN пока не нужен для команд, но контекст готов).
 
 ## Физическая привязка owner (server-side)
-- `openShift` → staffId из payload; смена привязана к staffId.
-- `openOrder` → ownerStaffId = staffId из payload.
+- `openShift` → staffId из verified `PosSession`.
+- `openOrder` → ownerStaffId/openedByStaffId = staffId из verified `PosSession`.
 - `closeShift` → только смена, где `staffId == ctx.staffId`; чужая смена → `FORBIDDEN`.
 - `openOrder` на стол, где уже есть активный заказ (чужой) → unique-конфликт → ошибка, запись не создаётся.
 - `addGuest`/`addLine`/`changeLineQuantity` → только на заказе, где `ownerStaffId == ctx.staffId` (или ADMIN, слайс 3+).
 - Будущее: `transferOrderToTable/ToWaiter` — ADMIN-only, на чужой смене невозможны (проверка на receiver-стороне).
 
 ## Открытая документация (честно)
-Недостающие «настоящие» вещи на FOUNDATION LOOP (за пределами scope):
-- реальная auth (сессии, password hashing, 2FA, refresh) — для Internet-развёртывания
-- granular workspace-member RBAC (за ManageWorkspace)
-- IP-whitelisting / rate limiting
+Ограничения, оставшиеся за пределами foundation:
+- 2FA, refresh-token rotation и распределённый rate limiter для Internet-развёртывания
+- granular workspace-member RBAC (за ManageWorkspace) для CRM, не POS identity
+- IP-whitelisting и edge policy
 - audit log (OperationalEvent — задокументирован, слайс 6)
 
 ## Что важно для QA

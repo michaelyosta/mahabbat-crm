@@ -10,6 +10,8 @@ import { POS_SHIFT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-shift.object';
 import { POS_STOP_LIST_ENTRY_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-stop-list-entry.object';
 import { POS_TABLE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-table.object';
 import { POS_ZONE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-zone.object';
+import { POS_STAFF_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-staff.object';
+import { POS_SESSION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-session.object';
 
 const POS_OBJECT_IDS = [
   POS_SHIFT_UNIVERSAL_IDENTIFIER,
@@ -55,7 +57,11 @@ describe('Mahabbat POS Waiter role boundary', () => {
 
 describe('default function role POS write boundary', () => {
   it('gives the function role write access to POS objects for the resolver', () => {
-    for (const objectUniversalIdentifier of POS_OBJECT_IDS) {
+    for (const objectUniversalIdentifier of [
+      ...POS_OBJECT_IDS,
+      POS_STAFF_UNIVERSAL_IDENTIFIER,
+      POS_SESSION_UNIVERSAL_IDENTIFIER,
+    ]) {
       const permission = defaultRole.config.objectPermissions?.find(
         (entry) => entry.objectUniversalIdentifier === objectUniversalIdentifier,
       );

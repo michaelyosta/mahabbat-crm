@@ -9,7 +9,6 @@ import {
 type Row = Record<string, unknown> & { id: string };
 
 type TableKind =
-  | 'workspaceMembers'
   | 'posShifts'
   | 'posTables'
   | 'posMenuItems'
@@ -27,7 +26,6 @@ class UniqueViolationError extends Error {
 
 class FakePosDb {
   readonly rows: Record<TableKind, Row[]> = {
-    workspaceMembers: [],
     posShifts: [],
     posTables: [],
     posMenuItems: [],
@@ -181,7 +179,6 @@ class FakePosDb {
 
   private toKind(root: string): TableKind {
     const map: Record<string, TableKind> = {
-      workspaceMembers: 'workspaceMembers',
       posShifts: 'posShifts',
       posTables: 'posTables',
       posMenuItems: 'posMenuItems',
@@ -215,8 +212,6 @@ const key = (n: number) =>
 
 const dbWithBaseline = () => {
   const db = new FakePosDb();
-  db.seed('workspaceMembers', { id: STAFF });
-  db.seed('workspaceMembers', { id: OTHER_STAFF });
   db.seed('posTables', {
     id: TABLE,
     number: 'T1',
@@ -241,22 +236,16 @@ describe('pos domain happy path', () => {
   it('opens a shift and rejects a duplicate open for the same staff', async () => {
     const db = dbWithBaseline();
 
-    const first = await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    const first = await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     expect(first.status).toBe(201);
     expect((first.body as { shiftId: string }).shiftId).toBeTruthy();
 
-    const second = await executeOpenShift(db, {
-      staffId: STAFF,
-      idempotencyKey: key(2),
-    });
+    const second = await executeOpenShift(db, { idempotencyKey: key(2) }, waiter);
     // The pre-existing open shift is surfaced instead of creating a second one.
     expect(second.status).toBe(200);
     const racedShiftId = (second.body as { shiftId: string }).shiftId;
 
-    const winner = await executeOpenShift(db, {
-      staffId: STAFF,
-      idempotencyKey: key(1),
-    });
+    const winner = await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     expect(winner.status).toBe(200);
     expect((winner.body as { shiftId: string }).shiftId).toBe(racedShiftId);
 
@@ -265,7 +254,7 @@ describe('pos domain happy path', () => {
 
   it('opens an order only while a shift is open and only on an active table', async () => {
     const db = dbWithBaseline();
-    await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
 
     const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
     expect(opened.status).toBe(201);
@@ -291,7 +280,7 @@ describe('pos domain happy path', () => {
 
   it('adds guests and lines, snapshots the menu, and recomputes totals', async () => {
     const db = dbWithBaseline();
-    await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
     const orderId = (opened.body as { orderId: string }).orderId;
 
@@ -358,7 +347,7 @@ describe('pos domain happy path', () => {
 
   it('changes line quantities and recomputes totals', async () => {
     const db = dbWithBaseline();
-    await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
     const orderId = (opened.body as { orderId: string }).orderId;
 
@@ -392,7 +381,7 @@ describe('pos domain happy path', () => {
 
   it('closes a shift but leaves orders open and owned', async () => {
     const db = dbWithBaseline();
-    const shift = await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    const shift = await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     const shiftId = (shift.body as { shiftId: string }).shiftId;
     await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
 
@@ -414,7 +403,7 @@ describe('pos domain happy path', () => {
 
   it('blocks editing an order owned by another waiter', async () => {
     const db = dbWithBaseline();
-    await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
     const orderId = (opened.body as { orderId: string }).orderId;
     await dispatchPosCommand(
@@ -459,12 +448,9 @@ describe('pos domain concurrency races', () => {
   it('surfaces the existing shift when two openShift calls race', async () => {
     const db = dbWithBaseline();
     // Simulate the concurrent winner: another open shift for the same staff.
-    await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
 
-    const losing = await executeOpenShift(db, {
-      staffId: STAFF,
-      idempotencyKey: key(2),
-    });
+    const losing = await executeOpenShift(db, { idempotencyKey: key(2) }, waiter);
 
     expect(losing.status).toBe(200);
     expect((losing.body as { shiftId: string }).shiftId).toBeTruthy();
@@ -474,8 +460,8 @@ describe('pos domain concurrency races', () => {
   it('returns 409 when two openOrder calls race for the same table', async () => {
     const db = dbWithBaseline();
     // Both waiters have their own open shifts; the race is on the table claim.
-    await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
-    await executeOpenShift(db, { staffId: OTHER_STAFF, idempotencyKey: key(11) });
+    await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
+    await executeOpenShift(db, { idempotencyKey: key(11) }, { staffId: OTHER_STAFF, role: 'WAITER' });
     await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
 
     const losing = await executeOpenOrder(
@@ -491,7 +477,7 @@ describe('pos domain concurrency races', () => {
 
   it('does not duplicate a line on idempotent resubmission of addLine', async () => {
     const db = dbWithBaseline();
-    await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
     const orderId = (opened.body as { orderId: string }).orderId;
     const guest = await dispatchPosCommand(
@@ -525,7 +511,7 @@ describe('pos domain concurrency races', () => {
       menuItemId: MENU_A,
       isActive: true,
     });
-    await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
     const orderId = (opened.body as { orderId: string }).orderId;
     const guest = await dispatchPosCommand(
@@ -549,7 +535,7 @@ describe('pos domain concurrency races', () => {
 
   it('lets an admin close a shift owned by another staff member', async () => {
     const db = dbWithBaseline();
-    const shift = await executeOpenShift(db, { staffId: STAFF, idempotencyKey: key(1) });
+    const shift = await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     const shiftId = (shift.body as { shiftId: string }).shiftId;
 
     const waiterClose = await dispatchPosCommand(
@@ -570,28 +556,16 @@ describe('pos domain concurrency races', () => {
     expect(adminClose.status).toBe(200);
   });
 
-  it('rejects actor spoofing and foreign idempotency-key reuse', async () => {
+  it('rejects foreign idempotency-key reuse across authenticated staff contexts', async () => {
     const db = dbWithBaseline();
 
-    const spoofedShift = await dispatchPosCommand(
-      db,
-      'openShift',
-      { staffId: STAFF, idempotencyKey: key(20) },
-      { staffId: OTHER_STAFF, role: 'WAITER' },
-    );
-    expect(spoofedShift.status).toBe(400);
-    expect((spoofedShift.body as { code: string }).code).toBe('INVALID_STAFF');
-
-    const firstShift = await executeOpenShift(db, {
-      staffId: STAFF,
-      idempotencyKey: key(21),
-    });
+    const firstShift = await executeOpenShift(db, { idempotencyKey: key(21) }, waiter);
     expect(firstShift.status).toBe(201);
 
     const foreignShiftKey = await dispatchPosCommand(
       db,
       'openShift',
-      { staffId: OTHER_STAFF, idempotencyKey: key(21) },
+      { idempotencyKey: key(21) },
       { staffId: OTHER_STAFF, role: 'WAITER' },
     );
     expect(foreignShiftKey.status).toBe(409);
@@ -599,10 +573,7 @@ describe('pos domain concurrency races', () => {
       'IDEMPOTENCY_CONFLICT',
     );
 
-    await executeOpenShift(db, {
-      staffId: OTHER_STAFF,
-      idempotencyKey: key(22),
-    });
+    await executeOpenShift(db, { idempotencyKey: key(22) }, { staffId: OTHER_STAFF, role: 'WAITER' });
     const firstOrder = await executeOpenOrder(
       db,
       { tableId: TABLE, idempotencyKey: key(23) },

@@ -4,7 +4,8 @@ Restaurant CRM for one Kazakhstan business. The current phase is the **Mahabbat
 CRM Backoffice + POS Foundation**: customers, CRM orders and order items,
 reservations and an append-only loyalty ledger, plus aggregate sales history, a
 native Dashboard, bounded operational roles and the first server-side POS slice
-(shifts, zones/tables, POS orders, guests and order lines).
+(shifts, zones/tables, POS orders, guests, order lines and a separate
+`PosStaff`/`PosSession` authentication context).
 
 Not yet implemented: POS UI, kitchen printing, prechecks, payments,
 fiscalisation, reservations/prepayments in the POS flow, voids/transfers,

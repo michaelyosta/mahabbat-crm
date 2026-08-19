@@ -13,7 +13,7 @@
  *   MAHABBAT_API_URL=http://localhost:2020 MAHABBAT_API_KEY=<key> node scripts/seed-pos.mjs
  *   MAHABBAT_API_URL=... MAHABBAT_API_KEY=... node scripts/seed-pos.mjs --dry-run
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, scryptSync } from 'node:crypto';
 
 const MICROS_PER_TENGE = 1_000_000;
 const CURRENCY = 'KZT';
@@ -80,6 +80,55 @@ const menuItems = MENU.map(([name, category, price], i) => ({
   isActive: true,
 }));
 
+const normalizeSeedPin = (value) => {
+  const pin = value?.trim();
+  if (!pin) return null;
+  if (!/^\d{4,8}$/.test(pin)) {
+    throw new Error('MAHABBAT_POS_SEED_*_PIN must contain 4 to 8 digits');
+  }
+  return pin;
+};
+
+const pinHash = (pin) => {
+  const salt = randomBytes(16);
+  const key = scryptSync(pin, salt, 32, {
+    N: 16_384,
+    r: 8,
+    p: 1,
+    maxmem: 32 * 1024 * 1024,
+  });
+  return `scrypt$16384$8$1$${salt.toString('base64url')}$${key.toString('base64url')}`;
+};
+
+const waiterPin = normalizeSeedPin(process.env.MAHABBAT_POS_SEED_WAITER_PIN);
+const adminPin = normalizeSeedPin(process.env.MAHABBAT_POS_SEED_ADMIN_PIN);
+const posStaffs = [
+  waiterPin
+    ? {
+        id: idFor('posStaff', 0),
+        displayName: 'Демо официант',
+        role: 'WAITER',
+        pinHash: pinHash(waiterPin),
+        cardIdentifier: null,
+        isActive: true,
+        failedLoginCount: 0,
+        lockedUntil: null,
+      }
+    : null,
+  adminPin
+    ? {
+        id: idFor('posStaff', 1),
+        displayName: 'Демо администратор',
+        role: 'ADMIN',
+        pinHash: pinHash(adminPin),
+        cardIdentifier: null,
+        isActive: true,
+        failedLoginCount: 0,
+        lockedUntil: null,
+      }
+    : null,
+].filter(Boolean);
+
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function validate() {
@@ -116,6 +165,16 @@ function validate() {
     }
     if (item.price.currencyCode !== CURRENCY) errors.push(`menuItems[${i}]: bad currencyCode`);
     if (item.isActive !== true) errors.push(`menuItems[${i}]: isActive must be true`);
+  });
+
+  posStaffs.forEach((staff, i) => {
+    checkId(staff.id, `posStaffs[${i}]`);
+    if (!staff.displayName || !staff.pinHash) {
+      errors.push(`posStaffs[${i}]: displayName and pinHash must be set`);
+    }
+    if (!['WAITER', 'ADMIN'].includes(staff.role)) {
+      errors.push(`posStaffs[${i}]: role must be WAITER or ADMIN`);
+    }
   });
 
   return errors;
@@ -179,13 +238,16 @@ async function main() {
   }
 
   console.log('REST assumptions (verified against Twenty v2.29.0 source):');
-  console.log('  endpoints: /rest/posZones, /rest/posTables, /rest/posMenuItems');
+  console.log('  endpoints: /rest/posZones, /rest/posTables, /rest/posMenuItems, /rest/posStaffs');
   console.log('  relations via join columns: zoneId');
   console.log('  money: { amountMicros, currencyCode: "KZT" } (integer, no floats)');
   console.log('  idempotent: fixed UUID v4 ids, existing records skipped, nothing deleted');
   console.log('');
   console.log('POS seed plan:');
-  console.log(`  ${zones.length} zones, ${tables.length} tables, ${menuItems.length} menu items`);
+  console.log(`  ${zones.length} zones, ${tables.length} tables, ${menuItems.length} menu items, ${posStaffs.length} POS staff records`);
+  if (posStaffs.length === 0) {
+    console.log('  POS staff skipped: set MAHABBAT_POS_SEED_WAITER_PIN and/or MAHABBAT_POS_SEED_ADMIN_PIN privately to provision login identities');
+  }
   console.log(`  target: ${apiUrl}`);
 
   if (dryRun) {
@@ -200,6 +262,9 @@ async function main() {
   await sync(apiUrl, getEnv().apiKey, 'PosZone', 'posZones', zones);
   await sync(apiUrl, getEnv().apiKey, 'PosTable', 'posTables', tables);
   await sync(apiUrl, getEnv().apiKey, 'PosMenuItem', 'posMenuItems', menuItems);
+  if (posStaffs.length > 0) {
+    await sync(apiUrl, getEnv().apiKey, 'PosStaff', 'posStaffs', posStaffs);
+  }
   console.log('');
   console.log('POS seed complete.');
 }

@@ -8,6 +8,12 @@ import {
 import { asClient } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
 import { verifyInternalRouteBodySignature } from 'src/logic-functions/utils/mahabbat-internal-route-signature.util';
 import {
+  authenticatePosStaff,
+  getAuthenticatedPosContext,
+  revokePosSession,
+} from 'src/pos/pos-auth';
+import type { AuthenticatePosStaffPayload } from 'src/pos/pos-auth';
+import {
   parseCommandPayload,
   parsePosCommandEnvelope,
 } from 'src/pos/pos-command-input';
@@ -40,17 +46,35 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
 
   if (!envelope.ok) return response(envelope.error, 400);
 
-  const { command, actor, payload } = envelope.data;
+  const { command, payload, sessionToken } = envelope.data;
 
   const parsedPayload = parseCommandPayload(command, payload);
 
   if (!parsedPayload.ok) return response(parsedPayload.error, 400);
 
+  const client = asClient();
+
+  if (command === 'authenticatePosStaff') {
+    const result = await authenticatePosStaff(
+      client,
+      parsedPayload.data as AuthenticatePosStaffPayload,
+    );
+    return response(result.body, result.status);
+  }
+
+  const authenticated = await getAuthenticatedPosContext(client, sessionToken);
+  if (!authenticated.ok) return response(authenticated.result.body, authenticated.result.status);
+
+  if (command === 'logoutPosStaff') {
+    const result = await revokePosSession(client, authenticated.context);
+    return response(result.body, result.status);
+  }
+
   const result = await dispatchPosCommand(
-    asClient(),
+    client,
     command,
     parsedPayload.data as Record<string, unknown>,
-    actor,
+    authenticated.context,
   );
 
   return response(result.body, result.status);

@@ -1,4 +1,6 @@
 export const POS_COMMANDS = [
+  'authenticatePosStaff',
+  'logoutPosStaff',
   'openShift',
   'closeShift',
   'openOrder',
@@ -18,7 +20,14 @@ export type PosActor = {
   role: PosActorRole;
 };
 
-const WAITER_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(POS_COMMANDS);
+export const POS_AUTH_COMMANDS = new Set<PosCommand>([
+  'authenticatePosStaff',
+  'logoutPosStaff',
+]);
+
+const WAITER_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(
+  POS_COMMANDS.filter((command) => command !== 'authenticatePosStaff'),
+);
 
 const ADMIN_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(POS_COMMANDS);
 

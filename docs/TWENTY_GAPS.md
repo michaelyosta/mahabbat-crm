@@ -87,6 +87,13 @@ future Twenty upgrade.
 
 ## RBAC live-session verification gap (v2.29.0 headless, app-mode)
 
+This remains a Twenty CRM/backoffice limitation, not a POS identity contract.
+Mahabbat POS now uses its own `PosStaff` + short-lived `PosSession` boundary;
+`WorkspaceMember` and `TWENTY_APP_ACCESS_TOKEN` are deliberately not used as
+operational waiter identity. The POS pilot still relies on the outer route's
+Twenty authentication to reach the App, so this gap must be revisited before an
+Internet production deployment.
+
 In these environments the product `/graphql` surface serves only the app/core
 schema from the server build with the core AuthResolver module **not mounted**:
 none of `signIn`, `signInWithCredentials`, `login`, `verifyEmailAndGetLoginToken`,

@@ -10,8 +10,8 @@ const KEY = '30000000-0000-4000-8000-000000000001';
 
 const validEnvelope = {
   command: 'openShift',
-  actor: { staffId: STAFF, role: 'WAITER' },
-  payload: { staffId: STAFF, idempotencyKey: KEY },
+  sessionToken: 'x'.repeat(43),
+  payload: { idempotencyKey: KEY },
 };
 
 describe('parsePosCommandEnvelope', () => {
@@ -20,7 +20,7 @@ describe('parsePosCommandEnvelope', () => {
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
       expect(parsed.data.command).toBe('openShift');
-      expect(parsed.data.actor.role).toBe('WAITER');
+      expect(parsed.data.sessionToken).toHaveLength(43);
     }
   });
 
@@ -37,7 +37,7 @@ describe('parsePosCommandEnvelope', () => {
     expect(parsed.ok).toBe(false);
   });
 
-  it('rejects malformed actors', () => {
+  it('rejects client-supplied actor identity and role', () => {
     expect(
       parsePosCommandEnvelope({
         ...validEnvelope,
@@ -50,18 +50,41 @@ describe('parsePosCommandEnvelope', () => {
         actor: { staffId: STAFF, role: 'OWNER' },
       }).ok,
     ).toBe(false);
+    expect(
+      parsePosCommandEnvelope({ ...validEnvelope, staffId: STAFF }).ok,
+    ).toBe(false);
+    expect(
+      parsePosCommandEnvelope({ ...validEnvelope, role: 'ADMIN' }).ok,
+    ).toBe(false);
   });
 });
 
 describe('parseCommandPayload', () => {
   it('validates openShift payload', () => {
     expect(
-      parseCommandPayload('openShift', { staffId: STAFF, idempotencyKey: KEY }).ok,
+      parseCommandPayload('openShift', { idempotencyKey: KEY }).ok,
     ).toBe(true);
     expect(
       parseCommandPayload('openShift', {
-        staffId: 'bad',
         idempotencyKey: KEY,
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseCommandPayload('openShift', {
+        idempotencyKey: KEY,
+        staffId: STAFF,
+      }).ok,
+    ).toBe(false);
+  });
+
+  it('validates POS login payload without accepting an actor', () => {
+    expect(
+      parseCommandPayload('authenticatePosStaff', { pin: '1234' }).ok,
+    ).toBe(true);
+    expect(
+      parseCommandPayload('authenticatePosStaff', {
+        pin: '1234',
+        cardIdentifier: 'CARD-1',
       }).ok,
     ).toBe(false);
   });

@@ -15,14 +15,40 @@ POS — **отдельный операционный слой** на собст
 
 Последствия:
 - Все объекты POS имеют префикс `pos`.
-- Отношения к `workspaceMember` (staffId/ownerStaffId/…) — **логические UUID-поля TEXT**, валидируются на сервере при команде (де-факто НЕ внешние ключи). Стандартный объект не тронут (принцип "core 0 изменений").
+- `PosStaff` — отдельная operational identity ресторана. `staffId`/`ownerStaffId` — UUID `PosStaff`, а не `workspaceMember`; это логические TEXT-поля без зависимости POS-команд от WorkspaceMember.
 - Деньги: только `FieldType.CURRENCY` = `{ amountMicros, currencyCode }`, целые числа микров, без float.
+
+## Operational identity и сессия
+
+`Twenty WorkspaceMember` остаётся identity пользователя CRM/backoffice. POS не
+доверяет `staffId` или `role` из HTTP body и не трактует
+`TWENTY_APP_ACCESS_TOKEN` как identity официанта.
+
+### PosStaff — РЕАЛИЗОВАНО
+
+- Поля: `displayName`, `role` (`WAITER|ADMIN`), `pinHash` (scrypt),
+  `cardIdentifier`, `isActive`, служебные `failedLoginCount`/`lockedUntil`.
+- Plaintext PIN не хранится и не возвращается. Запись недоступна generic UI.
+- Card identifier — только lookup value, не криптографический секрет.
+
+### PosSession — РЕАЛИЗОВАНО
+
+- Поля: `sessionId`, `staffId`, `role`, `tokenHash`, `issuedAt`, `expiresAt`,
+  `revokedAt`, `terminalId`.
+- `authenticatePosStaff` возвращает raw short-lived token только клиенту
+  login-flow; в Twenty хранится только SHA-256 hash.
+- Все остальные команды проходят `getAuthenticatedPosContext()`. Actor
+  (`staffId`, `role`) получается из активной сессии, а не из body.
+- `logoutPosStaff` ставит `revokedAt`; истёкшая, отозванная, tampered или
+  inactive-staff сессия отклоняется.
+- Базовый brute-force boundary: 5 неудач на credential key → 60 секунд
+  lockout в процессе App. Это pilot guard, не распределённый WAF/rate limiter.
 
 ## Сущности
 
 ### 1. PosShift (Смена) — РЕАЛИЗОВАНО
 - **Цель**: рабочая сессия официанта; заказы открываются внутри смены.
-- **Владелец**: `staffId`. Одна активная смена на сотрудника (гарантируется UNIQUE(`staffId`, `isOpen`) + атомарный claim по `isOpen=true`).
+- **Владелец**: `staffId` из verified `PosSession`. Одна активная смена на сотрудника (гарантируется UNIQUE(`staffId`, `isOpen`) + атомарный claim по `isOpen=true`).
 - **Lifecycle**: OPEN → CLOSED. Закрытие смены **не** закрывает заказы и не меняет их владельца.
 - **Поля**: `label`, `staffId`, `status`, `openedAt`, `closedAt`, `isOpen` (nullable; true только пока открыта), `openToken` (маркер активной смены), `idempotencyKey`, `orders` (1:N).
 - **Инварианты**:
@@ -40,7 +66,7 @@ POS — **отдельный операционный слой** на собст
 - **Инвариант стола**: не более одного активного заказа на столе. Гарантия — UNIQUE(`tableId`, `claimToken`) на `PosOrder` (см. §6); `claimToken` детерминирован (равен `tableId`) пока заказ открыт и `null` после закрытия, поэтому PG unique пропускает закрытые (NULL) и блокирует второй активный.
 
 ### 4. PosOrder (Заказ POS) — РЕАЛИЗОВАНО
-- **Владелец**: `ownerStaffId` (официант, открывший заказ). `openedByStaffId` совпадает с owner на слайсе 1.
+- **Владелец**: `ownerStaffId` из verified `PosSession` (официант, открывший заказ). `openedByStaffId` совпадает с owner на слайсе 1.
 - **Lifecycle**: OPEN → IN_PROGRESS → PRECHECK_PRINTED → CLOSED (+ derived CANCELLED, слайс 6).
 - **Поля**: `label`, `status`, `shift` (N:1 PosShift, RESTRICT), `table` (N:1 PosTable, RESTRICT), `ownerStaffId`, `openedByStaffId`, `openedAt`, `closedAt`, `claimToken`, `idempotencyKey`, `guests` (1:N), `lines` (1:N), `subtotal`/`total` (CURRENCY, server-owned), `notes`.
 - **Инварианты**:
@@ -82,7 +108,9 @@ POS — **отдельный операционный слой** на собст
 ## Идемпотентность (слайс 1)
 Каждая создающая команда несёт `idempotencyKey` (UUID) с unique-индексами:
 `PosShift.idempotencyKey`, `PosOrder.idempotencyKey`, `PosOrderGuest.idempotencyKey`, `PosOrderLine.idempotencyKey`.
-Повторный вызов с тем же ключом возвращает существующий объект (200), при конфликте чужого ключа — не создаёт дубль и не маскирует ошибки.
+Повторный вызов с тем же ключом возвращает существующий объект (200), при
+конфликте другого authenticated staff/context — `409 IDEMPOTENCY_CONFLICT`, без
+создания дубля и без раскрытия первого результата.
 
 Ключ не является безусловным глобальным алиасом: повтор принимается только если
 контекст совпадает (staff для Shift, table/owner для Order, order/name для Guest,

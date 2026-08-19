@@ -54,11 +54,14 @@
 - POS is a separate operational layer on `pos*` custom objects; the CRM
   `Order`/`OrderItem` model and Customer 360 remain unchanged.
 - Implemented objects: `PosShift`, `PosZone`, `PosTable`, `PosOrder`,
-  `PosOrderGuest`, `PosOrderLine`, `PosMenuItem` and `PosStopListEntry`.
+  `PosOrderGuest`, `PosOrderLine`, `PosMenuItem`, `PosStopListEntry`,
+  `PosStaff` and `PosSession`.
 - The signed `/pos/command` route dispatches `openShift`, `closeShift`,
   `openOrder`, `addGuest`, `addLine` and `changeLineQuantity`. Server-owned
   Currency micro-unit totals, ownership checks, active-table claims and
   context-bound idempotency are enforced in `src/pos/pos-command.dispatch.ts`.
+  `authenticatePosStaff` creates the short-lived session; later commands derive
+  actor staff/role from `getAuthenticatedPosContext()`.
 - Duplicate active shifts/orders are prevented by unique indexes; identical
   menu items remain independent POS lines; closing a shift leaves its order
   open and owned.
@@ -66,8 +69,9 @@
   `docs/POS_STATE_MACHINES.md`, `docs/POS_PERMISSIONS.md`,
   `docs/POS_COMMANDS.md`, `docs/POS_QA.md` and `scripts/accept-pos.mjs`.
 - Twenty core modifications remain `0`. A real member identity is not exposed
-  in Twenty v2.29.0 App `RoutePayload`; the signed actor context is therefore
-  an explicitly documented foundation limitation, not an Internet RBAC claim.
+  in Twenty v2.29.0 App `RoutePayload`; POS therefore uses the separate
+  Mahabbat `PosStaff`/`PosSession` context. The outer Twenty route/API key is
+  still not claimed as production RBAC.
 
 # PRE-POS hardening (FINAL PASS)
 
@@ -115,10 +119,10 @@
 
 # Последняя проверка
 
-- 2026-08-19 POS checkpoint: `:2020/healthz` and `:3000/healthz` both return
-  200; `yarn typecheck`, `yarn lint`, `yarn test:unit` (215/215) and
-  `yarn seed:pos:dry` pass. Live command acceptance is not claimed because no
-  workspace API key is present in the environment.
+- 2026-08-19 POS auth-context checkpoint: `yarn typecheck`, `yarn lint`,
+  `yarn test:unit` (222/222) and `yarn seed:pos:dry` pass. `:2020/healthz` and
+  `:3000/healthz` are green, but live data-plane/auth acceptance is not claimed
+  because no workspace API key/POS seed PINs are present in the environment.
 - On 2026-08-09 Linux `twenty-sdk@2.29.0` plan/apply updated Customer 360 on
   pinned Twenty `v2.29.0` without a core change; the same update was applied
   to disposable `:2020` and ordinary self-hosted `:3000`.
@@ -205,6 +209,10 @@
   Kitchen printing, payments, fiscalisation and the remaining restaurant
   operations are not implemented; their bounded sequence is documented in
   `docs/POS_DOMAIN.md` and requires separate checkpoints.
+- POS auth context is implemented with `PosStaff`/`PosSession`; the outer
+  Twenty route still requires a workspace API key and is not a POS employee
+  identity. The pilot brute-force limiter is process-local and must be replaced
+  by a distributed boundary before Internet production use.
 - Native Windows Apps SDK paths are a development-environment limitation.
   Standard development is Linux/WSL; it is not a Twenty architectural blocker.
 - Twenty v2.29.0 cannot plan a composite App index on standard Person; the
@@ -221,8 +229,10 @@
 - The user-managed one-time API-key handoff file could not be deleted by the
   local execution policy after successful deployment. It was never displayed;
   remove `C:\Users\misa\.mahabbat-selfhost-api-key` manually.
-- The current POS checkpoint has local source/doc changes pending commit; the
-  unrelated `prototypes/` workspace is intentionally not part of this slice.
+- The POS auth-context checkpoint is committed. The only local
+  untracked item is `prototypes/mahabbat-pos-ultra-premium.html`, a standalone UI
+  reference for the future touch flow; it is not runtime and is not a source
+  of data or staff identity.
 - Generic standard navigation (`Companies`, `People`, `Opportunities`,
   `Tasks`, `Notes`, `Dashboards`, `Workflows`) cannot be hidden from an App
   manifest. The supported compromise is Mahabbat-first negative positions and
@@ -262,9 +272,9 @@ views and discoverable business views) is complete; the generic scaffold page
 has been removed.
 
 The current POS slice is the server-side operational foundation:
-Staff context -> active Shift -> free Table -> POS Order -> multiple Guests ->
-independent OrderLines -> server totals -> persistence. There is no POS UI,
-printer, precheck or payment path yet.
+PosStaff PIN/card -> PosSession -> active Shift -> free Table -> POS Order ->
+multiple Guests -> independent OrderLines -> server totals -> persistence. There
+is no POS UI, printer, precheck or payment path yet.
 
 # Следующий лучший шаг
 

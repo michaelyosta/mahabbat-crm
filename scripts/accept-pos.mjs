@@ -1,14 +1,14 @@
 /**
  * Mahabbat POS slice 1 runtime acceptance against a live Twenty workspace.
  *
- * Exercises the full public command boundary: authenticated POST to the
- * gateway route `/s/pos/command` (API key bearer) which validates the envelope,
- * signs it with the internal HMAC secret and forwards to the app-only server
- * resolver. Persisted state is verified through /rest.
+ * Exercises the full public command boundary: workspace API-key access is used
+ * only by this local acceptance harness; POS commands themselves use short-
+ * lived Mahabbat POS sessions obtained through authenticatePosStaff.
  *
  * Usage:
  *   MAHABBAT_API_URL=http://host.docker.internal:2020 \
  *   MAHABBAT_API_KEY=<workspace api key> \
+ *   MAHABBAT_POS_PIN_A=<waiter A PIN> MAHABBAT_POS_PIN_B=<waiter B PIN> \
  *   node scripts/accept-pos.mjs
  *
  * Self-adaptive and re-runnable: picks staff with no open shift and free
@@ -18,9 +18,8 @@
 import { randomUUID } from 'node:crypto';
 
 const RESOLVER_UID = '54be0dfa-2fd6-45bc-be93-6ba4c64a21d9';
-const STAFF_A = process.env.MAHABBAT_STAFF_A ?? '20202020-0687-4c41-b707-ed1bfca972a7';
-const STAFF_B = process.env.MAHABBAT_STAFF_B ?? '32323232-0001-4000-8000-000000000000';
-const OTHER_STAFF = process.env.MAHABBAT_OTHER_STAFF ?? '00000000-0000-4000-8000-000000000000';
+let STAFF_A = '';
+let STAFF_B = '';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -48,8 +47,9 @@ const restGet = async (apiUrl, apiKey, plural) => {
   return payload.data?.[plural] ?? [];
 };
 
-const postCommand = async (apiUrl, apiKey, command, actor, payload) => {
-  const envelope = { command, actor, payload };
+const postCommand = async (apiUrl, apiKey, command, session, payload) => {
+  const envelope = { command, payload };
+  if (session?.sessionToken) envelope.sessionToken = session.sessionToken;
   const res = await fetch(`${apiUrl}/s/pos/command`, {
     method: 'POST',
     headers: {
@@ -68,6 +68,35 @@ const postCommand = async (apiUrl, apiKey, command, actor, payload) => {
   return { status: res.status, body: parsed };
 };
 
+const authenticate = async (apiUrl, apiKey, credential, terminalId) => {
+  const payload = credential.pin
+    ? { pin: credential.pin, terminalId }
+    : { cardIdentifier: credential.cardIdentifier, terminalId };
+  const res = await fetch(`${apiUrl}/s/pos/command`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ command: 'authenticatePosStaff', payload }),
+  });
+  const text = await res.text();
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = { raw: text };
+  }
+  if (res.status !== 201 || typeof body?.sessionToken !== 'string' || !body.staff?.id) {
+    throw new Error(`POS staff authentication failed with status ${res.status}`);
+  }
+  return {
+    staffId: body.staff.id,
+    role: body.staff.role,
+    sessionToken: body.sessionToken,
+  };
+};
+
 const sumActiveMicros = (lines) =>
   lines
     .filter((l) => l.status === 'ACTIVE')
@@ -82,9 +111,58 @@ const main = async () => {
   const health = await fetch(`${apiUrl}/healthz`).catch(() => null);
   check('server reachable', Boolean(health?.ok), health ? `status ${health.status}` : 'no response');
 
-  const waiter = { staffId: STAFF_A, role: 'WAITER' };
-  const waiterB = { staffId: STAFF_B, role: 'WAITER' };
-  const otherWaiter = { staffId: OTHER_STAFF, role: 'WAITER' };
+  const pinA = process.env.MAHABBAT_POS_PIN_A?.trim();
+  const pinB = process.env.MAHABBAT_POS_PIN_B?.trim();
+  if (!pinA || !pinB) {
+    throw new Error('MAHABBAT_POS_PIN_A and MAHABBAT_POS_PIN_B must be set for live POS acceptance');
+  }
+  const waiter = await authenticate(apiUrl, apiKey, { pin: pinA }, 'acceptance-a');
+  const waiterB = await authenticate(apiUrl, apiKey, { pin: pinB }, 'acceptance-b');
+  STAFF_A = waiter.staffId;
+  STAFF_B = waiterB.staffId;
+  const otherWaiter = waiterB;
+
+  const tamperedSession = await postCommand(
+    apiUrl,
+    apiKey,
+    'openShift',
+    { sessionToken: `${waiter.sessionToken}tampered` },
+    { idempotencyKey: randomUUID() },
+  );
+  check(
+    'tampered POS session is rejected before command dispatch',
+    tamperedSession.status === 401 &&
+      ['POS_SESSION_INVALID', 'POS_SESSION_EXPIRED', 'POS_SESSION_REQUIRED'].includes(
+        tamperedSession.body?.code,
+      ),
+    `status ${tamperedSession.status}, code ${tamperedSession.body?.code}`,
+  );
+
+  const spoofedActor = await fetch(`${apiUrl}/s/pos/command`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      command: 'openShift',
+      sessionToken: waiter.sessionToken,
+      actor: { staffId: STAFF_B, role: 'ADMIN' },
+      payload: { idempotencyKey: randomUUID() },
+    }),
+  });
+  const spoofedActorText = await spoofedActor.text();
+  let spoofedActorBody = null;
+  try {
+    spoofedActorBody = JSON.parse(spoofedActorText);
+  } catch {
+    spoofedActorBody = { raw: spoofedActorText };
+  }
+  check(
+    'client actor/role spoofing is rejected by the command parser',
+    spoofedActor.status === 400 && spoofedActorBody?.code === 'INVALID_ACTOR',
+    `status ${spoofedActor.status}, code ${spoofedActorBody?.code}`,
+  );
 
   const [tables, menuItems, shifts, orders] = await Promise.all([
     restGet(apiUrl, apiKey, 'posTables'),
@@ -112,7 +190,6 @@ const main = async () => {
   const hasOpen = openShiftIds.has(STAFF_A);
   const shiftKey = randomUUID();
   const openShift = await postCommand(apiUrl, apiKey, 'openShift', waiter, {
-    staffId: STAFF_A,
     idempotencyKey: shiftKey,
   });
   check(
@@ -124,7 +201,6 @@ const main = async () => {
   check('openShift returns a shiftId', typeof shiftId === 'string' && UUID_RE.test(shiftId), shiftId);
 
   const repeatShift = await postCommand(apiUrl, apiKey, 'openShift', waiter, {
-    staffId: STAFF_A,
     idempotencyKey: shiftKey,
   });
   check(
@@ -136,7 +212,6 @@ const main = async () => {
   if (!hasOpen) {
     const secondKey = randomUUID();
     const racedShift = await postCommand(apiUrl, apiKey, 'openShift', waiter, {
-      staffId: STAFF_A,
       idempotencyKey: secondKey,
     });
     const openForStaff = await restGet(apiUrl, apiKey, 'posShifts');
@@ -342,7 +417,7 @@ const main = async () => {
 
   const openShiftKeys = [randomUUID(), randomUUID()];
   const racers = openShiftKeys.map((idempotencyKey) =>
-    postCommand(apiUrl, apiKey, 'openShift', waiterB, { staffId: STAFF_B, idempotencyKey }),
+    postCommand(apiUrl, apiKey, 'openShift', waiterB, { idempotencyKey }),
   );
   const racedShifts = await Promise.all(racers);
   const racedShiftsOk = racedShifts.every((r) => [200, 201].includes(r.status));
@@ -456,8 +531,7 @@ const main = async () => {
     },
     body: JSON.stringify({
       command: 'openShift',
-      actor: { staffId: STAFF_A, role: 'WAITER' },
-      payload: { staffId: STAFF_A, idempotencyKey: randomUUID() },
+      payload: { idempotencyKey: randomUUID() },
     }),
   });
   const bogusText = await bogusSig.text();

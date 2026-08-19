@@ -10,6 +10,12 @@
 > CRM `Order`. Раздел 2 ниже оставлен как историческая фиксация рассмотренного
 > варианта; актуальная договорённость — `pos*`-объекты (см. `docs/POS_DOMAIN.md`).
 
+Текущий Slice 1 уже реализует `PosShift`, `PosZone`, `PosTable`, `PosOrder`,
+`PosOrderGuest`, `PosOrderLine`, `PosMenuItem`, `PosStaff` и `PosSession`.
+`WorkspaceMember` остаётся CRM identity; POS actor выводится только из
+короткоживущей verified `PosSession`. Следующие operational slices ещё не
+начаты.
+
 ## 1. Что уже есть (основание, не забывать при POS)
 
 - `Person` — запись клиента (id, имя, телефоны KZ, `customerStatus`,
@@ -65,7 +71,7 @@ POS-заказ — это операционный `Order` плюс призна
 
 ## 4. Не-цели сейчас
 
-- POS-UI, кассирские экраны, чек/фискализация, смены, интеграционный GitHub
+- POS-UI, кассирские экраны, чек/фискализация, печать, платежи и интеграционный GitHub
   Actions с внешним кассовым хостом.
 - SaaS/Kubernetes хостинг, маркетплейс-клайм, публичная публикация вне решения
   по дистрибуции (`docs/DISTRIBUTION_DECISION.md`).

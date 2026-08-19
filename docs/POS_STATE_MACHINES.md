@@ -2,6 +2,17 @@
 
 Источник истины по состояниям. Числовые постоянные зашиты в коде (см. `src/pos/pos-order-state.ts`); настоящие GraphQL enums — будущий слайс.
 
+## PosSession
+
+```
+authenticatePosStaff ─► ACTIVE ─► EXPIRED
+                              └► REVOKED (logout)
+```
+
+`ACTIVE` проверяется на каждом POS command. Сотрудник должен оставаться
+`PosStaff.isActive=true`, а текущая роль должна совпадать с ролью в сессии.
+Клиент не может продлить, изменить или подменить session actor.
+
 ## PosShift
 
 ```
@@ -12,7 +23,8 @@
                        │
                  STUCK? (эвристика: OPEN дольше N часов — UI-сигнал, не статус)
 ```
-- Только один OPEN на staffId (unique). Повторный openShift = идемпотентный ответ.
+- Только один OPEN на authenticated `PosStaff.staffId` (unique). Повторный
+  openShift = идемпотентный ответ.
 - CLOSED не меняет принадлежность и не закрывает заказы.
 - Команда заказа на закрытую смену: `SHIFT_REQUIRED` (сервер).
 

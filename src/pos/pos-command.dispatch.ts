@@ -227,20 +227,6 @@ type Connection<T> = {
   pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
 };
 
-const workspaceMemberExists = async (
-  client: CoreApiClientLike,
-  staffId: string,
-): Promise<boolean> => {
-  const result = (await client.query({
-    workspaceMembers: {
-      __args: { filter: { id: { eq: staffId } }, first: 1 },
-      edges: { node: { id: true } },
-    },
-  })) as { workspaceMembers?: Connection<ExistingRecord> };
-
-  return Boolean(result.workspaceMembers?.edges?.[0]?.node?.id);
-};
-
 const findShiftById = async (
   client: CoreApiClientLike,
   shiftId: string,
@@ -591,21 +577,11 @@ const createShift = async (
 
 export const executeOpenShift = async (
   client: CoreApiClientLike,
-  payload: { staffId: string; idempotencyKey: string },
-  actor?: PosActor,
+  payload: { idempotencyKey: string },
+  actor: PosActor,
 ): Promise<CommandResult> => {
-  const { staffId, idempotencyKey } = payload;
-
-  if (actor && actor.staffId !== staffId) {
-    return errorResult(
-      'INVALID_STAFF',
-      'staffId must match the authenticated POS actor.',
-    );
-  }
-
-  if (!(await workspaceMemberExists(client, staffId))) {
-    return errorResult('INVALID_STAFF', 'Staff member does not exist.');
-  }
+  const { idempotencyKey } = payload;
+  const staffId = actor.staffId;
 
   const existingByIdempotency = await findShiftByIdempotencyKey(
     client,
@@ -1023,10 +999,11 @@ export const dispatchPosCommand = async (
 
   switch (command) {
     case 'openShift':
-      return executeOpenShift(client, {
-        staffId: payload.staffId as string,
-        idempotencyKey: payload.idempotencyKey as string,
-      }, actor);
+      return executeOpenShift(
+        client,
+        { idempotencyKey: payload.idempotencyKey as string },
+        actor,
+      );
     case 'closeShift':
       return executeCloseShift(
         client,
@@ -1069,6 +1046,12 @@ export const dispatchPosCommand = async (
         client,
         { lineId: payload.lineId as string, quantity: payload.quantity as number },
         actor,
+      );
+    case 'authenticatePosStaff':
+    case 'logoutPosStaff':
+      return errorResult(
+        'COMMAND_FORBIDDEN',
+        'POS authentication commands are handled before domain dispatch.',
       );
   }
 };

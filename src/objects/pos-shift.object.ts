@@ -51,7 +51,7 @@ export default defineObject({
       type: FieldType.TEXT,
       name: 'staffId',
       label: 'Сотрудник',
-      description: 'Идентификатор workspace member, открывшего смену',
+      description: 'Идентификатор PosStaff, открывшего смену',
       icon: 'IconUser',
       isNullable: false,
       isUIEditable: false,
