@@ -126,7 +126,7 @@ const okResult = (status: number, body: unknown): CommandResult => ({
   body,
 });
 
-type NodeSelection = Record<string, boolean>;
+type NodeSelection = Record<string, boolean | Record<string, boolean>>;
 
 const SHIFT_FIELDS: NodeSelection = {
   id: true,
@@ -148,7 +148,7 @@ const TABLE_FIELDS: NodeSelection = {
 const MENU_ITEM_FIELDS: NodeSelection = {
   id: true,
   name: true,
-  price: true,
+  price: { amountMicros: true, currencyCode: true },
   isActive: true,
 };
 
@@ -163,8 +163,8 @@ const ORDER_FIELDS: NodeSelection = {
   closedAt: true,
   claimToken: true,
   idempotencyKey: true,
-  subtotal: true,
-  total: true,
+  subtotal: { amountMicros: true, currencyCode: true },
+  total: { amountMicros: true, currencyCode: true },
 };
 
 const GUEST_FIELDS: NodeSelection = {
@@ -172,7 +172,7 @@ const GUEST_FIELDS: NodeSelection = {
   orderId: true,
   ordinal: true,
   displayNumber: true,
-  subtotal: true,
+  subtotal: { amountMicros: true, currencyCode: true },
   idempotencyKey: true,
 };
 
@@ -182,7 +182,7 @@ const LINE_FIELDS: NodeSelection = {
   guestId: true,
   menuItemId: true,
   itemNameSnapshot: true,
-  unitPrice: true,
+  unitPrice: { amountMicros: true, currencyCode: true },
   quantity: true,
   status: true,
   createdByStaffId: true,
