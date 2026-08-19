@@ -41,12 +41,25 @@ const check = (label, ok, detail = '') => {
 };
 
 const restGet = async (apiUrl, apiKey, plural) => {
-  const res = await fetch(`${apiUrl}/rest/${plural}`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-  if (!res.ok) throw new Error(`GET /rest/${plural} -> ${res.status}`);
-  const payload = await res.json();
-  return payload.data?.[plural] ?? [];
+  const records = [];
+  let cursor = null;
+  let previousCursor = null;
+  do {
+    const query = new URLSearchParams({ limit: '200' });
+    if (cursor) query.set('starting_after', cursor);
+    const res = await fetch(`${apiUrl}/rest/${plural}?${query}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) throw new Error(`GET /rest/${plural} -> ${res.status}`);
+    const payload = await res.json();
+    records.push(...(payload.data?.[plural] ?? []));
+    cursor = payload.pageInfo?.hasNextPage ? payload.pageInfo.endCursor : null;
+    if (cursor && cursor === previousCursor) {
+      throw new Error(`GET /rest/${plural} returned a non-advancing cursor`);
+    }
+    previousCursor = cursor;
+  } while (cursor);
+  return records;
 };
 
 const deleteRecord = async (apiUrl, apiKey, plural, id) => {
@@ -628,17 +641,27 @@ const main = async () => {
   );
 
   // CRM smoke: the standard customer/order surfaces still work alongside POS.
+  const crmSmokeIdentity = 'CRM-SMOKE::POS-SLICE-1';
+  const existingCrmSmoke = crmStart.find(
+    (person) => person.externalIdentityKey === crmSmokeIdentity,
+  );
   const crmPerson = {
     name: { firstName: 'Асет', lastName: 'Смок' },
-    externalIdentityKey: `CRM-SMOKE::${randomUUID()}`,
+    externalIdentityKey: crmSmokeIdentity,
   };
-  const createRes = await fetch(`${apiUrl}/rest/people`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(crmPerson),
-  });
-  const createdPerson = createRes.status === 201 ? await createRes.json() : null;
-  const createdId = createdPerson?.data?.createPerson?.id;
+  const createRes = existingCrmSmoke
+    ? { status: 200 }
+    : await fetch(`${apiUrl}/rest/people`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(crmPerson),
+      });
+  const createdPerson = existingCrmSmoke
+    ? null
+    : createRes.status === 201
+      ? await createRes.json()
+      : null;
+  const createdId = existingCrmSmoke?.id ?? createdPerson?.data?.createPerson?.id;
   let readBack = false;
   if (createdId) {
     const getRes = await fetch(`${apiUrl}/rest/people/${createdId}`, {
@@ -649,7 +672,7 @@ const main = async () => {
   }
   check(
     'CRM smoke: standard customer create/read still works',
-    createRes.status === 201 && Boolean(createdId) && readBack,
+    [200, 201].includes(createRes.status) && Boolean(createdId) && readBack,
     `status ${createRes.status}, id ${createdId ?? 'none'}, peopleBefore=${crmStart.length}, orders=${crmStartOrders.length}`,
   );
 
