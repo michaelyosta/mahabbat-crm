@@ -81,11 +81,12 @@ temporary handoff and wait for the user's decision on the next phase.
 
 - [x] `MAHABBAT POS DOMAIN DISCOVERY` — POS/CRM boundary, state machines,
   permissions, command contracts and non-goals are documented in `docs/POS_*`.
-- [ ] POS Foundation Slice 1 — server-side Shift → Zone/Table → Order → Guests
+- [x] POS Foundation Slice 1 — server-side Shift → Zone/Table → Order → Guests
   → OrderLines, context-bound idempotency, server totals, owner checks,
-  persistence and close-shift-with-open-order behavior. Implementation and
-  unit gates pass; live `:2020`/`:3000` command acceptance remains pending a
-  user-managed workspace API key. Twenty core changes: 0.
+  persistence and close-shift-with-open-order behavior. Deterministic live
+  acceptance passed on both `:2020` and `:3000` (47/47 checks per target),
+  including the ADMIN/WAITER PIN contract and table concurrency. Twenty core
+  changes: 0.
 
 ## NEXT
 

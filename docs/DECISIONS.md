@@ -342,3 +342,18 @@ distinct from the authenticated actor.
 Twenty v2.29.0 reserves the persisted field name `role` in this App metadata
 path. The storage fields therefore use `staffRole`; the in-process authenticated
 context still exposes the domain property `role`.
+## 2026-08-19 — POS Slice 1 live acceptance fixtures
+
+The live acceptance contract uses two synthetic POS credentials only: PIN A maps
+to `ADMIN` and PIN B maps to `WAITER`. The seed provisions these records
+idempotently and reconciles their hashes by deterministic IDs. Acceptance never
+chooses an arbitrary restaurant table: it uses the seeded `POS Acceptance` zone
+and tables `POS-A1`/`POS-A2`/`POS-A3`, reconciling only orders, guests and lines
+owned by those table IDs. This keeps repeated tests deterministic without
+touching real/demo operational orders.
+
+The same Slice 1 command flow passed 47/47 checks on disposable `:2020` and
+self-hosted `:3000`. On `:3000`, one stale non-persistent LOCAL logic-function
+SDK layer was removed and rebuilt after confirming the persisted generated SDK
+archive already contained the current POS schema. No Twenty core source or
+persistent database data was changed.

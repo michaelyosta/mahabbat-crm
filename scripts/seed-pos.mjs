@@ -29,7 +29,7 @@ const money = (tenge) => ({
   currencyCode: CURRENCY,
 });
 
-const ZONES = ['Основной зал', 'Зал у окна', 'Терраса', 'VIP'];
+const ZONES = ['Основной зал', 'Зал у окна', 'Терраса', 'VIP', 'POS Acceptance'];
 
 
 const zones = ZONES.map((name, i) => ({
@@ -43,6 +43,7 @@ const TABLES = [
   ['T5', 1], ['T6', 1], ['T7', 1],
   ['T8', 2], ['T9', 2], ['T10', 2],
   ['T11', 3], ['T12', 3],
+  ['POS-A1', 4], ['POS-A2', 4], ['POS-A3', 4],
 ];
 
 const tables = TABLES.map(([number, zoneIndex], i) => ({
@@ -50,6 +51,7 @@ const tables = TABLES.map(([number, zoneIndex], i) => ({
   number,
   zoneId: zones[zoneIndex].id,
   isActive: true,
+  ...(zoneIndex === 4 ? { layout: 'acceptance-only' } : {}),
 }));
 
 const MENU = [
@@ -189,7 +191,8 @@ function getEnv() {
   return { apiUrl: apiUrl.replace(/\/+$/, ''), apiKey };
 }
 
-async function sync(apiUrl, apiKey, label, plural, items) {
+async function sync(apiUrl, apiKey, label, plural, items, options = {}) {
+  const { reconcile = false } = options;
   const existing = new Map();
   let cursor = null;
   let previousCursor = null;
@@ -212,6 +215,28 @@ async function sync(apiUrl, apiKey, label, plural, items) {
   } while (cursor);
 
   const missing = items.filter((item) => !existing.has(item.id));
+  let reconciled = 0;
+  if (reconcile) {
+    for (const item of items) {
+      const current = existing.get(item.id);
+      if (!current) continue;
+      const patch = Object.fromEntries(
+        Object.entries(item).filter(
+          ([field, value]) => field !== 'id' && JSON.stringify(current[field]) !== JSON.stringify(value),
+        ),
+      );
+      if (Object.keys(patch).length === 0) continue;
+      const res = await fetch(`${apiUrl}/rest/${plural}/${item.id}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        throw new Error(`PATCH /rest/${plural}/${item.id} -> ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      }
+      reconciled += 1;
+    }
+  }
   let created = 0;
   for (let offset = 0; offset < missing.length; offset += 60) {
     const batch = missing.slice(offset, offset + 60);
@@ -223,7 +248,8 @@ async function sync(apiUrl, apiKey, label, plural, items) {
     if (!res.ok) throw new Error(`POST /rest/${plural} -> ${res.status}: ${(await res.text()).slice(0, 300)}`);
     created += batch.length;
   }
-  console.log(`  ${label}: ${existing.size} existing (skipped), ${created} created`);
+  const reconciliation = reconciled > 0 ? `, ${reconciled} reconciled` : '';
+  console.log(`  ${label}: ${existing.size} existing (skipped)${reconciliation}, ${created} created`);
 }
 
 async function main() {
@@ -263,7 +289,7 @@ async function main() {
   await sync(apiUrl, getEnv().apiKey, 'PosTable', 'posTables', tables);
   await sync(apiUrl, getEnv().apiKey, 'PosMenuItem', 'posMenuItems', menuItems);
   if (posStaffs.length > 0) {
-    await sync(apiUrl, getEnv().apiKey, 'PosStaff', 'posStaffs', posStaffs);
+    await sync(apiUrl, getEnv().apiKey, 'PosStaff', 'posStaffs', posStaffs, { reconcile: true });
   }
   console.log('');
   console.log('POS seed complete.');

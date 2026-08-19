@@ -133,6 +133,12 @@ const idempotencyConflict = (message: string): CommandResult => ({
   body: { code: 'IDEMPOTENCY_CONFLICT', message },
 });
 
+const normalizeGuestName = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized || null;
+};
+
 type NodeSelection = Record<string, boolean | Record<string, boolean>>;
 
 const SHIFT_FIELDS: NodeSelection = {
@@ -779,8 +785,8 @@ export const executeAddGuest = async (
   );
 
   if (existingByIdempotency) {
-    const existingName = existingByIdempotency.name ?? null;
-    const requestedName = payload.name ?? null;
+    const existingName = normalizeGuestName(existingByIdempotency.name);
+    const requestedName = normalizeGuestName(payload.name);
 
     if (
       existingByIdempotency.orderId !== payload.orderId ||
@@ -807,7 +813,9 @@ export const executeAddGuest = async (
             orderId: payload.orderId,
             ordinal,
             displayNumber,
-            ...(payload.name ? { name: payload.name } : {}),
+            ...(normalizeGuestName(payload.name)
+              ? { name: normalizeGuestName(payload.name) }
+              : {}),
             idempotencyKey: payload.idempotencyKey,
             subtotal: null,
           },

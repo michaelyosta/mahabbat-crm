@@ -303,6 +303,24 @@ describe('pos domain happy path', () => {
     expect((guest2.body as { displayNumber: string }).displayNumber).toBe('Гость 2');
     const guest2Id = (guest2.body as { guestId: string }).guestId;
 
+    const blankNamedGuest = await dispatchPosCommand(
+      db,
+      'addGuest',
+      { orderId, idempotencyKey: key(70), name: '' },
+      waiter,
+    );
+    expect(blankNamedGuest.status).toBe(201);
+    const blankNamedRetry = await dispatchPosCommand(
+      db,
+      'addGuest',
+      { orderId, idempotencyKey: key(70) },
+      waiter,
+    );
+    expect(blankNamedRetry.status).toBe(200);
+    expect((blankNamedRetry.body as { guestId: string }).guestId).toBe(
+      (blankNamedGuest.body as { guestId: string }).guestId,
+    );
+
     const line1 = await dispatchPosCommand(
       db,
       'addLine',

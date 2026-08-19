@@ -8,16 +8,18 @@
  * Usage:
  *   MAHABBAT_API_URL=http://host.docker.internal:2020 \
  *   MAHABBAT_API_KEY=<workspace api key> \
- *   MAHABBAT_POS_PIN_A=<waiter A PIN> MAHABBAT_POS_PIN_B=<waiter B PIN> \
+ *   MAHABBAT_POS_PIN_A=<admin PIN> MAHABBAT_POS_PIN_B=<waiter PIN> \
  *   node scripts/accept-pos.mjs
  *
- * Self-adaptive and re-runnable: picks staff with no open shift and free
- * tables by live query, uses fresh idempotency keys per run, and never
- * deletes anything.
+ * Deterministic and re-runnable: uses the seeded POS Acceptance zone/tables
+ * and the explicit ADMIN/WAITER PIN contract. Reconciliation deletes only
+ * records owned by those acceptance fixtures.
  */
 import { randomUUID } from 'node:crypto';
 
 const RESOLVER_UID = '54be0dfa-2fd6-45bc-be93-6ba4c64a21d9';
+const ACCEPTANCE_ZONE_NAME = 'POS Acceptance';
+const ACCEPTANCE_TABLE_NUMBERS = new Set(['POS-A1', 'POS-A2', 'POS-A3']);
 let STAFF_A = '';
 let STAFF_B = '';
 
@@ -45,6 +47,16 @@ const restGet = async (apiUrl, apiKey, plural) => {
   if (!res.ok) throw new Error(`GET /rest/${plural} -> ${res.status}`);
   const payload = await res.json();
   return payload.data?.[plural] ?? [];
+};
+
+const deleteRecord = async (apiUrl, apiKey, plural, id) => {
+  const res = await fetch(`${apiUrl}/rest/${plural}/${id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (![200, 204].includes(res.status)) {
+    throw new Error(`DELETE /rest/${plural}/${id} -> ${res.status}`);
+  }
 };
 
 const postCommand = async (apiUrl, apiKey, command, session, payload) => {
@@ -93,6 +105,7 @@ const authenticate = async (apiUrl, apiKey, credential, terminalId) => {
   return {
     staffId: body.staff.id,
     role: body.staff.role,
+    displayName: body.staff.displayName,
     sessionToken: body.sessionToken,
   };
 };
@@ -101,6 +114,64 @@ const sumActiveMicros = (lines) =>
   lines
     .filter((l) => l.status === 'ACTIVE')
     .reduce((sum, l) => sum + (l.unitPrice?.amountMicros ?? 0) * (l.quantity ?? 0), 0);
+
+const requireUuid = (label, value) => {
+  const ok = typeof value === 'string' && UUID_RE.test(value);
+  check(label, ok, ok ? value : 'missing');
+  if (!ok) throw new Error(`${label} did not return a UUID`);
+  return value;
+};
+
+const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) => {
+  const [orders, guests, lines, shifts] = await Promise.all([
+    restGet(apiUrl, apiKey, 'posOrders'),
+    restGet(apiUrl, apiKey, 'posOrderGuests'),
+    restGet(apiUrl, apiKey, 'posOrderLines'),
+    restGet(apiUrl, apiKey, 'posShifts'),
+  ]);
+  const acceptanceOrders = orders.filter((order) => tableIds.has(order.tableId));
+  const acceptanceOrderIds = new Set(acceptanceOrders.map((order) => order.id));
+  const acceptanceLines = lines.filter((line) => acceptanceOrderIds.has(line.orderId));
+  const acceptanceGuests = guests.filter((guest) => acceptanceOrderIds.has(guest.orderId));
+
+  for (const line of acceptanceLines) {
+    await deleteRecord(apiUrl, apiKey, 'posOrderLines', line.id);
+  }
+  for (const guest of acceptanceGuests) {
+    await deleteRecord(apiUrl, apiKey, 'posOrderGuests', guest.id);
+  }
+  for (const order of acceptanceOrders) {
+    await deleteRecord(apiUrl, apiKey, 'posOrders', order.id);
+  }
+
+  const sessionsByStaff = new Map(sessions.map((session) => [session.staffId, session]));
+  const openAcceptanceShifts = shifts.filter(
+    (shift) => shift.isOpen === true && sessionsByStaff.has(shift.staffId),
+  );
+  for (const shift of openAcceptanceShifts) {
+    const session = sessionsByStaff.get(shift.staffId);
+    const closed = await postCommand(apiUrl, apiKey, 'closeShift', session, {
+      shiftId: shift.id,
+    });
+    if (closed.status !== 200) {
+      throw new Error(`Could not reconcile acceptance shift ${shift.id}: ${closed.status}`);
+    }
+  }
+
+  const remainingOrders = (await restGet(apiUrl, apiKey, 'posOrders')).filter((order) =>
+    tableIds.has(order.tableId),
+  );
+  if (remainingOrders.length > 0) {
+    throw new Error('Acceptance fixture reconciliation left POS orders on reserved tables.');
+  }
+
+  return {
+    orders: acceptanceOrders.length,
+    guests: acceptanceGuests.length,
+    lines: acceptanceLines.length,
+    shifts: openAcceptanceShifts.length,
+  };
+};
 
 const main = async () => {
   const { apiUrl, apiKey } = getEnv();
@@ -116,17 +187,25 @@ const main = async () => {
   if (!pinA || !pinB) {
     throw new Error('MAHABBAT_POS_PIN_A and MAHABBAT_POS_PIN_B must be set for live POS acceptance');
   }
-  const waiter = await authenticate(apiUrl, apiKey, { pin: pinA }, 'acceptance-a');
-  const waiterB = await authenticate(apiUrl, apiKey, { pin: pinB }, 'acceptance-b');
-  STAFF_A = waiter.staffId;
-  STAFF_B = waiterB.staffId;
-  const otherWaiter = waiterB;
+  const admin = await authenticate(apiUrl, apiKey, { pin: pinA }, 'acceptance-a');
+  const waiter = await authenticate(apiUrl, apiKey, { pin: pinB }, 'acceptance-b');
+  STAFF_A = admin.staffId;
+  STAFF_B = waiter.staffId;
+  const roleContractOk = admin.role === 'ADMIN' && waiter.role === 'WAITER';
+  check(
+    'PIN role contract is A=ADMIN and B=WAITER',
+    roleContractOk,
+    `A=${admin.role ?? 'unknown'}, B=${waiter.role ?? 'unknown'}`,
+  );
+  if (!roleContractOk) {
+    throw new Error('Acceptance PIN role contract failed: PIN_A must be ADMIN and PIN_B must be WAITER.');
+  }
 
   const tamperedSession = await postCommand(
     apiUrl,
     apiKey,
     'openShift',
-    { sessionToken: `${waiter.sessionToken}tampered` },
+    { sessionToken: `${admin.sessionToken}tampered` },
     { idempotencyKey: randomUUID() },
   );
   check(
@@ -146,7 +225,7 @@ const main = async () => {
     },
     body: JSON.stringify({
       command: 'openShift',
-      sessionToken: waiter.sessionToken,
+      sessionToken: admin.sessionToken,
       actor: { staffId: STAFF_B, role: 'ADMIN' },
       payload: { idempotencyKey: randomUUID() },
     }),
@@ -164,32 +243,65 @@ const main = async () => {
     `status ${spoofedActor.status}, code ${spoofedActorBody?.code}`,
   );
 
-  const [tables, menuItems, shifts, orders] = await Promise.all([
+  const [zones, tables, menuItems] = await Promise.all([
+    restGet(apiUrl, apiKey, 'posZones'),
     restGet(apiUrl, apiKey, 'posTables'),
     restGet(apiUrl, apiKey, 'posMenuItems'),
-    restGet(apiUrl, apiKey, 'posShifts'),
-    restGet(apiUrl, apiKey, 'posOrders'),
   ]);
 
-  check('seed fixtures present', tables.length >= 4 && menuItems.length >= 2,
-    `${tables.length} tables, ${menuItems.length} menu items`);
+  const acceptanceZone = zones.find(
+    (zone) => zone.name === ACCEPTANCE_ZONE_NAME && zone.isActive !== false,
+  );
+  const acceptanceTables = tables
+    .filter(
+      (table) =>
+        table.zoneId === acceptanceZone?.id &&
+        ACCEPTANCE_TABLE_NUMBERS.has(table.number) &&
+        table.isActive !== false &&
+        table.layout === 'acceptance-only',
+    )
+    .sort((a, b) => a.number.localeCompare(b.number));
+  const acceptanceFixturesOk =
+    Boolean(acceptanceZone) && acceptanceTables.length === ACCEPTANCE_TABLE_NUMBERS.size;
+  check(
+    'POS Acceptance zone and exactly three reserved tables are present',
+    acceptanceFixturesOk,
+    `${acceptanceZone?.name ?? 'missing zone'}: ${acceptanceTables.map((table) => table.number).join(', ')}`,
+  );
+  if (!acceptanceFixturesOk) {
+    throw new Error('POS Acceptance fixtures are missing or incomplete; run seed:pos first.');
+  }
 
-  const openShiftIds = new Set(
-    shifts.filter((s) => s.isOpen === true).map((s) => s.staffId),
+  const acceptanceTableIds = new Set(acceptanceTables.map((table) => table.id));
+  const reconciliation = await reconcileAcceptanceFixtures(apiUrl, apiKey, acceptanceTableIds, [admin, waiter]);
+  check(
+    'POS Acceptance fixtures reconciled without touching other tables',
+    true,
+    `orders=${reconciliation.orders}, guests=${reconciliation.guests}, lines=${reconciliation.lines}, shifts=${reconciliation.shifts}`,
   );
-  const busyTables = new Set(
-    orders.filter((o) => ['OPEN', 'IN_PROGRESS'].includes(o.status)).map((o) => o.tableId),
+
+  const activeAcceptanceOrders = (await restGet(apiUrl, apiKey, 'posOrders')).filter((order) =>
+    acceptanceTableIds.has(order.tableId) && ['OPEN', 'IN_PROGRESS'].includes(order.status),
   );
-  const freeTables = tables.filter((t) => !busyTables.has(t.id)).map((t) => t.id);
+  check(
+    'POS Acceptance tables start free',
+    activeAcceptanceOrders.length === 0,
+    `activeOrders=${activeAcceptanceOrders.length}`,
+  );
+  if (activeAcceptanceOrders.length > 0) {
+    throw new Error('POS Acceptance tables are still occupied after reconciliation.');
+  }
   const menu = menuItems.map((m) => m.id);
 
-  const freeTable = freeTables[0];
-  const secondFreeTable = freeTables[1];
-  const thirdFreeTable = freeTables[2];
+  check('POS menu fixtures present', menu.length >= 2, `${menu.length} menu items`);
+  if (menu.length < 2) throw new Error('POS menu fixtures are missing.');
 
-  const hasOpen = openShiftIds.has(STAFF_A);
+  const freeTable = acceptanceTables[0].id;
+  const secondFreeTable = acceptanceTables[1].id;
+  const thirdFreeTable = acceptanceTables[2].id;
+
   const shiftKey = randomUUID();
-  const openShift = await postCommand(apiUrl, apiKey, 'openShift', waiter, {
+  const openShift = await postCommand(apiUrl, apiKey, 'openShift', admin, {
     idempotencyKey: shiftKey,
   });
   check(
@@ -197,10 +309,9 @@ const main = async () => {
     openShift.status === 200 || openShift.status === 201,
     `status ${openShift.status}, body ${JSON.stringify(openShift.body)}`,
   );
-  const shiftId = openShift.body?.shiftId;
-  check('openShift returns a shiftId', typeof shiftId === 'string' && UUID_RE.test(shiftId), shiftId);
+  const shiftId = requireUuid('openShift returns a shiftId', openShift.body?.shiftId);
 
-  const repeatShift = await postCommand(apiUrl, apiKey, 'openShift', waiter, {
+  const repeatShift = await postCommand(apiUrl, apiKey, 'openShift', admin, {
     idempotencyKey: shiftKey,
   });
   check(
@@ -209,21 +320,19 @@ const main = async () => {
     `status ${repeatShift.status}, shiftId ${repeatShift.body?.shiftId}`,
   );
 
-  if (!hasOpen) {
-    const secondKey = randomUUID();
-    const racedShift = await postCommand(apiUrl, apiKey, 'openShift', waiter, {
-      idempotencyKey: secondKey,
-    });
-    const openForStaff = await restGet(apiUrl, apiKey, 'posShifts');
-    const opens = openForStaff.filter((s) => s.staffId === STAFF_A && s.isOpen === true);
-    check(
-      'one open shift per staff after second distinct call',
-      [200, 201].includes(racedShift.status) && opens.length === 1,
-      `opens=${opens.length}, returned shift ${racedShift.body?.shiftId}`,
-    );
-  }
+  const secondKey = randomUUID();
+  const racedShift = await postCommand(apiUrl, apiKey, 'openShift', admin, {
+    idempotencyKey: secondKey,
+  });
+  const openForStaff = await restGet(apiUrl, apiKey, 'posShifts');
+  const opens = openForStaff.filter((s) => s.staffId === STAFF_A && s.isOpen === true);
+  check(
+    'one open shift per staff after second distinct call',
+    [200, 201].includes(racedShift.status) && opens.length === 1,
+    `opens=${opens.length}, returned shift ${racedShift.body?.shiftId}`,
+  );
 
-  const foreignClose = await postCommand(apiUrl, apiKey, 'closeShift', waiterB, {
+  const foreignClose = await postCommand(apiUrl, apiKey, 'closeShift', waiter, {
     shiftId,
   });
   check(
@@ -234,7 +343,7 @@ const main = async () => {
 
   if (freeTable) {
     const orderKey = randomUUID();
-    const openOrder = await postCommand(apiUrl, apiKey, 'openOrder', waiter, {
+    const openOrder = await postCommand(apiUrl, apiKey, 'openOrder', admin, {
       tableId: freeTable,
       idempotencyKey: orderKey,
     });
@@ -243,8 +352,8 @@ const main = async () => {
       [200, 201].includes(openOrder.status),
       `status ${openOrder.status}, body ${JSON.stringify(openOrder.body)}`,
     );
-    const orderId = openOrder.body?.orderId;
-    const repeatOrder = await postCommand(apiUrl, apiKey, 'openOrder', waiter, {
+    const orderId = requireUuid('openOrder returns an orderId', openOrder.body?.orderId);
+    const repeatOrder = await postCommand(apiUrl, apiKey, 'openOrder', admin, {
       tableId: freeTable,
       idempotencyKey: orderKey,
     });
@@ -255,7 +364,7 @@ const main = async () => {
     );
 
     const occupiedKey = randomUUID();
-    const conflictOrder = await postCommand(apiUrl, apiKey, 'openOrder', waiter, {
+    const conflictOrder = await postCommand(apiUrl, apiKey, 'openOrder', admin, {
       tableId: freeTable,
       idempotencyKey: occupiedKey,
     });
@@ -267,11 +376,11 @@ const main = async () => {
 
     if (secondFreeTable && orderId) {
       const order2Key = randomUUID();
-      const openOrder2 = await postCommand(apiUrl, apiKey, 'openOrder', waiter, {
+      const openOrder2 = await postCommand(apiUrl, apiKey, 'openOrder', admin, {
         tableId: secondFreeTable,
         idempotencyKey: order2Key,
       });
-      const order2Id = openOrder2.body?.orderId;
+      const order2Id = requireUuid('second openOrder returns an orderId', openOrder2.body?.orderId);
       check(
         'second order opens on another free table',
         [200, 201].includes(openOrder2.status) && typeof order2Id === 'string',
@@ -280,23 +389,23 @@ const main = async () => {
 
       if (order2Id) {
         const guest1Key = randomUUID();
-        const addGuest1 = await postCommand(apiUrl, apiKey, 'addGuest', waiter, {
+        const addGuest1 = await postCommand(apiUrl, apiKey, 'addGuest', admin, {
           orderId: order2Id,
           idempotencyKey: guest1Key,
         });
-        const guest1Id = addGuest1.body?.guestId;
+        const guest1Id = requireUuid('addGuest #1 returns a guestId', addGuest1.body?.guestId);
         const guest2Key = randomUUID();
-        const addGuest2 = await postCommand(apiUrl, apiKey, 'addGuest', waiter, {
+        const addGuest2 = await postCommand(apiUrl, apiKey, 'addGuest', admin, {
           orderId: order2Id,
           idempotencyKey: guest2Key,
           name: 'Айгерим',
         });
-        const guest2Id = addGuest2.body?.guestId;
+        const guest2Id = requireUuid('addGuest #2 returns a guestId', addGuest2.body?.guestId);
         check('addGuest #1 works', [200, 201].includes(addGuest1.status) && typeof guest1Id === 'string',
           `status ${addGuest1.status}, guestId ${guest1Id}`);
         check('addGuest #2 works', [200, 201].includes(addGuest2.status) && typeof guest2Id === 'string',
           `status ${addGuest2.status}, guestId ${guest2Id}`);
-        const repeatGuest = await postCommand(apiUrl, apiKey, 'addGuest', waiter, {
+        const repeatGuest = await postCommand(apiUrl, apiKey, 'addGuest', admin, {
           orderId: order2Id,
           idempotencyKey: guest1Key,
         });
@@ -308,38 +417,45 @@ const main = async () => {
 
         if (guest1Id && guest2Id) {
           const line1Key = randomUUID();
-          const line1 = await postCommand(apiUrl, apiKey, 'addLine', waiter, {
+          const line1 = await postCommand(apiUrl, apiKey, 'addLine', admin, {
             orderId: order2Id,
             guestId: guest1Id,
             menuItemId: menu[0],
             quantity: 2,
             idempotencyKey: line1Key,
           });
-          const line1Id = line1.body?.lineId;
+          const line1Id = requireUuid('addLine #1 returns a lineId', line1.body?.lineId);
           const line2Key = randomUUID();
-          const line2 = await postCommand(apiUrl, apiKey, 'addLine', waiter, {
+          const line2 = await postCommand(apiUrl, apiKey, 'addLine', admin, {
             orderId: order2Id,
             guestId: guest1Id,
-            menuItemId: menu[1],
+            menuItemId: menu[0],
             quantity: 1,
             idempotencyKey: line2Key,
           });
-          const line2Id = line2.body?.lineId;
+          const line2Id = requireUuid('addLine #2 returns a lineId', line2.body?.lineId);
           const line3Key = randomUUID();
-          const line3 = await postCommand(apiUrl, apiKey, 'addLine', waiter, {
+          const line3 = await postCommand(apiUrl, apiKey, 'addLine', admin, {
             orderId: order2Id,
             guestId: guest2Id,
             menuItemId: menu[2 % menu.length],
             quantity: 1,
             idempotencyKey: line3Key,
           });
+          const line3Id = requireUuid('addLine #3 returns a lineId', line3.body?.lineId);
           check('addLine identical item is a separate line (no merge)',
-            [200, 201].includes(line1.status) && [200, 201].includes(line2.status) && [200, 201].includes(line3.status),
+            [200, 201].includes(line1.status) && [200, 201].includes(line2.status) && [200, 201].includes(line3.status) &&
+              new Set([line1Id, line2Id, line3Id]).size === 3,
             `line1 ${line1.body?.lineId}, line2 ${line2.body?.lineId}, line3 ${line3.body?.lineId}`);
 
           if (line1Id && line2Id) {
             const orderLines = await restGet(apiUrl, apiKey, 'posOrderLines');
             const myLines = orderLines.filter((l) => l.orderId === order2Id);
+            check(
+              'two independent lines preserve the same menu item identity',
+              myLines.filter((line) => line.menuItemId === menu[0]).length === 2,
+              `sameMenuLines=${myLines.filter((line) => line.menuItemId === menu[0]).length}`,
+            );
             const expectedSubtotal = sumActiveMicros(myLines);
             const orderFromRest = (await restGet(apiUrl, apiKey, 'posOrders')).find((o) => o.id === order2Id);
             check(
@@ -361,20 +477,37 @@ const main = async () => {
                 guest2?.subtotal?.amountMicros === guest2Expected,
               `guest1 ${guest1?.subtotal?.amountMicros}/${guest1Expected}, guest2 ${guest2?.subtotal?.amountMicros}/${guest2Expected}`,
             );
+            const reloadedOrder = (await restGet(apiUrl, apiKey, 'posOrders')).find(
+              (order) => order.id === order2Id,
+            );
+            const reloadedGuests = (await restGet(apiUrl, apiKey, 'posOrderGuests')).filter(
+              (guest) => guest.orderId === order2Id,
+            );
+            const reloadedLines = (await restGet(apiUrl, apiKey, 'posOrderLines')).filter(
+              (line) => line.orderId === order2Id,
+            );
+            check(
+              'reload/second client sees persisted order state',
+              reloadedOrder?.id === order2Id &&
+                reloadedGuests.length === 2 &&
+                reloadedLines.length === 3 &&
+                reloadedOrder.total?.amountMicros === expectedSubtotal,
+              `guests=${reloadedGuests.length}, lines=${reloadedLines.length}, total=${reloadedOrder?.total?.amountMicros}`,
+            );
 
-            const changeQty = await postCommand(apiUrl, apiKey, 'changeLineQuantity', waiter, {
+            const changeQty = await postCommand(apiUrl, apiKey, 'changeLineQuantity', admin, {
               lineId: line1Id,
               quantity: 3,
             });
             check('changeLineQuantity works', changeQty.status === 200, `status ${changeQty.status}`);
 
-            const changeQtyZero = await postCommand(apiUrl, apiKey, 'changeLineQuantity', waiter, {
+            const changeQtyZero = await postCommand(apiUrl, apiKey, 'changeLineQuantity', admin, {
               lineId: line1Id,
               quantity: 0,
             });
             check('changeLineQuantity rejects qty 0', changeQtyZero.status === 400, `status ${changeQtyZero.status}`);
 
-            const notOwned = await postCommand(apiUrl, apiKey, 'addGuest', otherWaiter, {
+            const notOwned = await postCommand(apiUrl, apiKey, 'addGuest', waiter, {
               orderId: order2Id,
               idempotencyKey: randomUUID(),
             });
@@ -386,7 +519,7 @@ const main = async () => {
           }
         }
 
-        const closeShift = await postCommand(apiUrl, apiKey, 'closeShift', waiter, {
+        const closeShift = await postCommand(apiUrl, apiKey, 'closeShift', admin, {
           shiftId,
         });
         check(
@@ -396,7 +529,7 @@ const main = async () => {
         );
 
         if (thirdFreeTable) {
-          const afterClose = await postCommand(apiUrl, apiKey, 'openOrder', waiter, {
+          const afterClose = await postCommand(apiUrl, apiKey, 'openOrder', admin, {
             tableId: thirdFreeTable,
             idempotencyKey: randomUUID(),
           });
@@ -417,7 +550,7 @@ const main = async () => {
 
   const openShiftKeys = [randomUUID(), randomUUID()];
   const racers = openShiftKeys.map((idempotencyKey) =>
-    postCommand(apiUrl, apiKey, 'openShift', waiterB, { idempotencyKey }),
+    postCommand(apiUrl, apiKey, 'openShift', waiter, { idempotencyKey }),
   );
   const racedShifts = await Promise.all(racers);
   const racedShiftsOk = racedShifts.every((r) => [200, 201].includes(r.status));
@@ -430,72 +563,69 @@ const main = async () => {
     racedShiftsOk && sameShift && openForB.length === 1,
     `statuses ${racedShifts.map((r) => r.status).join(',')}, shiftsForB=${openForB.length}`,
   );
-  const shiftBId = racedShifts[0]?.body?.shiftId;
+  const shiftBId = requireUuid('parallel openShift race returns a shiftId', racedShifts[0]?.body?.shiftId);
 
-  const tablesNow = await restGet(apiUrl, apiKey, 'posTables');
-  const ordersNow = await restGet(apiUrl, apiKey, 'posOrders');
-  const busyNow = new Set(
-    ordersNow.filter((o) => ['OPEN', 'IN_PROGRESS'].includes(o.status)).map((o) => o.tableId),
+  const raceTable = thirdFreeTable;
+  const activeRaceOrders = (await restGet(apiUrl, apiKey, 'posOrders')).filter(
+    (order) => order.tableId === raceTable && ['OPEN', 'IN_PROGRESS'].includes(order.status),
   );
-  const raceTable = tablesNow.map((t) => t.id).find((id) => !busyNow.has(id));
-  if (raceTable && shiftBId) {
-    const orderRaceKeys = [randomUUID(), randomUUID()];
-    const orderRacers = orderRaceKeys.map((idempotencyKey) =>
-      postCommand(apiUrl, apiKey, 'openOrder', waiterB, {
-        tableId: raceTable,
-        idempotencyKey,
-      }),
-    );
-    const racedOrders = await Promise.all(orderRacers);
-    const ordersOnTableAfter = (await restGet(apiUrl, apiKey, 'posOrders')).filter(
-      (o) => o.tableId === raceTable && ['OPEN', 'IN_PROGRESS'].includes(o.status),
-    );
-    const racedOrdersOk = racedOrders.every((r) => [200, 201, 409].includes(r.status));
-    check(
-      'parallel openOrder race leaves exactly one active order on the table',
-      racedOrdersOk && ordersOnTableAfter.length === 1,
-      `statuses ${racedOrders.map((r) => r.status).join(',')}, activeOnTable=${ordersOnTableAfter.length}`,
-    );
-    const wonOrderId = ordersOnTableAfter[0]?.id;
+  check('reserved race table is free before concurrency test', activeRaceOrders.length === 0,
+    `activeOnTable=${activeRaceOrders.length}`);
+  if (activeRaceOrders.length > 0) throw new Error('Reserved race table is unexpectedly occupied.');
 
-    if (wonOrderId && raceTable) {
-      const guestKey = randomUUID();
-      const racedGuest = await postCommand(apiUrl, apiKey, 'addGuest', waiterB, {
-        orderId: wonOrderId,
-        idempotencyKey: guestKey,
-      });
-      const raceGuestId = racedGuest.body?.guestId;
-      if (raceGuestId && menu.length > 0) {
-        const sameKey = randomUUID();
-        const lineRacers = [1, 2].map(() =>
-          postCommand(apiUrl, apiKey, 'addLine', waiterB, {
-            orderId: wonOrderId,
-            guestId: raceGuestId,
-            menuItemId: menu[0],
-            quantity: 1,
-            idempotencyKey: sameKey,
-          }),
-        );
-        const racedLines = await Promise.all(lineRacers);
-        const linesForOrder = (await restGet(apiUrl, apiKey, 'posOrderLines')).filter(
-          (l) => l.orderId === wonOrderId,
-        );
-        const racedLinesOk = racedLines.every((r) => [200, 201].includes(r.status));
-        check(
-          'parallel addLine with the same idempotency key creates one line',
-          racedLinesOk && linesForOrder.length === 1,
-          `statuses ${racedLines.map((r) => r.status).join(',')}, lines=${linesForOrder.length}`,
-        );
-      }
-    }
+  const orderRaceKeys = [randomUUID(), randomUUID()];
+  const orderRacers = orderRaceKeys.map((idempotencyKey) =>
+    postCommand(apiUrl, apiKey, 'openOrder', waiter, {
+      tableId: raceTable,
+      idempotencyKey,
+    }),
+  );
+  const racedOrders = await Promise.all(orderRacers);
+  const ordersOnTableAfter = (await restGet(apiUrl, apiKey, 'posOrders')).filter(
+    (order) => order.tableId === raceTable && ['OPEN', 'IN_PROGRESS'].includes(order.status),
+  );
+  const racedOrdersOk = racedOrders.every((r) => [200, 201, 409].includes(r.status));
+  check(
+    'parallel openOrder race leaves exactly one active order on the table',
+    racedOrdersOk && ordersOnTableAfter.length === 1,
+    `statuses ${racedOrders.map((r) => r.status).join(',')}, activeOnTable=${ordersOnTableAfter.length}`,
+  );
+  if (ordersOnTableAfter.length !== 1) throw new Error('Parallel openOrder did not produce exactly one winner.');
+  const wonOrderId = requireUuid('parallel openOrder returns a winning orderId', ordersOnTableAfter[0]?.id);
 
-    const closeB = await postCommand(apiUrl, apiKey, 'closeShift', waiterB, { shiftId: shiftBId });
-    check(
-      'concurrent terminal shift closes cleanly',
-      closeB.status === 200 && closeB.body?.status === 'CLOSED',
-      `status ${closeB.status}`,
-    );
-  }
+  const guestKey = randomUUID();
+  const racedGuest = await postCommand(apiUrl, apiKey, 'addGuest', waiter, {
+    orderId: wonOrderId,
+    idempotencyKey: guestKey,
+  });
+  const raceGuestId = requireUuid('parallel order receives a guestId', racedGuest.body?.guestId);
+  const sameKey = randomUUID();
+  const lineRacers = [1, 2].map(() =>
+    postCommand(apiUrl, apiKey, 'addLine', waiter, {
+      orderId: wonOrderId,
+      guestId: raceGuestId,
+      menuItemId: menu[0],
+      quantity: 1,
+      idempotencyKey: sameKey,
+    }),
+  );
+  const racedLines = await Promise.all(lineRacers);
+  const linesForOrder = (await restGet(apiUrl, apiKey, 'posOrderLines')).filter(
+    (line) => line.orderId === wonOrderId,
+  );
+  const racedLinesOk = racedLines.every((r) => [200, 201].includes(r.status));
+  check(
+    'parallel addLine with the same idempotency key creates one line',
+    racedLinesOk && linesForOrder.length === 1,
+    `statuses ${racedLines.map((r) => r.status).join(',')}, lines=${linesForOrder.length}`,
+  );
+
+  const closeB = await postCommand(apiUrl, apiKey, 'closeShift', waiter, { shiftId: shiftBId });
+  check(
+    'concurrent terminal shift closes cleanly',
+    closeB.status === 200 && closeB.body?.status === 'CLOSED',
+    `status ${closeB.status}`,
+  );
 
   // CRM smoke: the standard customer/order surfaces still work alongside POS.
   const crmPerson = {

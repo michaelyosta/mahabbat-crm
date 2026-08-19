@@ -104,6 +104,12 @@ secrets review and recovery point.
 - **Worker running but logic not applying:** check `LOGIC_FUNCTION_TYPE=LOCAL`,
   worker `SERVER_URL=http://server:3000`, Redis and the pending-request
   reconciliation path.
+- **A newly applied App object is missing inside a local logic function:** the
+  generated SDK archive can be current while a non-persistent LOCAL driver
+  SDK layer remains stale. After verifying the App plan is clean, remove only
+  the exact `/tmp/logic-function-executor-tmpdir/sdk/<workspace>-<app>` cache
+  directory in the affected server/worker containers and retry. Do not delete
+  PostgreSQL data or broad application storage.
 - **Browser redirects to localhost:** check external-origin/base-URL settings;
   do not expose internal URLs.
 - **Duplicate import risk:** stop the import, inspect provider/externalId or
