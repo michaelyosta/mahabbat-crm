@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   dispatchPosCommand,
+  executeAddStopListEntry,
+  executeClearStopListEntry,
   executeOpenOrder,
   executeOpenShift,
+  executePrintKitchenTicket,
 } from 'src/pos/pos-command.dispatch';
 
 type Row = Record<string, unknown> & { id: string };
@@ -15,7 +18,9 @@ type TableKind =
   | 'posOrders'
   | 'posOrderGuests'
   | 'posOrderLines'
-  | 'posStopListEntries';
+  | 'posStopListEntries'
+  | 'posKitchenTickets'
+  | 'posKitchenTicketLines';
 
 class UniqueViolationError extends Error {
   constructor(message: string) {
@@ -33,6 +38,8 @@ class FakePosDb {
     posOrderGuests: [],
     posOrderLines: [],
     posStopListEntries: [],
+    posKitchenTickets: [],
+    posKitchenTicketLines: [],
   };
 
   seed(kind: TableKind, row: Row): Row {
@@ -66,6 +73,33 @@ class FakePosDb {
       }
 
       this.assertIdempotencyUnique(this.rows.posOrders, data);
+      return;
+    }
+
+    if (kind === 'posStopListEntries') {
+      const conflict = this.rows.posStopListEntries.some(
+        (row) => row.menuItemId === data.menuItemId,
+      );
+      if (conflict) throw new UniqueViolationError('duplicate menuItemId');
+    }
+
+    if (kind === 'posKitchenTickets') {
+      this.assertIdempotencyUnique(this.rows.posKitchenTickets, data);
+      const requestKey = data.requestIdempotencyKey;
+      if (
+        typeof requestKey === 'string' &&
+        this.rows.posKitchenTickets.some((row) => row.requestIdempotencyKey === requestKey)
+      ) {
+        throw new UniqueViolationError('duplicate requestIdempotencyKey');
+      }
+      return;
+    }
+
+    if (kind === 'posKitchenTicketLines') {
+      const conflict = this.rows.posKitchenTicketLines.some(
+        (row) => row.ticketId === data.ticketId && row.orderLineId === data.orderLineId,
+      );
+      if (conflict) throw new UniqueViolationError('duplicate ticket line');
       return;
     }
 
@@ -163,6 +197,11 @@ class FakePosDb {
       updatePosOrderGuest: 'posOrderGuests',
       createPosOrderLine: 'posOrderLines',
       updatePosOrderLine: 'posOrderLines',
+      createPosStopListEntry: 'posStopListEntries',
+      updatePosStopListEntry: 'posStopListEntries',
+      createPosKitchenTicket: 'posKitchenTickets',
+      createPosKitchenTicketLine: 'posKitchenTicketLines',
+      updatePosKitchenTicket: 'posKitchenTickets',
     };
 
     const kind = map[root];
@@ -186,6 +225,8 @@ class FakePosDb {
       posOrderGuests: 'posOrderGuests',
       posOrderLines: 'posOrderLines',
       posStopListEntries: 'posStopListEntries',
+      posKitchenTickets: 'posKitchenTickets',
+      posKitchenTicketLines: 'posKitchenTicketLines',
     };
 
     return map[root] ?? 'posOrders';
@@ -459,6 +500,113 @@ describe('pos domain happy path', () => {
     );
     expect(result.status).toBe(400);
     expect((result.body as { code: string }).code).toBe('LINE_NOT_FOUND');
+  });
+
+  it('supports an idempotent stop-list lifecycle and unblocks the stale menu after clear', async () => {
+    const db = dbWithBaseline();
+    const first = await executeAddStopListEntry(
+      db,
+      { menuItemId: MENU_A, idempotencyKey: key(80) },
+      waiter,
+    );
+    expect(first.status).toBe(201);
+
+    const replay = await executeAddStopListEntry(
+      db,
+      { menuItemId: MENU_A, idempotencyKey: key(80) },
+      waiter,
+    );
+    expect(replay.status).toBe(200);
+    expect(db.rows.posStopListEntries.length).toBe(1);
+
+    const cleared = await executeClearStopListEntry(
+      db,
+      { menuItemId: MENU_A, idempotencyKey: key(81) },
+      waiter,
+    );
+    expect(cleared.status).toBe(200);
+    expect(db.rows.posStopListEntries[0].isActive).toBe(false);
+
+    const reopened = await executeAddStopListEntry(
+      db,
+      { menuItemId: MENU_A, idempotencyKey: key(82) },
+      waiter,
+    );
+    expect(reopened.status).toBe(200);
+    expect(db.rows.posStopListEntries.length).toBe(1);
+    expect(db.rows.posStopListEntries[0].isActive).toBe(true);
+  });
+
+  it('prints only unsent deltas and makes retry/no-op safe', async () => {
+    const db = dbWithBaseline();
+    await executeOpenShift(db, { idempotencyKey: key(83) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(84) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(85) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    const line = await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 2, idempotencyKey: key(86) },
+      waiter,
+    );
+    const lineId = (line.body as { lineId: string }).lineId;
+
+    const first = await executePrintKitchenTicket(
+      db,
+      { orderId, idempotencyKey: key(87) },
+      waiter,
+    );
+    expect(first.status).toBe(201);
+    expect(db.rows.posKitchenTickets.length).toBe(1);
+    expect(db.rows.posKitchenTicketLines[0].quantity).toBe(2);
+    expect(db.rows.posOrderLines.find((row) => row.id === lineId)?.kitchenSentQuantity).toBe(2);
+
+    const retry = await executePrintKitchenTicket(
+      db,
+      { orderId, idempotencyKey: key(87) },
+      waiter,
+    );
+    expect(retry.status).toBe(200);
+    expect(db.rows.posKitchenTickets.length).toBe(1);
+
+    const noOp = await executePrintKitchenTicket(
+      db,
+      { orderId, idempotencyKey: key(88) },
+      waiter,
+    );
+    expect(noOp.status).toBe(200);
+    expect((noOp.body as { printStatus: string }).printStatus).toBe('NO_UNSENT_LINES');
+
+    await dispatchPosCommand(db, 'changeLineQuantity', { lineId, quantity: 3 }, waiter);
+    const delta = await executePrintKitchenTicket(
+      db,
+      { orderId, idempotencyKey: key(89) },
+      waiter,
+    );
+    expect(delta.status).toBe(201);
+    expect(db.rows.posKitchenTickets.length).toBe(2);
+    expect(db.rows.posKitchenTicketLines[1].quantity).toBe(1);
+  });
+
+  it('rejects reducing an already sent quantity', async () => {
+    const db = dbWithBaseline();
+    await executeOpenShift(db, { idempotencyKey: key(90) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(91) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(92) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    const line = await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 2, idempotencyKey: key(93) },
+      waiter,
+    );
+    const lineId = (line.body as { lineId: string }).lineId;
+    await executePrintKitchenTicket(db, { orderId, idempotencyKey: key(94) }, waiter);
+    const changed = await dispatchPosCommand(db, 'changeLineQuantity', { lineId, quantity: 1 }, waiter);
+    expect(changed.status).toBe(400);
+    expect((changed.body as { code: string }).code).toBe('LINE_ALREADY_SENT');
   });
 });
 

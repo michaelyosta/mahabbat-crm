@@ -136,17 +136,28 @@ const requireUuid = (label, value) => {
 };
 
 const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) => {
-  const [orders, guests, lines, shifts] = await Promise.all([
+  const [orders, guests, lines, shifts, kitchenTickets, kitchenTicketLines] = await Promise.all([
     restGet(apiUrl, apiKey, 'posOrders'),
     restGet(apiUrl, apiKey, 'posOrderGuests'),
     restGet(apiUrl, apiKey, 'posOrderLines'),
     restGet(apiUrl, apiKey, 'posShifts'),
+    restGet(apiUrl, apiKey, 'posKitchenTickets'),
+    restGet(apiUrl, apiKey, 'posKitchenTicketLines'),
   ]);
   const acceptanceOrders = orders.filter((order) => tableIds.has(order.tableId));
   const acceptanceOrderIds = new Set(acceptanceOrders.map((order) => order.id));
   const acceptanceLines = lines.filter((line) => acceptanceOrderIds.has(line.orderId));
   const acceptanceGuests = guests.filter((guest) => acceptanceOrderIds.has(guest.orderId));
+  const acceptanceTickets = kitchenTickets.filter((ticket) => acceptanceOrderIds.has(ticket.orderId));
+  const acceptanceTicketIds = new Set(acceptanceTickets.map((ticket) => ticket.id));
+  const acceptanceTicketLines = kitchenTicketLines.filter((line) => acceptanceTicketIds.has(line.ticketId));
 
+  for (const ticketLine of acceptanceTicketLines) {
+    await deleteRecord(apiUrl, apiKey, 'posKitchenTicketLines', ticketLine.id);
+  }
+  for (const ticket of acceptanceTickets) {
+    await deleteRecord(apiUrl, apiKey, 'posKitchenTickets', ticket.id);
+  }
   for (const line of acceptanceLines) {
     await deleteRecord(apiUrl, apiKey, 'posOrderLines', line.id);
   }
@@ -429,6 +440,46 @@ const main = async () => {
         );
 
         if (guest1Id && guest2Id) {
+          // Stop-list is server-authoritative: a client that loaded the menu
+          // before the change must still be rejected by addLine.
+          const stopKey = randomUUID();
+          const stopAdded = await postCommand(apiUrl, apiKey, 'addStopListEntry', waiter, {
+            menuItemId: menu[0],
+            idempotencyKey: stopKey,
+          });
+          const stopReplay = await postCommand(apiUrl, apiKey, 'addStopListEntry', waiter, {
+            menuItemId: menu[0],
+            idempotencyKey: stopKey,
+          });
+          check(
+            'addStopListEntry is idempotent and available to WAITER',
+            [200, 201].includes(stopAdded.status) &&
+              [200, 201].includes(stopReplay.status) &&
+              stopReplay.body?.stopListEntryId === stopAdded.body?.stopListEntryId,
+            `statuses ${stopAdded.status}/${stopReplay.status}`,
+          );
+          const staleAdd = await postCommand(apiUrl, apiKey, 'addLine', admin, {
+            orderId: order2Id,
+            guestId: guest1Id,
+            menuItemId: menu[0],
+            quantity: 1,
+            idempotencyKey: randomUUID(),
+          });
+          check(
+            'stale client is blocked by server stop-list validation',
+            staleAdd.status === 400 && staleAdd.body?.code === 'STOP_LISTED',
+            `status ${staleAdd.status}, code ${staleAdd.body?.code}`,
+          );
+          const stopCleared = await postCommand(apiUrl, apiKey, 'clearStopListEntry', waiter, {
+            menuItemId: menu[0],
+            idempotencyKey: randomUUID(),
+          });
+          check(
+            'clearStopListEntry re-enables the menu item',
+            stopCleared.status === 200 && stopCleared.body?.isActive === false,
+            `status ${stopCleared.status}`,
+          );
+
           const line1Key = randomUUID();
           const line1 = await postCommand(apiUrl, apiKey, 'addLine', admin, {
             orderId: order2Id,
@@ -508,11 +559,92 @@ const main = async () => {
               `guests=${reloadedGuests.length}, lines=${reloadedLines.length}, total=${reloadedOrder?.total?.amountMicros}`,
             );
 
+            const firstPrintKey = randomUUID();
+            const firstPrint = await postCommand(apiUrl, apiKey, 'printKitchenTicket', admin, {
+              orderId: order2Id,
+              idempotencyKey: firstPrintKey,
+            });
+            const ticketsAfterFirstPrint = (await restGet(apiUrl, apiKey, 'posKitchenTickets'))
+              .filter((ticket) => ticket.orderId === order2Id);
+            const ticketIdsAfterFirstPrint = new Set(ticketsAfterFirstPrint.map((ticket) => ticket.id));
+            const ticketLinesAfterFirstPrint = (await restGet(apiUrl, apiKey, 'posKitchenTicketLines'))
+              .filter((line) => ticketIdsAfterFirstPrint.has(line.ticketId));
+            check(
+              'first PRINT creates one immutable ticket with all unsent lines',
+              [200, 201].includes(firstPrint.status) &&
+                ticketsAfterFirstPrint.length === 1 &&
+                ticketLinesAfterFirstPrint.length === 3 &&
+                ticketLinesAfterFirstPrint.every((line) => line.action === 'ADD' && line.quantity > 0),
+              `status ${firstPrint.status}, tickets=${ticketsAfterFirstPrint.length}, lines=${ticketLinesAfterFirstPrint.length}`,
+            );
+            const printRetry = await postCommand(apiUrl, apiKey, 'printKitchenTicket', admin, {
+              orderId: order2Id,
+              idempotencyKey: firstPrintKey,
+            });
+            const ticketsAfterRetry = (await restGet(apiUrl, apiKey, 'posKitchenTickets'))
+              .filter((ticket) => ticket.orderId === order2Id);
+            check(
+              'PRINT retry returns the same semantic ticket without duplication',
+              [200, 201].includes(printRetry.status) &&
+                printRetry.body?.ticketId === firstPrint.body?.ticketId &&
+                ticketsAfterRetry.length === 1,
+              `status ${printRetry.status}, tickets=${ticketsAfterRetry.length}`,
+            );
+            const printNoop = await postCommand(apiUrl, apiKey, 'printKitchenTicket', admin, {
+              orderId: order2Id,
+              idempotencyKey: randomUUID(),
+            });
+            check(
+              'PRINT with no new lines is an explicit no-op',
+              printNoop.status === 200 && printNoop.body?.printStatus === 'NO_UNSENT_LINES',
+              `status ${printNoop.status}, printStatus ${printNoop.body?.printStatus}`,
+            );
+
             const changeQty = await postCommand(apiUrl, apiKey, 'changeLineQuantity', admin, {
               lineId: line1Id,
               quantity: 3,
             });
             check('changeLineQuantity works', changeQty.status === 200, `status ${changeQty.status}`);
+
+            const deltaPrint = await postCommand(apiUrl, apiKey, 'printKitchenTicket', admin, {
+              orderId: order2Id,
+              idempotencyKey: randomUUID(),
+            });
+            const ticketsAfterDelta = (await restGet(apiUrl, apiKey, 'posKitchenTickets'))
+              .filter((ticket) => ticket.orderId === order2Id);
+            const deltaTicket = ticketsAfterDelta.find((ticket) => ticket.id !== firstPrint.body?.ticketId);
+            const deltaTicketLines = deltaTicket
+              ? (await restGet(apiUrl, apiKey, 'posKitchenTicketLines')).filter((line) => line.ticketId === deltaTicket.id)
+              : [];
+            check(
+              'second PRINT contains only the unsent quantity delta',
+              [200, 201].includes(deltaPrint.status) &&
+                ticketsAfterDelta.length === 2 &&
+                deltaTicketLines.length === 1 &&
+                deltaTicketLines[0].quantity === 1,
+              `status ${deltaPrint.status}, tickets=${ticketsAfterDelta.length}, deltaLines=${deltaTicketLines.length}`,
+            );
+
+            const extraLine = await postCommand(apiUrl, apiKey, 'addLine', admin, {
+              orderId: order2Id,
+              guestId: guest2Id,
+              menuItemId: menu[1 % menu.length],
+              quantity: 1,
+              idempotencyKey: randomUUID(),
+            });
+            const parallelPrints = await Promise.all([
+              postCommand(apiUrl, apiKey, 'printKitchenTicket', admin, { orderId: order2Id, idempotencyKey: randomUUID() }),
+              postCommand(apiUrl, apiKey, 'printKitchenTicket', admin, { orderId: order2Id, idempotencyKey: randomUUID() }),
+            ]);
+            const ticketsAfterParallelPrint = (await restGet(apiUrl, apiKey, 'posKitchenTickets'))
+              .filter((ticket) => ticket.orderId === order2Id);
+            check(
+              'parallel PRINT converges to one additional semantic ticket',
+              [200, 201].includes(extraLine.status) &&
+                parallelPrints.every((result) => [200, 201].includes(result.status)) &&
+                ticketsAfterParallelPrint.length === 3,
+              `addLine=${extraLine.status}, printStatuses=${parallelPrints.map((result) => result.status).join('/')}, tickets=${ticketsAfterParallelPrint.length}`,
+            );
 
             const changeQtyZero = await postCommand(apiUrl, apiKey, 'changeLineQuantity', admin, {
               lineId: line1Id,

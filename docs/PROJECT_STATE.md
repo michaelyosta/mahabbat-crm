@@ -77,6 +77,21 @@
   Mahabbat `PosStaff`/`PosSession` context. The outer Twenty route/API key is
   still not claimed as production RBAC.
 
+## POS Slice 2 — Kitchen Print + Stop List (PASS)
+
+- Added `PosKitchenTicket`/`PosKitchenTicketLine` and the server-owned
+  `PosOrderLine.kitchenSentQuantity` cursor. `MockKitchenPrintAdapter` is the
+  bounded printer boundary; no physical printer is configured.
+- Added authenticated `addStopListEntry`, `clearStopListEntry` and
+  `printKitchenTicket`. Stop-list validation runs on every `addLine`; stale
+  clients are rejected. Semantic/request idempotency plus unique ticket-line
+  handling make retry and concurrent PRINT re-read the winner instead of
+  duplicating tickets or lines.
+- Live acceptance passed on `:2020` and `:3000` with 55/55 checks each. It
+  covers stop-list lifecycle, first/retry/no-op/delta PRINT, parallel PRINT,
+  sent-quantity guard, persistence, Slice 1 races and CRM smoke. Unit total:
+  225 passed.
+
 # PRE-POS hardening (FINAL PASS)
 
 - Loyalty balance: Customer 360 computes the balance from the **full ledger**
@@ -105,14 +120,23 @@
 - Destructive integration-test setup is fail-closed (target allowlist guard,
   11 tests). Branding overlay is fail-closed (7 tests) and fails the build when
   a target literal is missing.
-- POS Foundation Slice 1 is implemented after the documented boundary
-  decision; kitchen print, stop-list mutation commands, precheck, payments,
-  reservations/prepayment, void/transfer and operational audit remain future
-  slices.
+- POS Foundation Slices 1–2 are implemented after the documented boundary
+  decision; precheck, payments, reservations/prepayment, void/transfer and
+  operational audit remain future slices. Kitchen output is mock-adapter only.
 - Gate totals after the corrective checkpoint: `yarn lint` 0/0, `yarn typecheck`
-  clean, `yarn test:unit` 222/222, `yarn seed:pos:dry` PASS. The live POS
-  acceptance harness completed 47/47 checks on each target; no Kitchen/Stop List
-  work was started.
+  clean, `yarn test:unit` 225/225, `yarn seed:pos:dry` PASS. Slice 2 live
+  acceptance is recorded below.
+
+# POS Slice 2 live checkpoint — 2026-08-19
+
+- Disposable `:2020`: `scripts/accept-pos.mjs` PASS 55/55 after Linux
+  plan/apply/replan. It proved server stop-list lifecycle, stale-client
+  rejection, first/retry/no-op/delta PRINT, sent-quantity guard, parallel
+  PRINT convergence, reload/second-client state, Slice 1 races and CRM smoke.
+- Self-hosted `:3000`: the same manifest and deterministic harness PASS 55/55;
+  plan after apply returned `No changes`.
+- No physical printer, fiscal, payment or precheck behavior is implied by this
+  checkpoint; Twenty core modifications remain 0.
 
 # Сейчас не работает
 
@@ -278,17 +302,18 @@ product shell (Dashboard-first navigation, Russian labels, clean Orders/Loyalty
 views and discoverable business views) is complete; the generic scaffold page
 has been removed.
 
-The current POS slice is the server-side operational foundation:
+The current POS slice is the server-side operational foundation plus Kitchen
+Print + Stop List:
 PosStaff PIN/card -> PosSession -> active Shift -> free Table -> POS Order ->
-multiple Guests -> independent OrderLines -> server totals -> persistence. There
-is no POS UI, printer, precheck or payment path yet.
+multiple Guests -> independent OrderLines -> server totals -> persistence.
+There is no physical POS UI, precheck, payment or reservation/prepayment path
+yet; the kitchen adapter is mock-only.
 
 # Следующий лучший шаг
 
 CRM foundation, aggregate import, Dashboard, Reservations, Demo-ready shell and
-PRE-POS hardening are complete. POS Foundation Slice 1 is PASS on both runtime
-targets. The next recommended slice is `KITCHEN PRINT + STOP LIST`, but it is
-not started automatically by this checkpoint.
+PRE-POS hardening are complete. POS Foundation Slices 1 and 2 are PASS on both
+runtime targets. The next slice is `PRECHECK + ORDER LOCK`.
 
 ## P0 loyalty write boundary status
 

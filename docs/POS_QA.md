@@ -23,8 +23,9 @@
 3. Повтор с тем же idempotencyKey → та же смена; второй distinct-вызов на тот же staffId → уникальный конфликт → НЕ две смены.
 4. **openOrder** (свободный стол, активная смена) → `status=OPEN`, `claimToken=tableId`, owner = staff из verified session. Повтор с тем же ключом → тот же заказ. Второй openOrder на занятый стол → честная ошибка (не 500, дубля нет).
 5. **addGuest ×2** → ordinal 1,2, displayNumber «Гость 1/2».
-6. **addLine** (goosh, menu item, qty) → позиция со snapshot имени/цены, subtotal order/guest пересчитаны; второй одинаковый addLine → независимая строка (НЕ merge); addLine на активный стоп-лист → отклонён.
-7. **changeLineQuantity** → totals обновились; qty=0 → отклонён.
+6. **addLine** (guest, menu item, qty) → позиция со snapshot имени/цены, subtotal order/guest пересчитаны; второй одинаковый addLine → независимая строка (НЕ merge); addLine на активный стоп-лист → отклонён.
+7. **Stop list + PRINT**: WAITER ставит/снимает позицию; stale addLine получает `STOP_LISTED`; первый print создаёт один `NEW_ITEMS` ticket, retry/no-op не дублирует, новые quantity создают delta ticket; параллельный print сходится к одному semantic ticket.
+8. **changeLineQuantity** → totals обновились; qty=0 → отклонён; уменьшение уже отправленной quantity → `LINE_ALREADY_SENT`.
 8. **closeShift** → `status=CLOSED`, `isOpen=null`; открыть заказ на закрытую смену → SHIFT_REQUIRED.
 9. **CRM smoke** (:2020): обычные люди/заказы читаются/создаются как раньше; POS-объекты не ломают стандартную схему (core 0 изменений).
 10. **Concurrency race**: два параллельных `openOrder` на один стол / два `openShift` на один staffId / повтор `addLine` с одним ключом → не более одного результата (FakePosDb в тестах + live-проверка скриптом curl/xargs).
@@ -49,7 +50,7 @@
 - [x] acceptance flow прошёл на :2020 (`scripts/accept-pos.mjs`, 47 checks)
 - [x] concurrency race подтверждён (не более 1 смены/заказа, ошибка не 500)
 - [x] CRM smoke на :2020 (people+orders не сломались)
-- [x] :3000 plan/apply + тот же POS command acceptance (47 checks)
+- [x] :3000 plan/apply + тот же POS command acceptance (55 checks)
 - [x] acceptance tables are deterministic and reconciliation is limited to POS Acceptance fixtures
 - [x] документация и текущий execution order обновлены
 
@@ -67,8 +68,17 @@
 - Acceptance credentials and PINs are local synthetic values only; they are not
   committed, logged or reused as production credentials.
 
+## Slice 2 live result — 2026-08-19
+
+- `:2020`: PASS, 55/55 checks: stop-list lifecycle, stale-client rejection,
+  first/retry/no-op/delta PRINT, parallel PRINT convergence, sent-quantity guard,
+  persistence, Slice 1 races and CRM smoke.
+- `:3000`: PASS, 55/55 checks with the same manifest and deterministic fixtures.
+- Kitchen output uses `MockKitchenPrintAdapter`; no physical printer or fiscal
+  integration is claimed. Twenty core modifications remain `0`.
+
 ## Не входит в этот маршрут
-Платежи, печать, предоплаты, void, transfer, стоп-лист-команды и аудит —
-слайсы 2–6/отдельные инициативы. POS PIN/card auth context уже реализован в
-текущем Slice 1; полноценные Internet auth controls (2FA, refresh rotation,
-distributed rate limiting) остаются отдельной инициативой.
+Платежи, предоплаты, precheck, void, transfer и аудит — следующие bounded
+слайсы. POS PIN/card auth context и Slice 1–2 уже реализованы; полноценные
+Internet auth controls (2FA, refresh rotation, distributed rate limiting) и
+физическая печать остаются отдельными инициативами.

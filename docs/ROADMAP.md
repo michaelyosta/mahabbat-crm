@@ -87,9 +87,12 @@ temporary handoff and wait for the user's decision on the next phase.
   acceptance passed on both `:2020` and `:3000` (47/47 checks per target),
   including the ADMIN/WAITER PIN contract and table concurrency. Twenty core
   changes: 0.
+- [x] POS Slice 2 — server-side Stop List lifecycle plus immutable Kitchen
+  Tickets/Lines, delta printing, MockKitchenPrintAdapter and retry/concurrency
+  safety. Live acceptance passed on both `:2020` and `:3000` (55/55 checks per
+  target); Twenty core changes: 0.
 
 ## NEXT
 
-- `KITCHEN PRINT + STOP LIST` — immutable kitchen ticket abstraction and
-  server-side stop-list commands. Do not start automatically until this
-  checkpoint is accepted.
+- `PRECHECK + ORDER LOCK` — next bounded slice: server-side precheck snapshot,
+  `PRECHECK_PRINTED` lock and ADMIN-only cancel path.

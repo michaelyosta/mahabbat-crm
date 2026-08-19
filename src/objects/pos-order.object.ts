@@ -32,6 +32,8 @@ export const POS_ORDER_TOTAL_FIELD_UNIVERSAL_IDENTIFIER =
   '4d5e7e89-cd8c-4298-b313-bbd6786e4caa';
 export const POS_ORDER_NOTES_FIELD_UNIVERSAL_IDENTIFIER =
   '8121484b-87ef-4917-8e3c-9be13166cb3b';
+export const POS_ORDER_KITCHEN_TICKETS_FIELD_UNIVERSAL_IDENTIFIER =
+  'f1e6d6a2-7b63-4c9a-8d21-1e5f4a6b7c80';
 export const POS_ORDER_UNIQUE_TABLE_CLAIM_INDEX_UNIVERSAL_IDENTIFIER =
   '20629f11-1305-4671-b7f7-0ddd4028afd6';
 export const POS_ORDER_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
@@ -265,6 +267,19 @@ export default defineObject({
       universalSettings: {
         displayedMaxRows: 4,
       },
+    },
+    {
+      universalIdentifier: POS_ORDER_KITCHEN_TICKETS_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'kitchenTickets',
+      label: 'Кухонные фиши',
+      description: 'Immutable команды кухни для заказа',
+      icon: 'IconChefHat',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '7c1a2f34-5b67-4d89-8e01-23456789abcd',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '7c1a2f34-5b67-4d89-8e01-23456789abcf',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
   ],
 });

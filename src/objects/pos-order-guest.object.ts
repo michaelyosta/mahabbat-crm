@@ -16,6 +16,8 @@ export const POS_ORDER_GUEST_LINES_FIELD_UNIVERSAL_IDENTIFIER =
   '60671e06-c064-410a-853d-987dc76696df';
 export const POS_ORDER_GUEST_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER =
   'b3fdbef4-d42a-4ccb-a468-227824dfd186';
+export const POS_ORDER_GUEST_KITCHEN_TICKET_LINES_FIELD_UNIVERSAL_IDENTIFIER =
+  'd8f6b2a4-7c1e-4d90-8f23-6a5b7c8d9e02';
 export const POS_ORDER_GUEST_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
   'e743efac-352d-48a6-9215-28fc6428a8d6';
 
@@ -115,6 +117,20 @@ export default defineObject({
       isNullable: true,
       isUIEditable: false,
       defaultValue: null,
+    },
+    {
+      universalIdentifier:
+        POS_ORDER_GUEST_KITCHEN_TICKET_LINES_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'kitchenTicketLines',
+      label: 'Кухонные фиши',
+      description: 'Фиши с позициями этого гостя',
+      icon: 'IconChefHat',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '8d2b3f45-6c78-4e90-9f12-3456789abcde',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '8d2b3f45-6c78-4e90-9f12-3456789abce1',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
   ],
 });

@@ -1,6 +1,6 @@
 # Mahabbat POS — Domain
 
-Слой документации и контрактов POS. Реализовано на момент FOUNDATION LOOP: **Slice 1** (Shift → Table → Order → Guests → Lines, server-side command boundary). Слайсы 2–6 задокументированы, но **не реализованы**.
+Слой документации и контрактов POS. Реализованы **Slice 1** (Shift → Table → Order → Guests → Lines) и **Slice 2** (Stop List + Kitchen Tickets) через server-side command boundary. Слайсы 3–6 остаются отдельными bounded slices.
 
 ## Граница (ADR-2026-08-POS-1)
 
@@ -82,7 +82,7 @@ POS — **отдельный операционный слой** на собст
 - Позиции принадлежат гостю; per-guest subtotal пересчитывается сервером.
 
 ### 6. PosOrderLine (Позиция заказа) — РЕАЛИЗОВАНО
-- Поля: `order` (N:1), `guest` (N:1), `menuItem` (N:1), `itemNameSnapshot`, `unitPrice` (CURRENCY snapshot), `quantity` (int ≥1), `status` (ACTIVE/VOIDED), `voidedAt`/`voidReason`/`voidPreparedState`/`voidedByStaffId` (слайс 6), `createdByStaffId`, `idempotencyKey`.
+- Поля: `order` (N:1), `guest` (N:1), `menuItem` (N:1), `itemNameSnapshot`, `unitPrice` (CURRENCY snapshot), `quantity` (int ≥1), `kitchenSentQuantity` (server-owned cursor), `status` (ACTIVE/VOIDED), `voidedAt`/`voidReason`/`voidPreparedState`/`voidedByStaffId` (слайс 6), `createdByStaffId`, `idempotencyKey`.
 - **Инварианты**:
   - Нет UNIQUE(`order`, `menuItem`) — идентичные позиции существуют как независимые строки.
   - Снапшот имени/цены не меняется командой (только quantity).
@@ -92,12 +92,17 @@ POS — **отдельный операционный слой** на собст
 ### 7. PosMenuItem (Позиция меню) — РЕАЛИЗОВАНО (master data)
 - Поля: `name`, `category`, `price` (CURRENCY), `isActive`, `lines` (1:N), `stopListEntries` (1:N). Редактирование меню — будущий слайс (не в слайсе 1).
 
-### 8. PosStopListEntry (Стоп-лист) — СХЕМА + ПРОВЕРКА в addLine
+### 8. PosStopListEntry (Стоп-лист) — Slice 2 РЕАЛИЗОВАН
 - Поля: `label`, `menuItem` (N:1), `isActive`, `createdByStaffId`, `clearedAt`, `clearedByStaffId`, `idempotencyKey`.
-- Команды стоп-листа (add/clear) — слайс 2; на слайсе 1 выполняется server-side проверка «нет активной записи ⇒ позиция доступна».
+- Одна lifecycle-запись на MenuItem переиспользуется при повторном включении. `addStopListEntry`/`clearStopListEntry` доступны WAITER и ADMIN, а `addLine` всегда проверяет свежий `isActive`; stale client получает `STOP_LISTED`.
 
-### 9–16. Future (задокументированы, не реализованы)
-- **KitchenPrint** (слайс 2): KitchenTicket + KitchenTicketLine, печать только неотправленных строк, printer adapter (реальный/mock/PDF).
+### 9. KitchenPrint — Slice 2 РЕАЛИЗОВАН
+- `PosKitchenTicket` + `PosKitchenTicketLine`: immutable `NEW_ITEMS` snapshot, guest attribution, action/quantity delta, actor и print status.
+- `kitchenSentQuantity` различает sent/unsent; semantic hash и request key защищены unique indexes. Повтор без новых строк — `NO_UNSENT_LINES`; повтор/параллельный вызов не создаёт дубль.
+- `KitchenPrintAdapter` отделяет physical printer; текущий `MockKitchenPrintAdapter` не заявляет реальную печать.
+
+### 10–16. Future (задокументированы, не реализованы)
+- **Precheck** (слайс 3): денежный снапшот, PRECHECK_PRINTED lock, cancelPrecheck только ADMIN.
 - **Precheck** (слайс 3): денежный снапшот, PRECHECK_PRINTED lock, cancelPrecheck только ADMIN.
 - **PaymentMethod** / **Payment** (слайс 4): конфигурируемые методы (Cash/Card база; Kaspi/Halyk/Freedom — не хардкодить), платежи, remaining=0 ⇒ close.
 - **Reservation** (слайс 5): все поля optional, протухшие NOT auto-deleted, negative-timer UI.

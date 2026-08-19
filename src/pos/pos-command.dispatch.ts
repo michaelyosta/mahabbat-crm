@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 
 import { type CoreApiClientLike } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
 import {
@@ -19,6 +19,7 @@ import {
   normalizeCurrency,
   sumActiveLinesMicros,
 } from 'src/pos/pos-money';
+import { kitchenPrintAdapter } from 'src/pos/kitchen-print-adapter';
 
 type ExistingRecord = {
   id: string;
@@ -75,6 +76,7 @@ type LineRecord = ExistingRecord & {
   itemNameSnapshot?: string | null;
   unitPrice?: unknown;
   quantity?: number | null;
+  kitchenSentQuantity?: number | null;
   status?: string | null;
   createdByStaffId?: string | null;
   idempotencyKey?: string | null;
@@ -83,6 +85,30 @@ type LineRecord = ExistingRecord & {
 type StopListEntryRecord = ExistingRecord & {
   menuItemId?: string | null;
   isActive?: boolean | null;
+  idempotencyKey?: string | null;
+  createdByStaffId?: string | null;
+  clearedAt?: string | null;
+  clearedByStaffId?: string | null;
+};
+
+type KitchenTicketRecord = ExistingRecord & {
+  orderId?: string | null;
+  ticketType?: string | null;
+  createdAt?: string | null;
+  createdByStaffId?: string | null;
+  printStatus?: string | null;
+  idempotencyKey?: string | null;
+  requestIdempotencyKey?: string | null;
+};
+
+type KitchenTicketLineRecord = ExistingRecord & {
+  ticketId?: string | null;
+  orderLineId?: string | null;
+  guestId?: string | null;
+  guestDisplayNumber?: string | null;
+  itemNameSnapshot?: string | null;
+  quantity?: number | null;
+  action?: string | null;
 };
 
 type CommandResult = { status: number; body: unknown };
@@ -109,6 +135,9 @@ export const POS_ERROR_CODES = [
   'STOP_LISTED',
   'LINE_NOT_FOUND',
   'LINE_NOT_EDITABLE',
+  'LINE_ALREADY_SENT',
+  'STOP_LIST_NOT_FOUND',
+  'KITCHEN_TICKET_NOT_FOUND',
   'IDEMPOTENCY_CONFLICT',
   'CONFLICT',
 ] as const;
@@ -198,6 +227,7 @@ const LINE_FIELDS: NodeSelection = {
   itemNameSnapshot: true,
   unitPrice: { amountMicros: true, currencyCode: true },
   quantity: true,
+  kitchenSentQuantity: true,
   status: true,
   createdByStaffId: true,
   idempotencyKey: true,
@@ -207,6 +237,32 @@ const STOP_LIST_FIELDS: NodeSelection = {
   id: true,
   menuItemId: true,
   isActive: true,
+  idempotencyKey: true,
+  createdByStaffId: true,
+  clearedAt: true,
+  clearedByStaffId: true,
+};
+
+const KITCHEN_TICKET_FIELDS: NodeSelection = {
+  id: true,
+  orderId: true,
+  ticketType: true,
+  createdAt: true,
+  createdByStaffId: true,
+  printStatus: true,
+  idempotencyKey: true,
+  requestIdempotencyKey: true,
+};
+
+const KITCHEN_TICKET_LINE_FIELDS: NodeSelection = {
+  id: true,
+  ticketId: true,
+  orderLineId: true,
+  guestId: true,
+  guestDisplayNumber: true,
+  itemNameSnapshot: true,
+  quantity: true,
+  action: true,
 };
 
 const queryConnection = async <T extends ExistingRecord>(
@@ -318,6 +374,93 @@ const findActiveStopListEntry = async (
   );
 
   return entries.find((entry) => entry.isActive === true) ?? null;
+};
+
+const findStopListEntryByMenuItem = async (
+  client: CoreApiClientLike,
+  menuItemId: string,
+): Promise<StopListEntryRecord | null> => {
+  const entries = await queryConnection<StopListEntryRecord>(
+    client,
+    'posStopListEntries',
+    { filter: { menuItemId: { eq: menuItemId } }, first: 1 },
+    STOP_LIST_FIELDS,
+  );
+
+  return entries[0] ?? null;
+};
+
+const findStopListEntryByIdempotencyKey = async (
+  client: CoreApiClientLike,
+  idempotencyKey: string,
+): Promise<StopListEntryRecord | null> => {
+  const entries = await queryConnection<StopListEntryRecord>(
+    client,
+    'posStopListEntries',
+    { filter: { idempotencyKey: { eq: idempotencyKey } }, first: 1 },
+    STOP_LIST_FIELDS,
+  );
+
+  return entries[0] ?? null;
+};
+
+const findKitchenTicketByRequestIdempotencyKey = async (
+  client: CoreApiClientLike,
+  requestIdempotencyKey: string,
+): Promise<KitchenTicketRecord | null> => {
+  const tickets = await queryConnection<KitchenTicketRecord>(
+    client,
+    'posKitchenTickets',
+    {
+      filter: { requestIdempotencyKey: { eq: requestIdempotencyKey } },
+      first: 1,
+    },
+    KITCHEN_TICKET_FIELDS,
+  );
+
+  return tickets[0] ?? null;
+};
+
+const findKitchenTicketBySemanticKey = async (
+  client: CoreApiClientLike,
+  semanticKey: string,
+): Promise<KitchenTicketRecord | null> => {
+  const tickets = await queryConnection<KitchenTicketRecord>(
+    client,
+    'posKitchenTickets',
+    { filter: { idempotencyKey: { eq: semanticKey } }, first: 1 },
+    KITCHEN_TICKET_FIELDS,
+  );
+
+  return tickets[0] ?? null;
+};
+
+const findKitchenTicketLines = async (
+  client: CoreApiClientLike,
+  ticketId: string,
+): Promise<KitchenTicketLineRecord[]> =>
+  queryConnection<KitchenTicketLineRecord>(
+    client,
+    'posKitchenTicketLines',
+    { filter: { ticketId: { eq: ticketId } }, first: 100 },
+    KITCHEN_TICKET_LINE_FIELDS,
+  );
+
+const findKitchenTicketLine = async (
+  client: CoreApiClientLike,
+  ticketId: string,
+  orderLineId: string,
+): Promise<KitchenTicketLineRecord | null> => {
+  const lines = await queryConnection<KitchenTicketLineRecord>(
+    client,
+    'posKitchenTicketLines',
+    {
+      filter: { ticketId: { eq: ticketId }, orderLineId: { eq: orderLineId } },
+      first: 1,
+    },
+    KITCHEN_TICKET_LINE_FIELDS,
+  );
+  return lines[0] ?? null;
 };
 
 const findOrderById = async (
@@ -921,6 +1064,7 @@ export const executeAddLine = async (
             itemNameSnapshot: menuItem.name ?? '',
             unitPrice,
             quantity: payload.quantity,
+            kitchenSentQuantity: 0,
             status: 'ACTIVE',
             createdByStaffId: actor.staffId,
             idempotencyKey: payload.idempotencyKey,
@@ -977,6 +1121,14 @@ export const executeChangeLineQuantity = async (
   const editableIssue = assertOrderEditableForActor(order, actor);
   if (editableIssue) return editableIssue;
 
+  const kitchenSentQuantity = line.kitchenSentQuantity ?? 0;
+  if (payload.quantity < kitchenSentQuantity) {
+    return errorResult(
+      'LINE_ALREADY_SENT',
+      'A sent quantity cannot be reduced before an administrative kitchen correction.',
+    );
+  }
+
   await client.mutation({
     updatePosOrderLine: {
       __args: { id: line.id, data: { quantity: payload.quantity } },
@@ -987,6 +1139,302 @@ export const executeChangeLineQuantity = async (
   await updateLinesTotals(client, order);
 
   return okResult(200, { lineId: line.id, quantity: payload.quantity });
+};
+
+export const executeAddStopListEntry = async (
+  client: CoreApiClientLike,
+  payload: { menuItemId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const menuItem = await findMenuItemById(client, payload.menuItemId);
+  if (!menuItem) {
+    return errorResult('MENU_ITEM_NOT_FOUND', 'Menu item does not exist.');
+  }
+
+  const replay = await findStopListEntryByIdempotencyKey(
+    client,
+    payload.idempotencyKey,
+  );
+  if (replay) {
+    if (replay.menuItemId !== payload.menuItemId || replay.createdByStaffId !== actor.staffId) {
+      return idempotencyConflict('The idempotency key belongs to another stop-list context.');
+    }
+    return okResult(200, { stopListEntryId: replay.id, isActive: replay.isActive === true });
+  }
+
+  const existing = await findStopListEntryByMenuItem(client, payload.menuItemId);
+  if (existing) {
+    if (existing.isActive === true) {
+      return okResult(200, { stopListEntryId: existing.id, isActive: true });
+    }
+
+    await client.mutation({
+      updatePosStopListEntry: {
+        __args: {
+          id: existing.id,
+          data: {
+            isActive: true,
+            createdAt: new Date().toISOString(),
+            createdByStaffId: actor.staffId,
+            clearedAt: null,
+            clearedByStaffId: null,
+            idempotencyKey: payload.idempotencyKey,
+          },
+        },
+        id: true,
+      },
+    });
+    return okResult(200, { stopListEntryId: existing.id, isActive: true });
+  }
+
+  try {
+    const result = (await client.mutation({
+      createPosStopListEntry: {
+        __args: {
+          data: {
+            menuItemId: payload.menuItemId,
+            label: menuItem.name ?? null,
+            isActive: true,
+            createdAt: new Date().toISOString(),
+            createdByStaffId: actor.staffId,
+            idempotencyKey: payload.idempotencyKey,
+          },
+        },
+        id: true,
+      },
+    })) as { createPosStopListEntry?: StopListEntryRecord };
+    const created = result.createPosStopListEntry;
+    if (!created?.id) throw new Error('Stop-list entry was created but not readable.');
+    return okResult(201, { stopListEntryId: created.id, isActive: true });
+  } catch {
+    const raced = await findStopListEntryByMenuItem(client, payload.menuItemId);
+    if (raced) return okResult(200, { stopListEntryId: raced.id, isActive: raced.isActive === true });
+    return errorResult('CONFLICT', 'Stop-list entry could not be created.');
+  }
+};
+
+export const executeClearStopListEntry = async (
+  client: CoreApiClientLike,
+  payload: { menuItemId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const menuItem = await findMenuItemById(client, payload.menuItemId);
+  if (!menuItem) {
+    return errorResult('MENU_ITEM_NOT_FOUND', 'Menu item does not exist.');
+  }
+
+  const replay = await findStopListEntryByIdempotencyKey(
+    client,
+    payload.idempotencyKey,
+  );
+  if (replay) {
+    if (replay.menuItemId !== payload.menuItemId || replay.clearedByStaffId !== actor.staffId) {
+      return idempotencyConflict('The idempotency key belongs to another stop-list context.');
+    }
+    return okResult(200, { stopListEntryId: replay.id, isActive: replay.isActive === true });
+  }
+
+  const existing = await findStopListEntryByMenuItem(client, payload.menuItemId);
+  if (!existing || existing.isActive !== true) {
+    return okResult(200, { stopListEntryId: existing?.id ?? null, isActive: false });
+  }
+
+  await client.mutation({
+    updatePosStopListEntry: {
+      __args: {
+        id: existing.id,
+        data: {
+          isActive: false,
+          clearedAt: new Date().toISOString(),
+          clearedByStaffId: actor.staffId,
+          idempotencyKey: payload.idempotencyKey,
+        },
+      },
+      id: true,
+    },
+  });
+  return okResult(200, { stopListEntryId: existing.id, isActive: false });
+};
+
+const kitchenSemanticKey = (
+  orderId: string,
+  lines: LineRecord[],
+): string => {
+  const snapshot = lines
+    .map((line) => `${line.id}:${line.quantity ?? 0}:${line.kitchenSentQuantity ?? 0}`)
+    .sort()
+    .join('|');
+  const digest = createHash('sha256').update(`${orderId}|${snapshot}`).digest('hex');
+  return `kitchen-new-items:${orderId}:${digest}`;
+};
+
+const repairKitchenTicket = async (
+  client: CoreApiClientLike,
+  ticket: KitchenTicketRecord,
+  actor: PosActor,
+): Promise<void> => {
+  const ticketLines = await findKitchenTicketLines(client, ticket.id);
+  for (const ticketLine of ticketLines) {
+    if (!ticketLine.orderLineId) continue;
+    const line = await findLineById(client, ticketLine.orderLineId);
+    if (!line) continue;
+    const sent = Math.max(line.kitchenSentQuantity ?? 0, ticketLine.quantity ?? 0);
+    if (sent !== (line.kitchenSentQuantity ?? 0)) {
+      await client.mutation({
+        updatePosOrderLine: {
+          __args: { id: line.id, data: { kitchenSentQuantity: sent } },
+          id: true,
+        },
+      });
+    }
+  }
+
+  // A retry after a crash is allowed to repair server-owned sent quantities,
+  // but never changes the immutable ticket or its actor.
+  void actor;
+};
+
+export const executePrintKitchenTicket = async (
+  client: CoreApiClientLike,
+  payload: { orderId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const order = await findOrderById(client, payload.orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+
+  const editableIssue = assertOrderEditableForActor(order, actor);
+  if (editableIssue) return editableIssue;
+
+  const requestReplay = await findKitchenTicketByRequestIdempotencyKey(
+    client,
+    payload.idempotencyKey,
+  );
+  if (requestReplay) {
+    await repairKitchenTicket(client, requestReplay, actor);
+    return okResult(200, {
+      ticketId: requestReplay.id,
+      printStatus: requestReplay.printStatus ?? 'PRINTED',
+      lineCount: (await findKitchenTicketLines(client, requestReplay.id)).length,
+    });
+  }
+
+  const lines = (await findLinesByOrder(client, payload.orderId)).filter(
+    (line) =>
+      line.status === 'ACTIVE' && (line.quantity ?? 0) > (line.kitchenSentQuantity ?? 0),
+  );
+  if (lines.length === 0) {
+    return okResult(200, { ticketId: null, printStatus: 'NO_UNSENT_LINES', lineCount: 0 });
+  }
+
+  const semanticKey = kitchenSemanticKey(payload.orderId, lines);
+  const semanticReplay = await findKitchenTicketBySemanticKey(client, semanticKey);
+  if (semanticReplay) {
+    await repairKitchenTicket(client, semanticReplay, actor);
+    return okResult(200, {
+      ticketId: semanticReplay.id,
+      printStatus: semanticReplay.printStatus ?? 'PRINTED',
+      lineCount: (await findKitchenTicketLines(client, semanticReplay.id)).length,
+    });
+  }
+
+  const createdAt = new Date().toISOString();
+  let ticket: KitchenTicketRecord | null = null;
+  let createdNewTicket = false;
+  try {
+    const result = (await client.mutation({
+      createPosKitchenTicket: {
+        __args: {
+          data: {
+            orderId: payload.orderId,
+            ticketType: 'NEW_ITEMS',
+            createdAt,
+            createdByStaffId: actor.staffId,
+            printStatus: 'PRINTED',
+            idempotencyKey: semanticKey,
+            requestIdempotencyKey: payload.idempotencyKey,
+          },
+        },
+        id: true,
+        printStatus: true,
+      },
+    })) as { createPosKitchenTicket?: KitchenTicketRecord };
+    ticket = result.createPosKitchenTicket ?? null;
+    createdNewTicket = true;
+  } catch {
+    const raced =
+      (await findKitchenTicketByRequestIdempotencyKey(client, payload.idempotencyKey)) ??
+      (await findKitchenTicketBySemanticKey(client, semanticKey));
+    if (!raced) return errorResult('CONFLICT', 'Kitchen ticket could not be created.');
+    ticket = raced;
+  }
+
+  if (!ticket?.id) return errorResult('CONFLICT', 'Kitchen ticket could not be read back.');
+
+  const existingTicketLines = await findKitchenTicketLines(client, ticket.id);
+  const existingLineIds = new Set(existingTicketLines.map((line) => line.orderLineId));
+  const printableLines = [] as Array<{
+    orderLineId: string;
+    guestDisplayNumber: string | null;
+    itemNameSnapshot: string;
+    quantity: number;
+    action: 'ADD';
+  }>;
+
+  for (const line of lines) {
+    const delta = Math.max(0, (line.quantity ?? 0) - (line.kitchenSentQuantity ?? 0));
+    if (!delta || existingLineIds.has(line.id)) continue;
+    const guest = line.guestId ? await findGuestById(client, line.guestId) : null;
+    const printable = {
+      orderLineId: line.id,
+      guestDisplayNumber: guest?.displayNumber ?? null,
+      itemNameSnapshot: line.itemNameSnapshot ?? '',
+      quantity: delta,
+      action: 'ADD' as const,
+    };
+    try {
+      await client.mutation({
+        createPosKitchenTicketLine: {
+          __args: {
+            data: {
+              ticketId: ticket.id,
+              orderLineId: line.id,
+              guestId: line.guestId,
+              guestDisplayNumber: printable.guestDisplayNumber,
+              itemNameSnapshot: printable.itemNameSnapshot,
+              quantity: printable.quantity,
+              action: printable.action,
+            },
+          },
+          id: true,
+        },
+      });
+    } catch {
+      // Another terminal may have inserted this immutable ticket line first.
+      // Re-read it and continue repairing sent quantity rather than surfacing
+      // a duplicate-print 500 to the POS.
+      const racedLine = await findKitchenTicketLine(client, ticket.id, line.id);
+      if (!racedLine) {
+        return errorResult('CONFLICT', 'Kitchen ticket line could not be created.');
+      }
+    }
+    printableLines.push(printable);
+  }
+
+  await repairKitchenTicket(client, ticket, actor);
+  if (createdNewTicket && printableLines.length > 0) {
+    await kitchenPrintAdapter.print({
+      ticketId: ticket.id,
+      orderId: payload.orderId,
+      ticketType: 'NEW_ITEMS',
+      lines: printableLines,
+    });
+  }
+
+  return okResult(createdNewTicket ? 201 : 200, {
+    ticketId: ticket.id,
+    printStatus: ticket.printStatus ?? 'PRINTED',
+    lineCount: (await findKitchenTicketLines(client, ticket.id)).length,
+  });
 };
 
 export const dispatchPosCommand = async (
@@ -1053,6 +1501,33 @@ export const dispatchPosCommand = async (
       return executeChangeLineQuantity(
         client,
         { lineId: payload.lineId as string, quantity: payload.quantity as number },
+        actor,
+      );
+    case 'addStopListEntry':
+      return executeAddStopListEntry(
+        client,
+        {
+          menuItemId: payload.menuItemId as string,
+          idempotencyKey: payload.idempotencyKey as string,
+        },
+        actor,
+      );
+    case 'clearStopListEntry':
+      return executeClearStopListEntry(
+        client,
+        {
+          menuItemId: payload.menuItemId as string,
+          idempotencyKey: payload.idempotencyKey as string,
+        },
+        actor,
+      );
+    case 'printKitchenTicket':
+      return executePrintKitchenTicket(
+        client,
+        {
+          orderId: payload.orderId as string,
+          idempotencyKey: payload.idempotencyKey as string,
+        },
         actor,
       );
     case 'authenticatePosStaff':

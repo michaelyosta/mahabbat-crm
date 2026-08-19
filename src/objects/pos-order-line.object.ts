@@ -14,6 +14,8 @@ export const POS_ORDER_LINE_UNIT_PRICE_FIELD_UNIVERSAL_IDENTIFIER =
   '8bf389e0-9647-4466-a5da-0d449d0b85b3';
 export const POS_ORDER_LINE_QUANTITY_FIELD_UNIVERSAL_IDENTIFIER =
   'f290b1f4-1db4-463b-9dfa-eb215fd634e5';
+export const POS_ORDER_LINE_KITCHEN_SENT_QUANTITY_FIELD_UNIVERSAL_IDENTIFIER =
+  'f290b1f4-1db4-463b-9dfa-eb215fd634e6';
 export const POS_ORDER_LINE_STATUS_FIELD_UNIVERSAL_IDENTIFIER =
   '932e8349-9a41-4b0e-855c-d9868f32ec13';
 export const POS_ORDER_LINE_VOIDED_AT_FIELD_UNIVERSAL_IDENTIFIER =
@@ -28,6 +30,8 @@ export const POS_ORDER_LINE_CREATED_BY_STAFF_ID_FIELD_UNIVERSAL_IDENTIFIER =
   '28f2815f-7ea8-46d2-bb6a-5fe12948ff63';
 export const POS_ORDER_LINE_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER =
   '4fbb111e-f88d-4273-a781-ac393756c3a2';
+export const POS_ORDER_LINE_KITCHEN_TICKET_LINES_FIELD_UNIVERSAL_IDENTIFIER =
+  'f4a8c6d2-9b10-4e73-8c21-5d6f7a8b9c01';
 export const POS_ORDER_LINE_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
   '6f6eab89-15da-4f20-863d-bbf21cddcecb';
 
@@ -122,6 +126,22 @@ export default defineObject({
       icon: 'IconNumber',
       isNullable: false,
       defaultValue: 1,
+      universalSettings: {
+        dataType: NumberDataType.INT,
+      },
+    },
+    {
+      universalIdentifier:
+        POS_ORDER_LINE_KITCHEN_SENT_QUANTITY_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.NUMBER,
+      name: 'kitchenSentQuantity',
+      label: 'Отправлено на кухню',
+      description:
+        'Количество позиции, уже включённое в immutable kitchen ticket; поле изменяется только POS command',
+      icon: 'IconChefHat',
+      isNullable: false,
+      isUIEditable: false,
+      defaultValue: 0,
       universalSettings: {
         dataType: NumberDataType.INT,
       },
@@ -230,6 +250,20 @@ export default defineObject({
       isNullable: true,
       isUIEditable: false,
       defaultValue: null,
+    },
+    {
+      universalIdentifier:
+        POS_ORDER_LINE_KITCHEN_TICKET_LINES_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'kitchenTicketLines',
+      label: 'Кухонные фиши',
+      description: 'Фиши, в которые вошла эта позиция заказа',
+      icon: 'IconChefHat',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '8d2b3f45-6c78-4e90-9f12-3456789abcde',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '8d2b3f45-6c78-4e90-9f12-3456789abce0',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
   ],
 });

@@ -7,6 +7,9 @@ export const POS_COMMANDS = [
   'addGuest',
   'addLine',
   'changeLineQuantity',
+  'addStopListEntry',
+  'clearStopListEntry',
+  'printKitchenTicket',
 ] as const;
 
 export type PosCommand = (typeof POS_COMMANDS)[number];

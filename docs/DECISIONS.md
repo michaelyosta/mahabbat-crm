@@ -357,3 +357,18 @@ self-hosted `:3000`. On `:3000`, one stale non-persistent LOCAL logic-function
 SDK layer was removed and rebuilt after confirming the persisted generated SDK
 archive already contained the current POS schema. No Twenty core source or
 persistent database data was changed.
+
+## 2026-08-19 — POS Slice 2: server-owned kitchen delta boundary
+
+Stop-list mutations and kitchen print are controlled POS commands, not generic
+Twenty CRUD. `PosOrderLine.kitchenSentQuantity` is the server-owned cursor; a
+PRINT command snapshots only positive unsent deltas into immutable
+`PosKitchenTicket`/`PosKitchenTicketLine` records. A semantic hash of the
+current order-line state and the caller request key each have unique indexes,
+so retries and concurrent terminals converge to one ticket. A ticket-line
+unique `(ticketId, orderLineId)` index makes partial crash recovery repairable.
+The physical printer is intentionally deferred behind `KitchenPrintAdapter`;
+Slice 2 uses `MockKitchenPrintAdapter`. `addLine` rechecks the live stop-list
+on the server, so a stale menu client cannot bypass a stop-list change.
+This required only Mahabbat App objects/logic; Twenty core modifications remain
+0. Live acceptance: `:2020` and `:3000`, 55/55 checks each.

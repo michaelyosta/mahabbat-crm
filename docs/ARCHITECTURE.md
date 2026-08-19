@@ -58,12 +58,12 @@ datasets into a synthetic operational history.
 ## POS boundary
 
 POS is a separate operational layer on `pos*` custom objects, not an extension
-of the CRM `Order`. Slice 1 currently implements `PosShift`, `PosZone`,
-`PosTable`, `PosOrder`, `PosOrderGuest`, `PosOrderLine`, `PosMenuItem`, the
-stop-list read/check surface and the operational identity objects `PosStaff`/
-`PosSession`. Mutations go through the signed `/pos/command` route and server
-dispatcher; generic waiter CRUD is read-only. POS money uses Twenty Currency
-micro-units, and CRM Orders/OrderItems remain untouched.
+of the CRM `Order`. Slices 1–2 implement `PosShift`, `PosZone`, `PosTable`,
+`PosOrder`, `PosOrderGuest`, `PosOrderLine`, `PosMenuItem`, `PosStopListEntry`,
+`PosKitchenTicket`, `PosKitchenTicketLine` and the operational identity objects
+`PosStaff`/`PosSession`. Mutations go through the signed `/pos/command` route
+and server dispatcher; generic waiter CRUD is read-only. POS money uses Twenty
+Currency micro-units, and CRM Orders/OrderItems remain untouched.
 
 POS authentication is independent from Twenty WorkspaceMember authentication:
 `authenticatePosStaff` verifies a scrypt PIN/card against `PosStaff`, issues a
@@ -72,8 +72,10 @@ command resolves actor staff/role from that session. `TWENTY_APP_ACCESS_TOKEN`
 remains only the service credential used by the resolver to access the Twenty
 data plane.
 
-Kitchen printing, prechecks, payments, reservations/prepayments, voids,
-transfers and append-only operational audit remain explicitly deferred. The
+Prechecks, payments, reservations/prepayments, voids, transfers and append-only
+operational audit remain explicitly deferred. Slice 2 kitchen output is
+immutable and delta-based, but uses only a `MockKitchenPrintAdapter`; physical
+printer routing is not claimed. The
 complete boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
 `docs/POS_DOMAIN.md`. Twenty v2.29.0's App event still does not expose a member
 identity, so outer route authentication and the Mahabbat POS session are

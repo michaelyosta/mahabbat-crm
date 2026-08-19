@@ -73,6 +73,16 @@ export type ChangeLineQuantityPayload = {
   quantity: number;
 };
 
+export type StopListPayload = {
+  menuItemId: string;
+  idempotencyKey: string;
+};
+
+export type PrintKitchenTicketPayload = {
+  orderId: string;
+  idempotencyKey: string;
+};
+
 const parseIdempotencyKey = (value: unknown): ParseResult<string> => {
   if (!isUuid(value)) {
     return invalid('INVALID_PAYLOAD', 'idempotencyKey must be a UUID');
@@ -271,6 +281,40 @@ const parseChangeLineQuantity = (
   return { ok: true, data: { lineId, quantity: parsedQuantity.data } };
 };
 
+const parseStopListPayload = (payload: unknown): ParseResult<StopListPayload> => {
+  if (typeof payload !== 'object' || payload === null) {
+    return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  }
+
+  const { menuItemId, idempotencyKey } = payload as Record<string, unknown>;
+  if (!isUuid(menuItemId)) {
+    return invalid('INVALID_PAYLOAD', 'menuItemId must be a UUID');
+  }
+
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+
+  return { ok: true, data: { menuItemId, idempotencyKey: parsedKey.data } };
+};
+
+const parsePrintKitchenTicket = (
+  payload: unknown,
+): ParseResult<PrintKitchenTicketPayload> => {
+  if (typeof payload !== 'object' || payload === null) {
+    return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  }
+
+  const { orderId, idempotencyKey } = payload as Record<string, unknown>;
+  if (!isUuid(orderId)) {
+    return invalid('INVALID_PAYLOAD', 'orderId must be a UUID');
+  }
+
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+
+  return { ok: true, data: { orderId, idempotencyKey: parsedKey.data } };
+};
+
 export const parsePosCommandEnvelope = (
   body: unknown,
 ): ParseResult<PosCommandEnvelope> => {
@@ -363,5 +407,10 @@ export const parseCommandPayload = <T>(
       return parseAddLine(payload) as unknown as ParseResult<T>;
     case 'changeLineQuantity':
       return parseChangeLineQuantity(payload) as unknown as ParseResult<T>;
+    case 'addStopListEntry':
+    case 'clearStopListEntry':
+      return parseStopListPayload(payload) as unknown as ParseResult<T>;
+    case 'printKitchenTicket':
+      return parsePrintKitchenTicket(payload) as unknown as ParseResult<T>;
   }
 };

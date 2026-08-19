@@ -56,7 +56,9 @@ authenticatePosStaff ─► ACTIVE ─► EXPIRED
 *) Конфликт claim: второй `openOrder` на занятый стол — детерминированный уникальный конфликт; запись не создаётся. При ошибках доказуемо не создаётся частичный заказ (transaction + серии пересчётов идемпотентны).
 
 ## PosOrderLine / PosOrderGuest
-- Line: `ACTIVE` → `VOIDED` (slice 6, сервер хранит voidPreparedState). PREP не моделируется отдельно в слайсе 1.
+- Line: `ACTIVE` → `VOIDED` (slice 6, сервер хранит voidPreparedState). В Slice 2
+  `kitchenSentQuantity` отделяет unsent quantity от уже отправленной; quantity
+  нельзя уменьшить ниже sent cursor до административного correction slice.
 - Guest: объект создаётся/существует до удаления; удаление c удержанием истории — slice 6. Равенство гостей — по `ordinal`, не по id.
 
 ## Протухшие предоплаты / резервы
@@ -64,6 +66,14 @@ authenticatePosStaff ─► ACTIVE ─► EXPIRED
 
 ## Запрет списаний на закрытом / PRECHECK
 После `PRECHECK_PRINTED` или `CLOSED` любые mutate-команды строк/гостей отклоняются сервером (защита целостности), даже если клиент ещё не знает о ликвидации.
+
+## KitchenTicket (Slice 2)
+
+`printKitchenTicket` создаёт immutable `NEW_ITEMS` snapshot только для активных
+строк, где `quantity > kitchenSentQuantity`. Успешная команда продвигает cursor;
+повтор без дельты возвращает `NO_UNSENT_LINES`. Semantic/request idempotency и
+уникальная `(ticket, orderLine)` строка защищают retry/concurrency. Будущий
+`CANCELLATION` ticket остаётся частью Slice 6.
 
 ## ESC
 Выход из flow (пункт 6 спеки) — **клиентская симуляция**: закрывает модалку, ничего с итогами не делает. Никакого серверного состояния не трогает (слайс 1).

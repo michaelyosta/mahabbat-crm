@@ -42,11 +42,14 @@ boundary, затем создаёт короткую `PosSession`. В Twenty х�
 | PosOrder | R + создать открытый | открыть СВОЙ заказ; НЕ видит чужие в read views (только через смену/стол) |
 | PosOrderGuest | R/W | guest-ы СВОЕГО заказа |
 | PosOrderLine | R/W | линии СВОЕГО заказа |
-| PosStopListEntry | R | стоп-лист (слайс 1: read; команды слайс 2) |
+| PosStopListEntry | R | просмотр стоп-листа; add/clear через команды |
+| PosKitchenTicket / PosKitchenTicketLine | R | immutable kitchen history; создание только через print command |
 | Граф QP | R | любые read-запросы по POS-графу (для работы UI), polite limitation |
 
 ### ADMIN
-Всё из WAITER + команды ADMIN-only (слайсы 3–6): checkPrecheck, cancelPrecheck, close, transfer*, cancelOrder, voidLines. Слайс 1 — только WAITER-набор (ADMIN пока не нужен для команд, но контекст готов).
+Всё из WAITER + будущие ADMIN-only команды (слайсы 3–6): checkPrecheck,
+cancelPrecheck, close, transfer*, cancelOrder, voidLines. Stop-list и
+`printKitchenTicket` доступны обоим operational roles в текущем Slice 2.
 
 ## Физическая привязка owner (server-side)
 - `openShift` → staffId из verified `PosSession`.

@@ -46,7 +46,10 @@ POS UI (2nd terminal / web)
 | `addGuest` | `{ orderId, name? }` | заказ owner/OPEN-IN_PROGRESS | ordinal = max+1 |
 | `addLine` | `{ orderId, guestId, menuItemId, quantity }` | guest-при-заказе (кроме snack), нет активной stopList, qty≥1 | snapshot цены, subtotal order/guest пересчёт |
 | `changeLineQuantity` | `{ lineId, quantity }` | ACTIVE строка, qty≥1, owner, не закрытый | last-write-wins (допущение) |
-| `addStopListEntry`/`clearStopListEntry`/`cancelOrder`/`voidLines`/`transfer*` | slice 2/3/6 | — | НЕ реализовано |
+| `addStopListEntry` | `{ menuItemId, idempotencyKey }` | authenticated operational staff, active menu item | reuses one lifecycle row; idempotent |
+| `clearStopListEntry` | `{ menuItemId, idempotencyKey }` | authenticated operational staff | idempotent state transition; no physical delete |
+| `printKitchenTicket` | `{ orderId, idempotencyKey }` | order owner/admin, editable order | immutable `NEW_ITEMS` ticket with unsent deltas only |
+| `createPrecheck`/`cancelPrecheck`/`voidLines`/`transfer*` | slice 3/6 | — | НЕ реализовано |
 
 ### Хранение
 Объекты и их связи создаются как обычные записи Twenty (через CoreApiClientLike), но с **двумя гарантиями idempotency + unique** через индексы, перечисленные в `src/indexes/*` (см. POS_DOMAIN.md §Идемпотентность).
@@ -73,7 +76,9 @@ authenticated staff, table, order, guest or line payload returns
 ## Вычисления и статусы (server-owned)
 - **subtotal/total** считаются в микроумножениях по sum -> integer safe math; после addLine/changeQuantity выполняется пересчёт `PosOrder.subtotal`, `PosOrder.total`, `PosOrderGuest.subtotal`.
 - **status** строк/заказа не пишется клиентом; переходы — только через команды (см. POS_STATE_MACHINES.md).
-- Стоп-лист: `addLine` проверяет `PosStopListEntry` с `isActive=true` по menuItem на момент команды.
+- Стоп-лист: `addLine` проверяет `PosStopListEntry` с `isActive=true` по menuItem на момент команды. `addStopListEntry` и `clearStopListEntry` проходят через тот же command boundary; stale client получает `STOP_LISTED`.
+- Kitchen print: `PosOrderLine.kitchenSentQuantity` — server-owned cursor. `printKitchenTicket` строит semantic hash текущих unsent deltas и сохраняет его в unique `PosKitchenTicket.idempotencyKey`; request key также unique. Retry/два терминала re-read уже созданную фишу и не создают duplicate ticket/line.
+- `KitchenPrintAdapter` (`src/pos/kitchen-print-adapter.ts`) отделяет домен от физического принтера. В Slice 2 применяется `MockKitchenPrintAdapter`; printable ticket immutable в data plane.
 
 ## Открытые вопросы (за пределами slice 1)
 - 2FA, refresh rotation и distributed rate limiting (pilot session boundary уже реализован).
