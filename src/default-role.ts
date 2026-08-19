@@ -29,6 +29,7 @@ import { POS_TABLE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-table.object';
 import { POS_ZONE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-zone.object';
 import { POS_RESERVATION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-reservation.object';
 import { POS_PREPAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-prepayment.object';
+import { POS_OPERATIONAL_EVENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-operational-event.object';
 
 export default defineApplicationRole({
   universalIdentifier: DEFAULT_ROLE_UNIVERSAL_IDENTIFIER,
@@ -112,6 +113,7 @@ export default defineApplicationRole({
       POS_SESSION_UNIVERSAL_IDENTIFIER,
       POS_RESERVATION_UNIVERSAL_IDENTIFIER,
       POS_PREPAYMENT_UNIVERSAL_IDENTIFIER,
+      POS_OPERATIONAL_EVENT_UNIVERSAL_IDENTIFIER,
     ].map((objectUniversalIdentifier) => ({
       objectUniversalIdentifier,
       canReadObjectRecords: true,

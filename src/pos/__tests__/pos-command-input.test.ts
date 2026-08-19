@@ -140,4 +140,37 @@ describe('parseCommandPayload', () => {
       }).ok,
     ).toBe(false);
   });
+
+  it('validates bounded void and transfer payloads', () => {
+    expect(
+      parseCommandPayload('voidOrderLines', {
+        lineIds: [STAFF],
+        preparedState: 'PREPARED',
+        reason: 'mistake',
+        idempotencyKey: KEY,
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseCommandPayload('voidOrderLines', {
+        lineIds: [STAFF, STAFF],
+        preparedState: 'PREPARED',
+        idempotencyKey: KEY,
+      }).ok,
+    ).toBe(false);
+    expect(
+      parseCommandPayload('transferOrderToTable', {
+        orderId: STAFF,
+        targetTableId: KEY,
+        idempotencyKey: KEY,
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseCommandPayload('transferOrderLinesToGuest', {
+        lineIds: [STAFF],
+        targetGuestId: KEY,
+        idempotencyKey: KEY,
+        role: 'ADMIN',
+      }).ok,
+    ).toBe(false);
+  });
 });

@@ -48,6 +48,21 @@
 - Unit: 227/227; lint/typecheck PASS. `MockKitchenPrintAdapter` and
   non-fiscal payments remain the declared pilot boundaries.
 
+## Live Slice 6 result — 2026-08-20
+
+- `:2020`: PASS, 78/78 checks. ADMIN-only line void records immutable void
+  metadata; sent lines produce one `CANCELLATION` kitchen ticket and retry
+  does not duplicate it. Table, waiter and guest-line transfers produce
+  append-only `PosOperationalEvent` audit rows. Waiter denial, prior Slice 1–5
+  idempotency/concurrency and CRM smoke also pass.
+- `:3000`: PASS, the same 78/78 deterministic checks after identical
+  plan/apply; replan on both targets returned `No changes`.
+- Local gates: `yarn lint`, `yarn typecheck`, `node --check
+  scripts/accept-pos.mjs`, and `yarn test:unit` pass (227 tests). Twenty core
+  modifications remain 0.
+- Physical printer, fiscalization, refunds and bank-terminal behavior remain
+  outside this pilot; cancellation output uses the existing mock adapter.
+
 ## CJ (frontend-IST)
 - Не входит в runtime acceptance slice 1 (серверная граница). Пользовательский сценарий клиента через Vue компоненты — слайс UI (отдельно от slice 1).
 

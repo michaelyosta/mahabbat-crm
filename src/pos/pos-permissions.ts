@@ -19,6 +19,10 @@ export const POS_COMMANDS = [
   'createPrepayment',
   'applyPrepayment',
   'attachReservationToOrder',
+  'voidOrderLines',
+  'transferOrderToTable',
+  'transferOrderToWaiter',
+  'transferOrderLinesToGuest',
 ] as const;
 
 export type PosCommand = (typeof POS_COMMANDS)[number];
@@ -39,7 +43,13 @@ export const POS_AUTH_COMMANDS = new Set<PosCommand>([
 
 const WAITER_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(
   POS_COMMANDS.filter(
-    (command) => command !== 'authenticatePosStaff' && command !== 'cancelPrecheck',
+    (command) =>
+      command !== 'authenticatePosStaff' &&
+      command !== 'cancelPrecheck' &&
+      command !== 'voidOrderLines' &&
+      command !== 'transferOrderToTable' &&
+      command !== 'transferOrderToWaiter' &&
+      command !== 'transferOrderLinesToGuest',
   ),
 );
 

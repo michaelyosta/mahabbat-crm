@@ -133,6 +133,31 @@ export type AttachReservationToOrderPayload = {
   idempotencyKey: string;
 };
 
+export type VoidOrderLinesPayload = {
+  lineIds: string[];
+  preparedState: 'PREPARED' | 'NOT_PREPARED';
+  reason?: string;
+  idempotencyKey: string;
+};
+
+export type TransferOrderToTablePayload = {
+  orderId: string;
+  targetTableId: string;
+  idempotencyKey: string;
+};
+
+export type TransferOrderToWaiterPayload = {
+  orderId: string;
+  targetStaffId: string;
+  idempotencyKey: string;
+};
+
+export type TransferOrderLinesToGuestPayload = {
+  lineIds: string[];
+  targetGuestId: string;
+  idempotencyKey: string;
+};
+
 const parseIdempotencyKey = (value: unknown): ParseResult<string> => {
   if (!isUuid(value)) {
     return invalid('INVALID_PAYLOAD', 'idempotencyKey must be a UUID');
@@ -483,6 +508,70 @@ const parseAttachReservationToOrderPayload = (payload: unknown): ParseResult<Att
   return { ok: true, data: { reservationId, orderId, idempotencyKey: parsedKey.data } };
 };
 
+const parseUuidArray = (value: unknown, field: string): ParseResult<string[]> => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
+    return invalid('INVALID_PAYLOAD', `${field} must contain 1 to 100 UUIDs`);
+  }
+  const ids = value.filter(isUuid);
+  if (ids.length !== value.length || new Set(ids).size !== ids.length) {
+    return invalid('INVALID_PAYLOAD', `${field} must contain unique UUIDs`);
+  }
+  return { ok: true, data: ids };
+};
+
+const parseVoidOrderLinesPayload = (payload: unknown): ParseResult<VoidOrderLinesPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const { lineIds, preparedState, reason, idempotencyKey } = payload as Record<string, unknown>;
+  const parsedIds = parseUuidArray(lineIds, 'lineIds');
+  if (!parsedIds.ok) return parsedIds;
+  if (preparedState !== 'PREPARED' && preparedState !== 'NOT_PREPARED') {
+    return invalid('INVALID_PAYLOAD', 'preparedState must be PREPARED or NOT_PREPARED');
+  }
+  if (reason !== undefined && (typeof reason !== 'string' || reason.length > 500)) {
+    return invalid('INVALID_PAYLOAD', 'reason must be at most 500 characters');
+  }
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return {
+    ok: true,
+    data: {
+      lineIds: parsedIds.data,
+      preparedState,
+      idempotencyKey: parsedKey.data,
+      ...(typeof reason === 'string' && reason.trim() ? { reason: reason.trim() } : {}),
+    },
+  };
+};
+
+const parseTransferOrderToTablePayload = (payload: unknown): ParseResult<TransferOrderToTablePayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const { orderId, targetTableId, idempotencyKey } = payload as Record<string, unknown>;
+  if (!isUuid(orderId) || !isUuid(targetTableId)) return invalid('INVALID_PAYLOAD', 'orderId and targetTableId must be UUIDs');
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return { ok: true, data: { orderId, targetTableId, idempotencyKey: parsedKey.data } };
+};
+
+const parseTransferOrderToWaiterPayload = (payload: unknown): ParseResult<TransferOrderToWaiterPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const { orderId, targetStaffId, idempotencyKey } = payload as Record<string, unknown>;
+  if (!isUuid(orderId) || !isUuid(targetStaffId)) return invalid('INVALID_PAYLOAD', 'orderId and targetStaffId must be UUIDs');
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return { ok: true, data: { orderId, targetStaffId, idempotencyKey: parsedKey.data } };
+};
+
+const parseTransferOrderLinesToGuestPayload = (payload: unknown): ParseResult<TransferOrderLinesToGuestPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const { lineIds, targetGuestId, idempotencyKey } = payload as Record<string, unknown>;
+  const parsedIds = parseUuidArray(lineIds, 'lineIds');
+  if (!parsedIds.ok) return parsedIds;
+  if (!isUuid(targetGuestId)) return invalid('INVALID_PAYLOAD', 'targetGuestId must be a UUID');
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return { ok: true, data: { lineIds: parsedIds.data, targetGuestId, idempotencyKey: parsedKey.data } };
+};
+
 export const parsePosCommandEnvelope = (
   body: unknown,
 ): ParseResult<PosCommandEnvelope> => {
@@ -597,5 +686,13 @@ export const parseCommandPayload = <T>(
       return parseApplyPrepaymentPayload(payload) as unknown as ParseResult<T>;
     case 'attachReservationToOrder':
       return parseAttachReservationToOrderPayload(payload) as unknown as ParseResult<T>;
+    case 'voidOrderLines':
+      return parseVoidOrderLinesPayload(payload) as unknown as ParseResult<T>;
+    case 'transferOrderToTable':
+      return parseTransferOrderToTablePayload(payload) as unknown as ParseResult<T>;
+    case 'transferOrderToWaiter':
+      return parseTransferOrderToWaiterPayload(payload) as unknown as ParseResult<T>;
+    case 'transferOrderLinesToGuest':
+      return parseTransferOrderLinesToGuestPayload(payload) as unknown as ParseResult<T>;
   }
 };

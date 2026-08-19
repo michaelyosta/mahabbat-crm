@@ -102,9 +102,13 @@ temporary handoff and wait for the user's decision on the next phase.
   prepayments, exactly-once application, prepaid remaining and payment/close
   integration. Live acceptance passed on both `:2020` and `:3000` (73/73 checks
   per target); Twenty core changes: 0.
+- [x] POS Slice 6 — ADMIN-only immutable line voids, cancellation kitchen
+  tickets, table/waiter/guest transfers and append-only operational audit.
+  Live acceptance passed on both `:2020` and `:3000` (78/78 checks per target);
+  Twenty core changes: 0.
 
 ## NEXT
 
-- `ADMIN VOID + TRANSFERS` — next bounded slice: immutable line cancellation,
-  cancellation kitchen tickets and ADMIN-only order/table/waiter/guest transfer
-  commands with audit trail. Do not begin touch UI until this slice passes.
+- `REAL TOUCH POS UI` — connect the prototype-informed operational flow to the
+  already verified command boundary. Keep domain/server as source of truth and
+  verify the UI first on disposable `:2020`, then bounded `:3000`.

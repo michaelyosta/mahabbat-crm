@@ -20,7 +20,10 @@ import {
   POS_CURRENCY_CODE,
   sumActiveLinesMicros,
 } from 'src/pos/pos-money';
-import { kitchenPrintAdapter } from 'src/pos/kitchen-print-adapter';
+import {
+  kitchenPrintAdapter,
+  type KitchenPrintableLine,
+} from 'src/pos/kitchen-print-adapter';
 import { precheckPrintAdapter } from 'src/pos/precheck-print-adapter';
 
 type ExistingRecord = {
@@ -84,6 +87,10 @@ type LineRecord = ExistingRecord & {
   quantity?: number | null;
   kitchenSentQuantity?: number | null;
   status?: string | null;
+  voidedAt?: string | null;
+  voidReason?: string | null;
+  voidPreparedState?: string | null;
+  voidedByStaffId?: string | null;
   createdByStaffId?: string | null;
   idempotencyKey?: string | null;
 };
@@ -177,6 +184,22 @@ type PrepaymentRecord = ExistingRecord & {
   appliedAt?: string | null;
 };
 
+type StaffRecord = ExistingRecord & {
+  displayName?: string | null;
+  staffRole?: string | null;
+  isActive?: boolean | null;
+};
+
+type OperationalEventRecord = ExistingRecord & {
+  label?: string | null;
+  eventType?: string | null;
+  actorStaffId?: string | null;
+  occurredAt?: string | null;
+  orderId?: string | null;
+  details?: string | null;
+  idempotencyKey?: string | null;
+};
+
 type CommandResult = { status: number; body: unknown };
 
 export const POS_ERROR_CODES = [
@@ -221,6 +244,10 @@ export const POS_ERROR_CODES = [
   'PREPAYMENT_ALREADY_APPLIED',
   'PREPAYMENT_AMOUNT_INVALID',
   'PREPAYMENT_EXCEEDS_ORDER',
+  'STAFF_NOT_FOUND',
+  'STAFF_INACTIVE',
+  'GUEST_TRANSFER_INVALID',
+  'VOID_LINE_INVALID',
   'IDEMPOTENCY_CONFLICT',
   'CONFLICT',
 ] as const;
@@ -316,6 +343,10 @@ const LINE_FIELDS: NodeSelection = {
   quantity: true,
   kitchenSentQuantity: true,
   status: true,
+  voidedAt: true,
+  voidReason: true,
+  voidPreparedState: true,
+  voidedByStaffId: true,
   createdByStaffId: true,
   idempotencyKey: true,
 };
@@ -415,6 +446,24 @@ const PREPAYMENT_FIELDS: NodeSelection = {
   idempotencyKey: true,
   applyIdempotencyKey: true,
   appliedAt: true,
+};
+
+const STAFF_FIELDS: NodeSelection = {
+  id: true,
+  displayName: true,
+  staffRole: true,
+  isActive: true,
+};
+
+const OPERATIONAL_EVENT_FIELDS: NodeSelection = {
+  id: true,
+  label: true,
+  eventType: true,
+  actorStaffId: true,
+  occurredAt: true,
+  orderId: true,
+  details: true,
+  idempotencyKey: true,
 };
 
 const queryConnection = async <T extends ExistingRecord>(
@@ -758,6 +807,32 @@ const findPrepaymentByApplyIdempotencyKey = async (
   return rows[0] ?? null;
 };
 
+const findStaffById = async (
+  client: CoreApiClientLike,
+  staffId: string,
+): Promise<StaffRecord | null> => {
+  const rows = await queryConnection<StaffRecord>(
+    client,
+    'posStaffs',
+    { filter: { id: { eq: staffId } }, first: 1 },
+    STAFF_FIELDS,
+  );
+  return rows[0] ?? null;
+};
+
+const findOperationalEventByIdempotencyKey = async (
+  client: CoreApiClientLike,
+  idempotencyKey: string,
+): Promise<OperationalEventRecord | null> => {
+  const rows = await queryConnection<OperationalEventRecord>(
+    client,
+    'posOperationalEvents',
+    { filter: { idempotencyKey: { eq: idempotencyKey } }, first: 1 },
+    OPERATIONAL_EVENT_FIELDS,
+  );
+  return rows[0] ?? null;
+};
+
 const findPrepaymentsByReservation = async (
   client: CoreApiClientLike,
   reservationId: string,
@@ -1009,6 +1084,56 @@ const updateLinesTotals = async (
   }
 
   return { activeLineCount: activeLines.length };
+};
+
+const createOperationalEvent = async (
+  client: CoreApiClientLike,
+  input: {
+    eventType: string;
+    actorStaffId: string;
+    orderId?: string;
+    details: Record<string, unknown>;
+    idempotencyKey: string;
+  },
+): Promise<OperationalEventRecord | null> => {
+  const existing = await findOperationalEventByIdempotencyKey(
+    client,
+    input.idempotencyKey,
+  );
+  if (existing) return existing;
+
+  const details = JSON.stringify(input.details);
+  try {
+    const result = (await client.mutation({
+      createPosOperationalEvent: {
+        __args: {
+          data: {
+            label: input.eventType,
+            eventType: input.eventType,
+            actorStaffId: input.actorStaffId,
+            occurredAt: new Date().toISOString(),
+            ...(input.orderId ? { orderId: input.orderId } : {}),
+            details,
+            idempotencyKey: input.idempotencyKey,
+          },
+        },
+        ...OPERATIONAL_EVENT_FIELDS,
+      },
+    })) as { createPosOperationalEvent?: OperationalEventRecord };
+    return result.createPosOperationalEvent ?? null;
+  } catch {
+    return findOperationalEventByIdempotencyKey(client, input.idempotencyKey);
+  }
+};
+
+const parseEventDetails = (event: OperationalEventRecord): Record<string, unknown> => {
+  if (!event.details) return {};
+  try {
+    const parsed: unknown = JSON.parse(event.details);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 };
 
 const createShift = async (
@@ -1756,6 +1881,279 @@ export const executePrintKitchenTicket = async (
     printStatus: ticket.printStatus ?? 'PRINTED',
     lineCount: (await findKitchenTicketLines(client, ticket.id)).length,
   });
+};
+
+const createCancellationKitchenTicket = async (
+  client: CoreApiClientLike,
+  orderId: string,
+  lines: LineRecord[],
+  actor: PosActor,
+  operationKey: string,
+): Promise<KitchenTicketRecord | null> => {
+  const semanticKey = `kitchen-cancellation:${orderId}:${operationKey}`;
+  let ticket = await findKitchenTicketBySemanticKey(client, semanticKey);
+  let createdNew = false;
+
+  if (!ticket) {
+    try {
+      const result = (await client.mutation({
+        createPosKitchenTicket: {
+          __args: {
+            data: {
+              orderId,
+              ticketType: 'CANCELLATION',
+              createdAt: new Date().toISOString(),
+              createdByStaffId: actor.staffId,
+              printStatus: 'PRINTED',
+              idempotencyKey: semanticKey,
+              requestIdempotencyKey: operationKey,
+            },
+          },
+          ...KITCHEN_TICKET_FIELDS,
+        },
+      })) as { createPosKitchenTicket?: KitchenTicketRecord };
+      ticket = result.createPosKitchenTicket ?? null;
+      createdNew = true;
+    } catch {
+      ticket = await findKitchenTicketBySemanticKey(client, semanticKey);
+    }
+  }
+
+  if (!ticket?.id) return null;
+
+  const existing = await findKitchenTicketLines(client, ticket.id);
+  const existingIds = new Set(existing.map((line) => line.orderLineId));
+  const printableLines: KitchenPrintableLine[] = [];
+
+  for (const line of lines) {
+    if (!line.id || existingIds.has(line.id)) continue;
+    const guest = line.guestId ? await findGuestById(client, line.guestId) : null;
+    const quantity = Math.max(0, line.kitchenSentQuantity ?? 0);
+    if (!quantity) continue;
+    const printable: KitchenPrintableLine = {
+      orderLineId: line.id,
+      guestDisplayNumber: guest?.displayNumber ?? null,
+      itemNameSnapshot: line.itemNameSnapshot ?? '',
+      quantity,
+      action: 'CANCEL',
+    };
+    try {
+      await client.mutation({
+        createPosKitchenTicketLine: {
+          __args: {
+            data: {
+              ticketId: ticket.id,
+              orderLineId: line.id,
+              guestId: line.guestId,
+              guestDisplayNumber: printable.guestDisplayNumber,
+              itemNameSnapshot: printable.itemNameSnapshot,
+              quantity: printable.quantity,
+              action: 'CANCEL',
+            },
+          },
+          id: true,
+        },
+      });
+      printableLines.push(printable);
+    } catch {
+      const raced = await findKitchenTicketLine(client, ticket.id, line.id);
+      if (!raced) return null;
+    }
+  }
+
+  if (createdNew && printableLines.length > 0) {
+    await kitchenPrintAdapter.print({
+      ticketId: ticket.id,
+      orderId,
+      ticketType: 'CANCELLATION',
+      lines: printableLines,
+    });
+  }
+
+  return ticket;
+};
+
+export const executeVoidOrderLines = async (
+  client: CoreApiClientLike,
+  payload: {
+    lineIds: string[];
+    preparedState: 'PREPARED' | 'NOT_PREPARED';
+    reason?: string;
+    idempotencyKey: string;
+  },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const replay = await findOperationalEventByIdempotencyKey(client, payload.idempotencyKey);
+  if (replay) {
+    const details = parseEventDetails(replay);
+    return okResult(200, { ...details, eventId: replay.id, replay: true });
+  }
+
+  const lines = await Promise.all(payload.lineIds.map((id) => findLineById(client, id)));
+  if (lines.some((line) => !line)) return errorResult('LINE_NOT_FOUND', 'One or more order lines do not exist.');
+  const existingLines = lines as LineRecord[];
+  const orderId = existingLines[0]?.orderId;
+  if (!orderId || existingLines.some((line) => line.orderId !== orderId)) {
+    return errorResult('VOID_LINE_INVALID', 'All lines must belong to the same order.');
+  }
+  const order = await findOrderById(client, orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+  const editableIssue = assertOrderEditableForActor(order, actor);
+  if (editableIssue) return editableIssue;
+  if (existingLines.some((line) => line.status !== 'ACTIVE')) {
+    return errorResult('VOID_LINE_INVALID', 'Only active lines can be voided.');
+  }
+
+  for (const line of existingLines) {
+    await client.mutation({
+      updatePosOrderLine: {
+        __args: {
+          id: line.id,
+          data: {
+            status: 'VOIDED',
+            voidedAt: new Date().toISOString(),
+            voidedByStaffId: actor.staffId,
+            voidPreparedState: payload.preparedState,
+            ...(payload.reason ? { voidReason: payload.reason } : {}),
+          },
+        },
+        id: true,
+      },
+    });
+  }
+
+  const cancellationTicket = existingLines.some((line) => (line.kitchenSentQuantity ?? 0) > 0)
+    ? await createCancellationKitchenTicket(client, orderId, existingLines, actor, payload.idempotencyKey)
+    : null;
+  const totals = await updateLinesTotals(client, order);
+  if (totals.activeLineCount === 0) {
+    await client.mutation({
+      updatePosOrder: {
+        __args: { id: order.id, data: { status: 'CANCELLED' } },
+        id: true,
+      },
+    });
+  }
+
+  const details = {
+    orderId,
+    lineIds: payload.lineIds,
+    preparedState: payload.preparedState,
+    ...(payload.reason ? { reason: payload.reason } : {}),
+    ...(cancellationTicket?.id ? { cancellationTicketId: cancellationTicket.id } : {}),
+    activeLineCount: totals.activeLineCount,
+  };
+  const event = await createOperationalEvent(client, {
+    eventType: 'VOID_ORDER_LINES',
+    actorStaffId: actor.staffId,
+    orderId,
+    details,
+    idempotencyKey: payload.idempotencyKey,
+  });
+  if (!event?.id) return errorResult('CONFLICT', 'Void operation audit could not be recorded.');
+  return okResult(201, { ...details, eventId: event.id, cancellationTicketId: cancellationTicket?.id ?? null });
+};
+
+const assertTransferableOrder = async (
+  client: CoreApiClientLike,
+  orderId: string,
+  actor: PosActor,
+): Promise<{ order: OrderRecord } | CommandResult> => {
+  const order = await findOrderById(client, orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+  const editableIssue = assertOrderEditableForActor(order, actor);
+  if (editableIssue) return editableIssue;
+  return { order };
+};
+
+export const executeTransferOrderToTable = async (
+  client: CoreApiClientLike,
+  payload: { orderId: string; targetTableId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const replay = await findOperationalEventByIdempotencyKey(client, payload.idempotencyKey);
+  if (replay) return okResult(200, { ...parseEventDetails(replay), eventId: replay.id, replay: true });
+  const checked = await assertTransferableOrder(client, payload.orderId, actor);
+  if ('status' in checked) return checked;
+  const order = checked.order;
+  const target = await findTableById(client, payload.targetTableId);
+  if (!target) return errorResult('TABLE_NOT_FOUND', 'Target table does not exist.');
+  if (target.isActive === false) return errorResult('TABLE_INACTIVE', 'Target table is inactive.');
+  const occupied = await findActiveOrderForTable(client, payload.targetTableId);
+  if (occupied && occupied.id !== order.id) return errorResult('TABLE_NOT_AVAILABLE', 'Target table already has an active order.');
+  const fromTableId = order.tableId;
+  if (fromTableId !== payload.targetTableId) {
+    try {
+      await client.mutation({
+        updatePosOrder: {
+          __args: { id: order.id, data: { tableId: payload.targetTableId, claimToken: payload.targetTableId } },
+          id: true,
+        },
+      });
+    } catch {
+      const raced = await findActiveOrderForTable(client, payload.targetTableId);
+      if (raced && raced.id !== order.id) return errorResult('TABLE_NOT_AVAILABLE', 'Target table already has an active order.');
+      return errorResult('CONFLICT', 'Order table transfer could not be completed.');
+    }
+  }
+  const details = { orderId: order.id, fromTableId: fromTableId ?? null, targetTableId: payload.targetTableId };
+  const event = await createOperationalEvent(client, { eventType: 'TRANSFER_ORDER_TO_TABLE', actorStaffId: actor.staffId, orderId: order.id, details, idempotencyKey: payload.idempotencyKey });
+  if (!event?.id) return errorResult('CONFLICT', 'Table transfer audit could not be recorded.');
+  return okResult(201, { ...details, eventId: event.id });
+};
+
+export const executeTransferOrderToWaiter = async (
+  client: CoreApiClientLike,
+  payload: { orderId: string; targetStaffId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const replay = await findOperationalEventByIdempotencyKey(client, payload.idempotencyKey);
+  if (replay) return okResult(200, { ...parseEventDetails(replay), eventId: replay.id, replay: true });
+  const checked = await assertTransferableOrder(client, payload.orderId, actor);
+  if ('status' in checked) return checked;
+  const order = checked.order;
+  const target = await findStaffById(client, payload.targetStaffId);
+  if (!target) return errorResult('STAFF_NOT_FOUND', 'Target staff does not exist.');
+  if (target.isActive === false) return errorResult('STAFF_INACTIVE', 'Target staff is inactive.');
+  const details = { orderId: order.id, fromStaffId: order.ownerStaffId ?? null, targetStaffId: payload.targetStaffId };
+  if (order.ownerStaffId !== payload.targetStaffId) {
+    await client.mutation({
+      updatePosOrder: { __args: { id: order.id, data: { ownerStaffId: payload.targetStaffId } }, id: true },
+    });
+  }
+  const event = await createOperationalEvent(client, { eventType: 'TRANSFER_ORDER_TO_WAITER', actorStaffId: actor.staffId, orderId: order.id, details, idempotencyKey: payload.idempotencyKey });
+  if (!event?.id) return errorResult('CONFLICT', 'Waiter transfer audit could not be recorded.');
+  return okResult(201, { ...details, eventId: event.id });
+};
+
+export const executeTransferOrderLinesToGuest = async (
+  client: CoreApiClientLike,
+  payload: { lineIds: string[]; targetGuestId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const replay = await findOperationalEventByIdempotencyKey(client, payload.idempotencyKey);
+  if (replay) return okResult(200, { ...parseEventDetails(replay), eventId: replay.id, replay: true });
+  const lines = (await Promise.all(payload.lineIds.map((id) => findLineById(client, id))));
+  if (lines.some((line) => !line)) return errorResult('LINE_NOT_FOUND', 'One or more order lines do not exist.');
+  const existingLines = lines as LineRecord[];
+  const orderId = existingLines[0]?.orderId;
+  if (!orderId || existingLines.some((line) => line.orderId !== orderId)) return errorResult('GUEST_TRANSFER_INVALID', 'All lines must belong to one order.');
+  const checked = await assertTransferableOrder(client, orderId, actor);
+  if ('status' in checked) return checked;
+  const guest = await findGuestById(client, payload.targetGuestId);
+  if (!guest || guest.orderId !== orderId) return errorResult('GUEST_NOT_IN_ORDER', 'Target guest does not belong to the order.');
+  if (existingLines.some((line) => line.status !== 'ACTIVE')) return errorResult('GUEST_TRANSFER_INVALID', 'Only active lines can be transferred.');
+  const fromGuestIds = [...new Set(existingLines.map((line) => line.guestId ?? null))];
+  for (const line of existingLines) {
+    if (line.guestId !== payload.targetGuestId) {
+      await client.mutation({ updatePosOrderLine: { __args: { id: line.id, data: { guestId: payload.targetGuestId } }, id: true } });
+    }
+  }
+  await updateLinesTotals(client, checked.order);
+  const details = { orderId, lineIds: payload.lineIds, fromGuestIds, targetGuestId: payload.targetGuestId };
+  const event = await createOperationalEvent(client, { eventType: 'TRANSFER_ORDER_LINES_TO_GUEST', actorStaffId: actor.staffId, orderId, details, idempotencyKey: payload.idempotencyKey });
+  if (!event?.id) return errorResult('CONFLICT', 'Guest transfer audit could not be recorded.');
+  return okResult(201, { ...details, eventId: event.id });
 };
 
 const repairPrecheckOrderLock = async (
@@ -2745,6 +3143,31 @@ export const dispatchPosCommand = async (
       return executeAttachReservationToOrder(client, {
         reservationId: payload.reservationId as string,
         orderId: payload.orderId as string,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'voidOrderLines':
+      return executeVoidOrderLines(client, {
+        lineIds: payload.lineIds as string[],
+        preparedState: payload.preparedState as 'PREPARED' | 'NOT_PREPARED',
+        reason: payload.reason as string | undefined,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'transferOrderToTable':
+      return executeTransferOrderToTable(client, {
+        orderId: payload.orderId as string,
+        targetTableId: payload.targetTableId as string,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'transferOrderToWaiter':
+      return executeTransferOrderToWaiter(client, {
+        orderId: payload.orderId as string,
+        targetStaffId: payload.targetStaffId as string,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'transferOrderLinesToGuest':
+      return executeTransferOrderLinesToGuest(client, {
+        lineIds: payload.lineIds as string[],
+        targetGuestId: payload.targetGuestId as string,
         idempotencyKey: payload.idempotencyKey as string,
       }, actor);
     case 'authenticatePosStaff':

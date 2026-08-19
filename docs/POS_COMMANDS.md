@@ -58,7 +58,10 @@ POS UI (2nd terminal / web)
 | `createPrepayment` | Slice 5 | `{ reservationId, paymentMethodId?, amountMicros, idempotencyKey }` | positive integer, immutable UNAPPLIED record |
 | `applyPrepayment` | Slice 5 | `{ prepaymentId, orderId, idempotencyKey }` | CAS exactly-once; recomputes prepaid aggregate |
 | `attachReservationToOrder` | Slice 5 | `{ reservationId, orderId, idempotencyKey }` | same-table only; applies remaining UNAPPLIED prepayments |
-| `voidLines`/`transfer*` | slice 6 | — | НЕ реализовано |
+| `voidOrderLines` | Slice 6 | `{ lineIds[], preparedState, reason?, idempotencyKey }` | ADMIN-only; immutable void fields; sent lines create `CANCELLATION` ticket |
+| `transferOrderToTable` | Slice 6 | `{ orderId, targetTableId, idempotencyKey }` | ADMIN-only; target must be active and free; audit event |
+| `transferOrderToWaiter` | Slice 6 | `{ orderId, targetStaffId, idempotencyKey }` | ADMIN-only; target PosStaff must be active; audit event |
+| `transferOrderLinesToGuest` | Slice 6 | `{ lineIds[], targetGuestId, idempotencyKey }` | ADMIN-only; same-order active guest/lines; audit event |
 
 ### Хранение
 Объекты и их связи создаются как обычные записи Twenty (через CoreApiClientLike), но с **двумя гарантиями idempotency + unique** через индексы, перечисленные в `src/indexes/*` (см. POS_DOMAIN.md §Идемпотентность).

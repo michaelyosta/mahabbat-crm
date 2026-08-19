@@ -35,4 +35,16 @@ describe('pos permissions', () => {
     expect(shiftCanBeClosedBy('10000000-0000-4000-8000-000000000099', waiter)).toBe(false);
     expect(shiftCanBeClosedBy('10000000-0000-4000-8000-000000000099', admin)).toBe(true);
   });
+
+  it('keeps void and transfer commands ADMIN-only', () => {
+    for (const command of [
+      'voidOrderLines',
+      'transferOrderToTable',
+      'transferOrderToWaiter',
+      'transferOrderLinesToGuest',
+    ] as const) {
+      expect(commandAllowedForRole(command, 'WAITER')).toBe(false);
+      expect(commandAllowedForRole(command, 'ADMIN')).toBe(true);
+    }
+  });
 });

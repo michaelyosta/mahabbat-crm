@@ -135,6 +135,22 @@
   same-table attach, payment/close integration, prior POS races and CRM smoke.
   Unit total remains 227; lint/typecheck pass; Twenty core modifications: 0.
 
+## POS Slice 6 — ADMIN Void + Transfers (PASS)
+
+- `PosOperationalEvent` is an append-only audit object. Its unique operation
+  key makes void and transfer retries return the same semantic event.
+- `voidOrderLines` is ADMIN-only, keeps the line in history, records actor/time,
+  prepared state and reason, and creates one immutable `CANCELLATION` kitchen
+  ticket for already sent quantities. All-active-lines-voided derives
+  `CANCELLED` order status.
+- ADMIN-only transfer commands move an editable order to a free table, change
+  owner to an active PosStaff, or move active lines to a guest in the same
+  order. Each writes an audit event; generic CRUD remains outside the path.
+- Live acceptance passed on both pinned targets with 78/78 checks each,
+  including waiter denial, sent-line cancellation, retry/no duplicate ticket,
+  all three transfers, previous POS/CRM checks and concurrency. Twenty core
+  modifications: 0.
+
 # PRE-POS hardening (FINAL PASS)
 
 - Loyalty balance: Customer 360 computes the balance from the **full ledger**
@@ -163,9 +179,9 @@
 - Destructive integration-test setup is fail-closed (target allowlist guard,
   11 tests). Branding overlay is fail-closed (7 tests) and fails the build when
   a target literal is missing.
-- POS Foundation Slices 1–4 are implemented after the documented boundary
-  decision; reservations/prepayment, void/transfer and operational audit
-  remain future slices. Kitchen and precheck output use mock adapters only.
+- POS Foundation Slices 1–6 are implemented after the documented boundary
+  decision. Kitchen, precheck and cancellation output use mock adapters only;
+  physical printer routing remains outside the pilot.
 - Gate totals after the corrective checkpoint: `yarn lint` 0/0, `yarn typecheck`
   clean, `yarn test:unit` 226/226, `yarn seed:pos:dry` PASS. Slice 3 live
   acceptance is recorded below.
@@ -189,9 +205,9 @@
 
 # Последняя проверка
 
-- 2026-08-19 POS Slice 4 live acceptance: `:2020` PASS (68/68) and `:3000`
-  PASS (68/68). This includes the prior Slice 1–3 checks plus payment
-  concurrency, partial payments, overpayment rejection, close and retry.
+- 2026-08-20 POS Slice 6 live acceptance: `:2020` PASS (78/78) and `:3000`
+  PASS (78/78). This includes Slice 1–5 plus ADMIN void/cancellation ticket,
+  table/waiter/guest transfers, audit and retry/concurrency checks.
   Final local gates: `yarn lint`, `yarn typecheck`, `yarn test:unit` (227/227)
   PASS.
 - On 2026-08-09 Linux `twenty-sdk@2.29.0` plan/apply updated Customer 360 on
@@ -342,18 +358,20 @@ product shell (Dashboard-first navigation, Russian labels, clean Orders/Loyalty
 views and discoverable business views) is complete; the generic scaffold page
 has been removed.
 
-The current POS slice is the server-side operational foundation plus Kitchen
-Print + Stop List + Precheck lock:
+The current POS slice is the server-side operational foundation through
+Kitchen Print, Stop List, Precheck lock, payments, reservations/prepayments and
+ADMIN void/transfers:
 PosStaff PIN/card -> PosSession -> active Shift -> free Table -> POS Order ->
 multiple Guests -> independent OrderLines -> server totals -> persistence.
-There is no physical POS UI, payment or reservation/prepayment path yet; kitchen
-and precheck adapters are mock-only.
+There is no physical touch POS UI yet; kitchen, precheck and cancellation
+adapters are mock-only.
 
 # Следующий лучший шаг
 
 CRM foundation, aggregate import, Dashboard, Reservations, Demo-ready shell and
-PRE-POS hardening are complete. POS Foundation Slices 1–3 are PASS on both
-runtime targets. The next slice is `PAYMENTS + PARTIAL PAYMENTS + CLOSE ORDER`.
+PRE-POS hardening are complete. POS Slices 1–6 are PASS on both runtime
+targets. The next slice is `REAL TOUCH POS UI`, connected to the existing
+server command boundary and prototype-informed only.
 
 ## P0 loyalty write boundary status
 

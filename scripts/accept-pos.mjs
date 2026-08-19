@@ -136,7 +136,7 @@ const requireUuid = (label, value) => {
 };
 
 const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) => {
-  const [orders, guests, lines, shifts, kitchenTickets, kitchenTicketLines, prechecks, payments, reservations, prepayments] = await Promise.all([
+  const [orders, guests, lines, shifts, kitchenTickets, kitchenTicketLines, prechecks, payments, reservations, prepayments, operationalEvents] = await Promise.all([
     restGet(apiUrl, apiKey, 'posOrders'),
     restGet(apiUrl, apiKey, 'posOrderGuests'),
     restGet(apiUrl, apiKey, 'posOrderLines'),
@@ -147,6 +147,7 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
     restGet(apiUrl, apiKey, 'posPayments'),
     restGet(apiUrl, apiKey, 'posReservations'),
     restGet(apiUrl, apiKey, 'posPrepayments'),
+    restGet(apiUrl, apiKey, 'posOperationalEvents'),
   ]);
   const acceptanceOrders = orders.filter((order) => tableIds.has(order.tableId));
   const acceptanceOrderIds = new Set(acceptanceOrders.map((order) => order.id));
@@ -164,6 +165,11 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
   const acceptancePrepayments = prepayments.filter((prepayment) =>
     acceptanceReservationIds.has(prepayment.reservationId) || acceptanceOrderIds.has(prepayment.orderId),
   );
+  const acceptanceEvents = operationalEvents.filter((event) => acceptanceOrderIds.has(event.orderId));
+
+  for (const event of acceptanceEvents) {
+    await deleteRecord(apiUrl, apiKey, 'posOperationalEvents', event.id);
+  }
 
   for (const prepayment of acceptancePrepayments) {
     await deleteRecord(apiUrl, apiKey, 'posPrepayments', prepayment.id);
@@ -226,6 +232,7 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
     payments: acceptancePayments.length,
     reservations: acceptanceReservations.length,
     prepayments: acceptancePrepayments.length,
+    operationalEvents: acceptanceEvents.length,
   };
 };
 
@@ -791,6 +798,74 @@ const main = async () => {
               `status ${postCancelLine.status}`,
             );
 
+            const waiterVoid = await postCommand(apiUrl, apiKey, 'voidOrderLines', waiter, {
+              lineIds: [line1Id],
+              preparedState: 'PREPARED',
+              reason: 'waiter must not void',
+              idempotencyKey: randomUUID(),
+            });
+            check(
+              'WAITER cannot void order lines',
+              waiterVoid.status === 403 && waiterVoid.body?.code === 'COMMAND_FORBIDDEN',
+              `status ${waiterVoid.status}, code ${waiterVoid.body?.code}`,
+            );
+            const voidKey = randomUUID();
+            const adminVoid = await postCommand(apiUrl, apiKey, 'voidOrderLines', admin, {
+              lineIds: [line1Id],
+              preparedState: 'PREPARED',
+              reason: 'POS acceptance cancellation',
+              idempotencyKey: voidKey,
+            });
+            const voidedLine = (await restGet(apiUrl, apiKey, 'posOrderLines')).find((line) => line.id === line1Id);
+            const allOrderTicketsAfterVoid = (await restGet(apiUrl, apiKey, 'posKitchenTickets'))
+              .filter((ticket) => ticket.orderId === order2Id);
+            const cancellationTicket = allOrderTicketsAfterVoid.find((ticket) => ticket.ticketType === 'CANCELLATION');
+            const cancellationLines = cancellationTicket
+              ? (await restGet(apiUrl, apiKey, 'posKitchenTicketLines')).filter((line) => line.ticketId === cancellationTicket.id)
+              : [];
+            check(
+              'ADMIN voids a sent line and creates a cancellation kitchen ticket',
+              [200, 201].includes(adminVoid.status) &&
+                voidedLine?.status === 'VOIDED' &&
+                voidedLine?.voidPreparedState === 'PREPARED' &&
+                voidedLine?.voidedByStaffId === admin.staffId &&
+                cancellationTicket?.ticketType === 'CANCELLATION' &&
+                cancellationLines.length === 1 &&
+                cancellationLines[0].orderLineId === line1Id &&
+                cancellationLines[0].action === 'CANCEL',
+              `status ${adminVoid.status}, line=${voidedLine?.status}, tickets=${allOrderTicketsAfterVoid.length}, cancellationLines=${cancellationLines.length}`,
+            );
+            const voidRetry = await postCommand(apiUrl, apiKey, 'voidOrderLines', admin, {
+              lineIds: [line1Id],
+              preparedState: 'PREPARED',
+              reason: 'POS acceptance cancellation',
+              idempotencyKey: voidKey,
+            });
+            const cancellationTicketsAfterRetry = (await restGet(apiUrl, apiKey, 'posKitchenTickets'))
+              .filter((ticket) => ticket.orderId === order2Id && ticket.ticketType === 'CANCELLATION');
+            check(
+              'void retry is idempotent and does not duplicate cancellation ticket',
+              voidRetry.status === 200 &&
+                voidRetry.body?.eventId === adminVoid.body?.eventId &&
+                cancellationTicketsAfterRetry.length === 1,
+              `status ${voidRetry.status}, cancellationTickets=${cancellationTicketsAfterRetry.length}`,
+            );
+
+            const guestTransferKey = randomUUID();
+            const guestTransfer = await postCommand(apiUrl, apiKey, 'transferOrderLinesToGuest', admin, {
+              lineIds: [line2Id],
+              targetGuestId: guest2Id,
+              idempotencyKey: guestTransferKey,
+            });
+            const transferredLine = (await restGet(apiUrl, apiKey, 'posOrderLines')).find((line) => line.id === line2Id);
+            check(
+              'ADMIN can transfer active lines between guests with audit',
+              [200, 201].includes(guestTransfer.status) &&
+                transferredLine?.guestId === guest2Id &&
+                typeof guestTransfer.body?.eventId === 'string',
+              `status ${guestTransfer.status}, guestId=${transferredLine?.guestId}`,
+            );
+
             const reservationKey = randomUUID();
             const reservation = await postCommand(apiUrl, apiKey, 'createReservation', admin, {
               tableId: secondFreeTable,
@@ -873,6 +948,34 @@ const main = async () => {
               [200, 201].includes(attached.status) && attachedReservation?.orderId === order2Id &&
                 (await restGet(apiUrl, apiKey, 'posPrepayments')).filter((row) => row.orderId === order2Id && row.status === 'APPLIED').length === 1,
               `status ${attached.status}, orderId=${attachedReservation?.orderId}`,
+            );
+
+            const tableTransferKey = randomUUID();
+            const tableTransfer = await postCommand(apiUrl, apiKey, 'transferOrderToTable', admin, {
+              orderId: order2Id,
+              targetTableId: thirdFreeTable,
+              idempotencyKey: tableTransferKey,
+            });
+            const waiterTransferKey = randomUUID();
+            const waiterTransfer = await postCommand(apiUrl, apiKey, 'transferOrderToWaiter', admin, {
+              orderId: order2Id,
+              targetStaffId: waiter.staffId,
+              idempotencyKey: waiterTransferKey,
+            });
+            const transferredOrder = (await restGet(apiUrl, apiKey, 'posOrders')).find((order) => order.id === order2Id);
+            const operationalEvents = (await restGet(apiUrl, apiKey, 'posOperationalEvents'))
+              .filter((event) => event.orderId === order2Id);
+            check(
+              'ADMIN transfers table and waiter ownership with audit trail',
+              [200, 201].includes(tableTransfer.status) &&
+                [200, 201].includes(waiterTransfer.status) &&
+                transferredOrder?.tableId === thirdFreeTable &&
+                transferredOrder?.ownerStaffId === waiter.staffId &&
+                operationalEvents.some((event) => event.eventType === 'TRANSFER_ORDER_TO_TABLE') &&
+                operationalEvents.some((event) => event.eventType === 'TRANSFER_ORDER_TO_WAITER') &&
+                operationalEvents.some((event) => event.eventType === 'TRANSFER_ORDER_LINES_TO_GUEST') &&
+                operationalEvents.some((event) => event.eventType === 'VOID_ORDER_LINES'),
+              `table=${tableTransfer.status}, waiter=${waiterTransfer.status}, events=${operationalEvents.length}`,
             );
 
             const paymentPrecheckKey = randomUUID();

@@ -1,6 +1,6 @@
 # Mahabbat POS — Domain
 
-Слой документации и контрактов POS. Реализованы **Slice 1** (Shift → Table → Order → Guests → Lines), **Slice 2** (Stop List + Kitchen Tickets), **Slice 3** (Precheck + Order Lock) и **Slice 4** (Payments + Close) через server-side command boundary. Слайсы 5–6 остаются отдельными bounded slices.
+Слой документации и контрактов POS. Реализованы **Slice 1** (Shift → Table → Order → Guests → Lines), **Slice 2** (Stop List + Kitchen Tickets), **Slice 3** (Precheck + Order Lock), **Slice 4** (Payments + Close), **Slice 5** (Reservations + Prepayment) и **Slice 6** (ADMIN Void + Transfers) через server-side command boundary.
 
 ## Граница (ADR-2026-08-POS-1)
 
@@ -131,10 +131,26 @@ POS — **отдельный операционный слой** на собст
   связь и один вклад. `PosOrder.prepaidTotal` всегда восстанавливается суммой
   APPLIED записей; предоплата не является скидкой.
 
-### 14–16. Future (задокументированы, не реализованы)
-- **OperationalEvent** (аудит): append-only журнал критичных действий.
-- **Transfer-команды** (слайс 6): transferOrderToTable/ToWaiter/LinesToGuest — только ADMIN.
-- **Void + cancellation tickets** (слайс 6): физического удаления позиций нет.
+### 14. PosOperationalEvent — Slice 6 РЕАЛИЗОВАН
+- Append-only audit object с `eventType`, authenticated `actorStaffId`, временем,
+  связанным order, безопасными JSON-деталями и unique idempotency key.
+- Generic сотрудники могут только читать журнал; записи создаёт исключительно
+  controlled command boundary.
+
+### 15. Void order lines — Slice 6 РЕАЛИЗОВАН
+- `voidOrderLines` доступна только ADMIN, физически не удаляет строки и пишет
+  `voidedAt`, actor, prepared state и optional reason.
+- Если строка уже была отправлена, создаётся immutable `CANCELLATION`
+  `PosKitchenTicket`/`PosKitchenTicketLine` с действием `CANCEL`; повтор не
+  создаёт вторую фишу. Если активных строк не осталось, статус заказа derived
+  `CANCELLED`.
+
+### 16. Transfer-команды — Slice 6 РЕАЛИЗОВАН
+- ADMIN-only `transferOrderToTable`, `transferOrderToWaiter` и
+  `transferOrderLinesToGuest` валидируют свободный стол, active staff,
+  принадлежность guest/lines одному заказу и редактируемый lifecycle.
+- Прямого generic update ownership/table/guest нет; каждая операция пишет
+  `PosOperationalEvent` с from/to и affected IDs.
 
 ## Идемпотентность (слайс 1)
 Каждая создающая команда несёт `idempotencyKey` (UUID) с unique-индексами:

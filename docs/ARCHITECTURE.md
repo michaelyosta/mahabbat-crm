@@ -73,12 +73,17 @@ command resolves actor staff/role from that session. `TWENTY_APP_ACCESS_TOKEN`
 remains only the service credential used by the resolver to access the Twenty
 data plane.
 
-Voids, transfers and append-only operational audit remain explicitly deferred.
+Slice 6 реализует ADMIN-only void/transfer commands и bounded append-only
+`PosOperationalEvent` audit. Generic UI не может менять ownership/table/guest или
+физически удалить line; отправленная на кухню отмена создаёт immutable
+`CANCELLATION` ticket.
 Slice 2 kitchen output and Slice 3 precheck output
 are immutable snapshots using mock adapters. Slice 4 payments stop at
 server-authoritative CASH/CARD/OTHER records and close-at-zero, without fiscal,
 refund or bank-terminal semantics. Slice 5 reservations keep overdue as derived
 state, while prepayments are immutable and applied exactly once into remaining.
+Slice 6 voids lines without deletion and records transfer/void actors in the
+audit object; physical printer routing remains an adapter boundary.
 Physical printer routing is not claimed. The
 complete boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
 `docs/POS_DOMAIN.md`. Twenty v2.29.0's App event still does not expose a member

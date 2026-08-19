@@ -423,3 +423,21 @@ retry and a crash between row update and aggregate repair safe. Remaining is
 `total - prepaidTotal - paidTotal`; prepayment is not a discount. This is
 App-only metadata/logic on Twenty v2.29.0, with core modifications still `0`.
 Live acceptance: `:2020` and `:3000`, 73/73 checks each.
+
+## 2026-08-20 — POS Slice 6: immutable voids, transfers and operational audit
+
+Slice 6 keeps POS operational history append-only without introducing a full
+event-sourcing framework. `PosOperationalEvent` stores the authenticated actor,
+operation type, order, safe JSON details and a unique idempotency key. The
+controlled command boundary is the only writer; generic staff roles are
+read-only for the audit object.
+
+`voidOrderLines` never deletes a line. It records prepared state, reason,
+actor/time and, for quantities already sent to the kitchen, creates one
+immutable `CANCELLATION` ticket through the existing adapter. ADMIN-only table,
+waiter and guest-line transfers validate target ownership/state and record
+from/to details in the same audit object. This is App-only metadata/logic on
+Twenty v2.29.0; core modifications remain `0`.
+
+Live acceptance: `:2020` and `:3000`, 78/78 checks each. Physical printer
+routing, fiscalization and refund semantics remain outside the pilot.

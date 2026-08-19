@@ -115,5 +115,19 @@ Prepayment: UNAPPLIED ──(CAS applyPrepayment)──► APPLIED
 каждого применения сервер пересчитывает `PosOrder.prepaidTotal` из всех
 `APPLIED` предоплат. Финансовый остаток: `total - prepaidTotal - paidTotal`.
 
+## Void / Transfers (Slice 6)
+
+```text
+ACTIVE line --(ADMIN voidOrderLines)--> VOIDED
+ACTIVE order + all active lines = 0 -----------------> CANCELLED (derived)
+
+Kitchen-sent VOIDED line --(same command)--> immutable CANCELLATION ticket
+```
+
+Void не удаляет строку. `preparedState`, reason, actor и время остаются в
+строке; audit event дополнительно фиксирует список line IDs и ticket ID.
+Transfer-команды не меняют ownership generic update: они проходят ADMIN-only
+command boundary, проверяют состояние и создают append-only audit event.
+
 ## ESC
 Выход из flow (пункт 6 спеки) — **клиентская симуляция**: закрывает модалку, ничего с итогами не делает. Никакого серверного состояния не трогает (слайс 1).

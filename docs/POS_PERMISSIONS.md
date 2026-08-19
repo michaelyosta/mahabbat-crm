@@ -47,8 +47,9 @@ boundary, затем создаёт короткую `PosSession`. В Twenty х�
 | Граф QP | R | любые read-запросы по POS-графу (для работы UI), polite limitation |
 
 ### ADMIN
-Всё из WAITER + будущие ADMIN-only команды (слайсы 3–6): checkPrecheck,
-cancelPrecheck, close, transfer*, cancelOrder, voidLines. Stop-list и
+Всё из WAITER + реализованные ADMIN-only команды `cancelPrecheck`,
+`voidOrderLines`, `transferOrderToTable`, `transferOrderToWaiter` и
+`transferOrderLinesToGuest`. Stop-list и
 `printKitchenTicket` доступны обоим operational roles в текущем Slice 2.
 
 ## Физическая привязка owner (server-side)
@@ -64,7 +65,8 @@ cancelPrecheck, close, transfer*, cancelOrder, voidLines. Stop-list и
 - 2FA, refresh-token rotation и распределённый rate limiter для Internet-развёртывания
 - granular workspace-member RBAC (за ManageWorkspace) для CRM, не POS identity
 - IP-whitelisting и edge policy
-- audit log (OperationalEvent — задокументирован, слайс 6)
+- полноценный distributed audit/event-sourcing pipeline (bounded
+  `PosOperationalEvent` для критичных Slice 6 действий уже реализован)
 
 ## Что важно для QA
 - WAITER НЕ может закрыть чужую смену/заказ (проверка owner, тесты есть).
