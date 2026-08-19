@@ -12,6 +12,8 @@ export const POS_TABLE_LAYOUT_FIELD_UNIVERSAL_IDENTIFIER =
   '2dbcb53f-6e19-4006-8baa-5f73fa66cc22';
 export const POS_TABLE_ORDERS_FIELD_UNIVERSAL_IDENTIFIER =
   '98d21aeb-6efa-49f4-87d4-4a7b8fd4f9f9';
+export const POS_TABLE_RESERVATIONS_FIELD_UNIVERSAL_IDENTIFIER =
+  '8a4d7f10-2b3c-4d5e-8f60-1234567890e4';
 
 export default defineObject({
   universalIdentifier: POS_TABLE_UNIVERSAL_IDENTIFIER,
@@ -85,6 +87,19 @@ export default defineObject({
       universalSettings: {
         relationType: RelationType.ONE_TO_MANY,
       },
+    },
+    {
+      universalIdentifier: POS_TABLE_RESERVATIONS_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'reservations',
+      label: 'Брони',
+      description: 'Брони этого стола',
+      icon: 'IconCalendarEvent',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890e1',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890e3',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
   ],
 });

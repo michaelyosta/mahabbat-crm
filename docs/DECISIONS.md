@@ -406,3 +406,20 @@ between snapshot creation and order locking re-read the winner and repair state;
 no second precheck is created. This is App-only metadata/logic on Twenty
 v2.29.0; core modifications remain `0`. Live acceptance: `:2020` and `:3000`,
 62/62 checks each.
+
+## 2026-08-20 — POS Slice 5: table reservations and exactly-once prepayment
+
+POS reservations use separate `PosReservation` metadata instead of changing
+the CRM `Reservation` semantics. The POS record has a real `PosTable` relation,
+optional order/guest fields and derived overdue state; expiry never deletes or
+silently changes the record. `attachReservationToOrder` requires the same
+table, so a reserved table can still become operational when guests arrive.
+
+Prepayments are separate immutable `PosPrepayment` records. Creation is
+`UNAPPLIED`; application uses `updatePosPrepayments` with a status predicate
+(`UNAPPLIED` → `APPLIED`) and a unique apply idempotency key. The order's
+`prepaidTotal` is recomputed from applied rows after every attempt, which makes
+retry and a crash between row update and aggregate repair safe. Remaining is
+`total - prepaidTotal - paidTotal`; prepayment is not a discount. This is
+App-only metadata/logic on Twenty v2.29.0, with core modifications still `0`.
+Live acceptance: `:2020` and `:3000`, 73/73 checks each.

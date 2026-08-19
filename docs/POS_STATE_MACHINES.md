@@ -101,5 +101,19 @@ PRECHECK_PRINTED + remaining=0 ──closeOrder─► CLOSED
   повторно проверяет остаток перед закрытием. `closeOrder` атомарно фиксирует
   actor/time и освобождает table claim; повтор ключа возвращает тот же результат.
 
+## Reservation / Prepayment (Slice 5)
+
+```
+Reservation: ACTIVE ──► COMPLETED | CANCELLED | NO_SHOW
+                         (ручная команда; overdue только derived UI state)
+
+Prepayment: UNAPPLIED ──(CAS applyPrepayment)──► APPLIED
+```
+
+`applyPrepayment` принимает только одну победившую запись по статусному CAS;
+повторный или параллельный вызов перечитывает уже применённую запись. После
+каждого применения сервер пересчитывает `PosOrder.prepaidTotal` из всех
+`APPLIED` предоплат. Финансовый остаток: `total - prepaidTotal - paidTotal`.
+
 ## ESC
 Выход из flow (пункт 6 спеки) — **клиентская симуляция**: закрывает модалку, ничего с итогами не делает. Никакого серверного состояния не трогает (слайс 1).

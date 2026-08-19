@@ -44,6 +44,12 @@ export const POS_ORDER_CLOSED_BY_STAFF_ID_FIELD_UNIVERSAL_IDENTIFIER =
   '8a4d7f10-2b3c-4d5e-8f60-1234567890d2';
 export const POS_ORDER_CLOSE_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER =
   '8a4d7f10-2b3c-4d5e-8f60-1234567890d3';
+export const POS_ORDER_PREPAID_TOTAL_FIELD_UNIVERSAL_IDENTIFIER =
+  '7a4d7f10-2b3c-4d5e-8f60-1234567890a1';
+export const POS_ORDER_PREPAYMENTS_FIELD_UNIVERSAL_IDENTIFIER =
+  '7a4d7f10-2b3c-4d5e-8f60-1234567890a2';
+export const POS_ORDER_RESERVATIONS_FIELD_UNIVERSAL_IDENTIFIER =
+  '7a4d7f10-2b3c-4d5e-8f60-1234567890a3';
 export const POS_ORDER_UNIQUE_TABLE_CLAIM_INDEX_UNIVERSAL_IDENTIFIER =
   '20629f11-1305-4671-b7f7-0ddd4028afd6';
 export const POS_ORDER_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
@@ -279,6 +285,17 @@ export default defineObject({
       isUIEditable: false,
     },
     {
+      universalIdentifier: POS_ORDER_PREPAID_TOTAL_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.CURRENCY,
+      name: 'prepaidTotal',
+      label: 'Предоплата',
+      description: 'Server-owned сумма применённых предоплат',
+      icon: 'IconCashBanknotes',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
+    },
+    {
       universalIdentifier: POS_ORDER_NOTES_FIELD_UNIVERSAL_IDENTIFIER,
       type: FieldType.TEXT,
       name: 'notes',
@@ -353,6 +370,32 @@ export default defineObject({
       isNullable: true,
       defaultValue: null,
       isUIEditable: false,
+    },
+    {
+      universalIdentifier: POS_ORDER_PREPAYMENTS_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'prepayments',
+      label: 'Предоплаты',
+      description: 'Применённые предоплаты заказа',
+      icon: 'IconReceipt',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890f5',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890f9',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
+    },
+    {
+      universalIdentifier: POS_ORDER_RESERVATIONS_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'reservations',
+      label: 'Брони',
+      description: 'Брони, связанные с заказом',
+      icon: 'IconCalendarEvent',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890e1',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890e5',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
   ],
 });

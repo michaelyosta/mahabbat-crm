@@ -38,6 +38,16 @@
   `MAHABBAT_POS_PIN_A=ADMIN` and `MAHABBAT_POS_PIN_B=WAITER` and must not select
   arbitrary occupied restaurant tables.
 
+## Live Slice 5 result — 2026-08-20
+
+- `:2020`: PASS, 73/73 checks. Reservation creation/retry, optional fields,
+  derived overdue, same-table attach, parallel exactly-once prepayment apply,
+  prepaid remaining, payment/close and all previous Slice 1–4/CRM checks pass.
+- `:3000`: PASS, the same 73/73 checks after identical manifest plan/apply;
+  replan on both targets reports `No changes` and Twenty core changes remain 0.
+- Unit: 227/227; lint/typecheck PASS. `MockKitchenPrintAdapter` and
+  non-fiscal payments remain the declared pilot boundaries.
+
 ## CJ (frontend-IST)
 - Не входит в runtime acceptance slice 1 (серверная граница). Пользовательский сценарий клиента через Vue компоненты — слайс UI (отдельно от slice 1).
 

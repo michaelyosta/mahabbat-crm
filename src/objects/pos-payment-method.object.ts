@@ -14,6 +14,8 @@ export const POS_PAYMENT_METHOD_SORT_ORDER_FIELD_UNIVERSAL_IDENTIFIER =
   '8a4d7f10-2b3c-4d5e-8f60-1234567890a1';
 export const POS_PAYMENT_METHOD_PAYMENTS_FIELD_UNIVERSAL_IDENTIFIER =
   '8a4d7f10-2b3c-4d5e-8f60-1234567890a2';
+export const POS_PAYMENT_METHOD_PREPAYMENTS_FIELD_UNIVERSAL_IDENTIFIER =
+  '7a4d7f10-2b3c-4d5e-8f60-1234567890a4';
 
 export default defineObject({
   universalIdentifier: POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER,
@@ -111,6 +113,19 @@ export default defineObject({
         '8a4d7f10-2b3c-4d5e-8f60-1234567890c1',
       relationTargetFieldMetadataUniversalIdentifier:
         '8a4d7f10-2b3c-4d5e-8f60-1234567890c4',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
+    },
+    {
+      universalIdentifier: POS_PAYMENT_METHOD_PREPAYMENTS_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'prepayments',
+      label: 'Предоплаты',
+      description: 'Предоплаты с этим методом',
+      icon: 'IconReceipt',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890f5',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '8a4d7f10-2b3c-4d5e-8f60-1234567890fb',
       universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
   ],

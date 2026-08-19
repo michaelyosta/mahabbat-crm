@@ -53,6 +53,11 @@ POS UI (2nd terminal / web)
 | `cancelPrecheck` | Slice 3 | `{ orderId, idempotencyKey }` | ADMIN-only; cancelled snapshot unlocks order |
 | `recordPayment` | Slice 4 | `{ orderId, paymentMethodId, amountMicros, idempotencyKey }` | PRECHECK_PRINTED; positive integer micros; server remaining/actor; retry-safe |
 | `closeOrder` | Slice 4 | `{ orderId, idempotencyKey }` | remaining must be zero; guarded close releases table claim |
+| `createReservation` | Slice 5 | `{ tableId, scheduledAt?, guestName?, phone?, idempotencyKey }` | table-linked, optional fields, derived overdue |
+| `updateReservationStatus` | Slice 5 | `{ reservationId, status, idempotencyKey }` | owner/ADMIN, no automatic expiry/delete |
+| `createPrepayment` | Slice 5 | `{ reservationId, paymentMethodId?, amountMicros, idempotencyKey }` | positive integer, immutable UNAPPLIED record |
+| `applyPrepayment` | Slice 5 | `{ prepaymentId, orderId, idempotencyKey }` | CAS exactly-once; recomputes prepaid aggregate |
+| `attachReservationToOrder` | Slice 5 | `{ reservationId, orderId, idempotencyKey }` | same-table only; applies remaining UNAPPLIED prepayments |
 | `voidLines`/`transfer*` | slice 6 | — | НЕ реализовано |
 
 ### Хранение

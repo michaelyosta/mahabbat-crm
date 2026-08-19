@@ -12,6 +12,8 @@ import { POS_ZONE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-zone.object';
 import { POS_PRECHECK_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-precheck.object';
 import { POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment-method.object';
 import { POS_PAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment.object';
+import { POS_RESERVATION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-reservation.object';
+import { POS_PREPAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-prepayment.object';
 
 export default defineRole({
   universalIdentifier: MAHABBAT_POS_WAITER_ROLE_UNIVERSAL_IDENTIFIER,
@@ -38,6 +40,8 @@ export default defineRole({
     POS_PRECHECK_UNIVERSAL_IDENTIFIER,
     POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER,
     POS_PAYMENT_UNIVERSAL_IDENTIFIER,
+    POS_RESERVATION_UNIVERSAL_IDENTIFIER,
+    POS_PREPAYMENT_UNIVERSAL_IDENTIFIER,
   ].map((objectUniversalIdentifier) => ({
     objectUniversalIdentifier,
     canReadObjectRecords: true,

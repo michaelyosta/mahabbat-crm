@@ -117,11 +117,24 @@ POS — **отдельный операционный слой** на собст
 - `recordPayment` принимает только положительные целые micros на `PRECHECK_PRINTED`, сервер повторно считает remaining и отклоняет overpayment. Один pending payment сериализует concurrent writes; retry после crash завершает ровно одну запись.
 - `closeOrder` разрешён только при remaining = 0, guarded `updatePosOrders` переводит заказ в `CLOSED`, записывает actor/time и освобождает table claim. Payment records immutable для operational UI; физический refund/void пока не реализован.
 
-### 12–16. Future (задокументированы, не реализованы)
-- **Reservation** (слайс 5): все поля optional, протухшие NOT auto-deleted, negative-timer UI.
-- **Prepayment** (слайс 5): авто-применяется к remaining, не скидка.
+### 12. PosReservation — Slice 5 РЕАЛИЗОВАН
+- POS-операционная бронь имеет relation `table`, optional `order`, `scheduledAt`,
+  `guestName`, `phone`, status `ACTIVE|COMPLETED|CANCELLED|NO_SHOW`, creator и
+  unique idempotency key. Overdue — derived (`scheduledAt < now` while ACTIVE),
+  запись не удаляется автоматически. Attach разрешён только к заказу того же
+  стола и не запрещает открыть заказ на забронированном столе.
+
+### 13. PosPrepayment — Slice 5 РЕАЛИЗОВАН
+- Отдельная финансовая запись (`amount`, optional payment method, reservation,
+  optional order), lifecycle `UNAPPLIED → APPLIED`. Применение использует
+  conditional update по статусу, поэтому retry/crash/parallel вызовы дают одну
+  связь и один вклад. `PosOrder.prepaidTotal` всегда восстанавливается суммой
+  APPLIED записей; предоплата не является скидкой.
+
+### 14–16. Future (задокументированы, не реализованы)
 - **OperationalEvent** (аудит): append-only журнал критичных действий.
 - **Transfer-команды** (слайс 6): transferOrderToTable/ToWaiter/LinesToGuest — только ADMIN.
+- **Void + cancellation tickets** (слайс 6): физического удаления позиций нет.
 
 ## Идемпотентность (слайс 1)
 Каждая создающая команда несёт `idempotencyKey` (UUID) с unique-индексами:

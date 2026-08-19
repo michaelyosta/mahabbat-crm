@@ -15,6 +15,8 @@ import { POS_SESSION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-session.object
 import { POS_PRECHECK_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-precheck.object';
 import { POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment-method.object';
 import { POS_PAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment.object';
+import { POS_RESERVATION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-reservation.object';
+import { POS_PREPAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-prepayment.object';
 
 const POS_OBJECT_IDS = [
   POS_SHIFT_UNIVERSAL_IDENTIFIER,
@@ -28,6 +30,8 @@ const POS_OBJECT_IDS = [
   POS_PRECHECK_UNIVERSAL_IDENTIFIER,
   POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER,
   POS_PAYMENT_UNIVERSAL_IDENTIFIER,
+  POS_RESERVATION_UNIVERSAL_IDENTIFIER,
+  POS_PREPAYMENT_UNIVERSAL_IDENTIFIER,
 ];
 
 describe('Mahabbat POS Waiter role boundary', () => {

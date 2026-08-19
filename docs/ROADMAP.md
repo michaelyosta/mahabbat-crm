@@ -98,9 +98,13 @@ temporary handoff and wait for the user's decision on the next phase.
   server-authoritative remaining/overpayment guard, partial cash/card payments,
   guarded close and retry/concurrency safety. Live acceptance passed on both
   `:2020` and `:3000` (68/68 checks per target); Twenty core changes: 0.
+- [x] POS Slice 5 — table-linked reservations, derived overdue state, immutable
+  prepayments, exactly-once application, prepaid remaining and payment/close
+  integration. Live acceptance passed on both `:2020` and `:3000` (73/73 checks
+  per target); Twenty core changes: 0.
 
 ## NEXT
 
-- `RESERVATIONS + PREPAYMENT` — next bounded slice: table-linked reservation,
-  overdue preservation, exactly-once prepayment attachment and remaining
-  calculation. Do not begin void/transfer or touch UI until this slice passes.
+- `ADMIN VOID + TRANSFERS` — next bounded slice: immutable line cancellation,
+  cancellation kitchen tickets and ADMIN-only order/table/waiter/guest transfer
+  commands with audit trail. Do not begin touch UI until this slice passes.

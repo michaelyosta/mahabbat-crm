@@ -136,7 +136,7 @@ const requireUuid = (label, value) => {
 };
 
 const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) => {
-  const [orders, guests, lines, shifts, kitchenTickets, kitchenTicketLines, prechecks, payments] = await Promise.all([
+  const [orders, guests, lines, shifts, kitchenTickets, kitchenTicketLines, prechecks, payments, reservations, prepayments] = await Promise.all([
     restGet(apiUrl, apiKey, 'posOrders'),
     restGet(apiUrl, apiKey, 'posOrderGuests'),
     restGet(apiUrl, apiKey, 'posOrderLines'),
@@ -145,6 +145,8 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
     restGet(apiUrl, apiKey, 'posKitchenTicketLines'),
     restGet(apiUrl, apiKey, 'posPrechecks'),
     restGet(apiUrl, apiKey, 'posPayments'),
+    restGet(apiUrl, apiKey, 'posReservations'),
+    restGet(apiUrl, apiKey, 'posPrepayments'),
   ]);
   const acceptanceOrders = orders.filter((order) => tableIds.has(order.tableId));
   const acceptanceOrderIds = new Set(acceptanceOrders.map((order) => order.id));
@@ -155,6 +157,20 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
   const acceptanceTicketLines = kitchenTicketLines.filter((line) => acceptanceTicketIds.has(line.ticketId));
   const acceptancePrechecks = prechecks.filter((precheck) => acceptanceOrderIds.has(precheck.orderId));
   const acceptancePayments = payments.filter((payment) => acceptanceOrderIds.has(payment.orderId));
+  const acceptanceReservations = reservations.filter((reservation) =>
+    tableIds.has(reservation.tableId) || acceptanceOrderIds.has(reservation.orderId),
+  );
+  const acceptanceReservationIds = new Set(acceptanceReservations.map((reservation) => reservation.id));
+  const acceptancePrepayments = prepayments.filter((prepayment) =>
+    acceptanceReservationIds.has(prepayment.reservationId) || acceptanceOrderIds.has(prepayment.orderId),
+  );
+
+  for (const prepayment of acceptancePrepayments) {
+    await deleteRecord(apiUrl, apiKey, 'posPrepayments', prepayment.id);
+  }
+  for (const reservation of acceptanceReservations) {
+    await deleteRecord(apiUrl, apiKey, 'posReservations', reservation.id);
+  }
 
   for (const payment of acceptancePayments) {
     await deleteRecord(apiUrl, apiKey, 'posPayments', payment.id);
@@ -208,6 +224,8 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
     shifts: openAcceptanceShifts.length,
     prechecks: acceptancePrechecks.length,
     payments: acceptancePayments.length,
+    reservations: acceptanceReservations.length,
+    prepayments: acceptancePrepayments.length,
   };
 };
 
@@ -771,6 +789,90 @@ const main = async () => {
               'order is editable again after ADMIN cancelPrecheck',
               [200, 201].includes(postCancelLine.status),
               `status ${postCancelLine.status}`,
+            );
+
+            const reservationKey = randomUUID();
+            const reservation = await postCommand(apiUrl, apiKey, 'createReservation', admin, {
+              tableId: secondFreeTable,
+              scheduledAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+              guestName: 'POS Acceptance Guest',
+              phone: '+77001234567',
+              idempotencyKey: reservationKey,
+            });
+            const reservationRows = (await restGet(apiUrl, apiKey, 'posReservations'))
+              .filter((row) => row.id === reservation.body?.reservationId);
+            const reservationRow = reservationRows[0];
+            check(
+              'reservation is table-linked, optional fields persist, and overdue is derived',
+              [200, 201].includes(reservation.status) &&
+                reservationRow?.tableId === secondFreeTable &&
+                reservationRow?.status === 'ACTIVE' &&
+                reservation.body?.overdue === true &&
+                reservationRow?.guestName === 'POS Acceptance Guest',
+              `status ${reservation.status}, overdue=${reservation.body?.overdue}, table=${reservationRow?.tableId}`,
+            );
+            const reservationRetry = await postCommand(apiUrl, apiKey, 'createReservation', admin, {
+              tableId: secondFreeTable,
+              scheduledAt: reservationRow?.scheduledAt,
+              guestName: 'POS Acceptance Guest',
+              phone: '+77001234567',
+              idempotencyKey: reservationKey,
+            });
+            check(
+              'createReservation retry is idempotent',
+              reservationRetry.status === 200 && reservationRetry.body?.reservationId === reservation.body?.reservationId &&
+                (await restGet(apiUrl, apiKey, 'posReservations')).filter((row) => row.id === reservation.body?.reservationId).length === 1,
+              `status ${reservationRetry.status}`,
+            );
+            const prepaymentOrderSnapshot = (await restGet(apiUrl, apiKey, 'posOrders')).find((row) => row.id === order2Id);
+            const prepaymentMethods = (await restGet(apiUrl, apiKey, 'posPaymentMethods'))
+              .filter((method) => method.isActive !== false)
+              .sort((left, right) => (left.sortOrder ?? 0) - (right.sortOrder ?? 0));
+            const reservationPrepaymentMicros = Math.max(1, Math.floor((prepaymentOrderSnapshot?.total?.amountMicros ?? 0) / 4));
+            const prepaymentKey = randomUUID();
+            const prepayment = await postCommand(apiUrl, apiKey, 'createPrepayment', admin, {
+              reservationId: reservation.body?.reservationId,
+              paymentMethodId: prepaymentMethods?.[0]?.id,
+              amountMicros: reservationPrepaymentMicros,
+              idempotencyKey: prepaymentKey,
+            });
+            const prepaymentId = requireUuid('createPrepayment returns a prepaymentId', prepayment.body?.prepaymentId);
+            const applyKey = randomUUID();
+            const parallelApplies = await Promise.all([
+              postCommand(apiUrl, apiKey, 'applyPrepayment', admin, {
+                prepaymentId,
+                orderId: order2Id,
+                idempotencyKey: applyKey,
+              }),
+              postCommand(apiUrl, apiKey, 'applyPrepayment', admin, {
+                prepaymentId,
+                orderId: order2Id,
+                idempotencyKey: applyKey,
+              }),
+            ]);
+            const appliedPrepayments = (await restGet(apiUrl, apiKey, 'posPrepayments'))
+              .filter((row) => row.id === prepaymentId && row.status === 'APPLIED');
+            const prepaidOrder = (await restGet(apiUrl, apiKey, 'posOrders')).find((row) => row.id === order2Id);
+            check(
+              'prepayment applies exactly once under parallel retry and changes remaining',
+              [200, 201].includes(prepayment.status) &&
+                parallelApplies.every((result) => [200, 201].includes(result.status)) &&
+                appliedPrepayments.length === 1 &&
+                prepaidOrder?.prepaidTotal?.amountMicros === reservationPrepaymentMicros &&
+                parallelApplies.every((result) => result.body?.prepaidMicros === reservationPrepaymentMicros),
+              `create=${prepayment.status}, applyStatuses=${parallelApplies.map((result) => result.status).join('/')}, applied=${appliedPrepayments.length}, prepaid=${prepaidOrder?.prepaidTotal?.amountMicros}`,
+            );
+            const attached = await postCommand(apiUrl, apiKey, 'attachReservationToOrder', admin, {
+              reservationId: reservation.body?.reservationId,
+              orderId: order2Id,
+              idempotencyKey: randomUUID(),
+            });
+            const attachedReservation = (await restGet(apiUrl, apiKey, 'posReservations')).find((row) => row.id === reservation.body?.reservationId);
+            check(
+              'reservation attaches to the same-table order without duplicating prepayment',
+              [200, 201].includes(attached.status) && attachedReservation?.orderId === order2Id &&
+                (await restGet(apiUrl, apiKey, 'posPrepayments')).filter((row) => row.orderId === order2Id && row.status === 'APPLIED').length === 1,
+              `status ${attached.status}, orderId=${attachedReservation?.orderId}`,
             );
 
             const paymentPrecheckKey = randomUUID();

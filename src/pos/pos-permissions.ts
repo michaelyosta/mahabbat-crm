@@ -14,6 +14,11 @@ export const POS_COMMANDS = [
   'cancelPrecheck',
   'recordPayment',
   'closeOrder',
+  'createReservation',
+  'updateReservationStatus',
+  'createPrepayment',
+  'applyPrepayment',
+  'attachReservationToOrder',
 ] as const;
 
 export type PosCommand = (typeof POS_COMMANDS)[number];

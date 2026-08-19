@@ -58,10 +58,10 @@ datasets into a synthetic operational history.
 ## POS boundary
 
 POS is a separate operational layer on `pos*` custom objects, not an extension
-of the CRM `Order`. Slices 1–4 implement `PosShift`, `PosZone`, `PosTable`,
+of the CRM `Order`. Slices 1–5 implement `PosShift`, `PosZone`, `PosTable`,
 `PosOrder`, `PosOrderGuest`, `PosOrderLine`, `PosMenuItem`, `PosStopListEntry`,
 `PosKitchenTicket`, `PosKitchenTicketLine`, `PosPrecheck`, `PosPaymentMethod`,
-`PosPayment` and the operational identity objects
+`PosPayment`, `PosReservation`, `PosPrepayment` and the operational identity objects
 `PosStaff`/`PosSession`. Mutations go through the signed `/pos/command` route
 and server dispatcher; generic waiter CRUD is read-only. POS money uses Twenty
 Currency micro-units, and CRM Orders/OrderItems remain untouched.
@@ -73,11 +73,13 @@ command resolves actor staff/role from that session. `TWENTY_APP_ACCESS_TOKEN`
 remains only the service credential used by the resolver to access the Twenty
 data plane.
 
-Reservations/prepayments, voids, transfers and append-only operational audit
-remain explicitly deferred. Slice 2 kitchen output and Slice 3 precheck output
+Voids, transfers and append-only operational audit remain explicitly deferred.
+Slice 2 kitchen output and Slice 3 precheck output
 are immutable snapshots using mock adapters. Slice 4 payments stop at
 server-authoritative CASH/CARD/OTHER records and close-at-zero, without fiscal,
-refund or bank-terminal semantics. Physical printer routing is not claimed. The
+refund or bank-terminal semantics. Slice 5 reservations keep overdue as derived
+state, while prepayments are immutable and applied exactly once into remaining.
+Physical printer routing is not claimed. The
 complete boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
 `docs/POS_DOMAIN.md`. Twenty v2.29.0's App event still does not expose a member
 identity, so outer route authentication and the Mahabbat POS session are

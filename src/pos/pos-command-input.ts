@@ -100,6 +100,39 @@ export type CloseOrderPayload = {
   idempotencyKey: string;
 };
 
+export type CreateReservationPayload = {
+  tableId: string;
+  scheduledAt?: string;
+  guestName?: string;
+  phone?: string;
+  idempotencyKey: string;
+};
+
+export type UpdateReservationStatusPayload = {
+  reservationId: string;
+  status: 'COMPLETED' | 'CANCELLED' | 'NO_SHOW';
+  idempotencyKey: string;
+};
+
+export type CreatePrepaymentPayload = {
+  reservationId: string;
+  paymentMethodId?: string;
+  amountMicros: number;
+  idempotencyKey: string;
+};
+
+export type ApplyPrepaymentPayload = {
+  prepaymentId: string;
+  orderId: string;
+  idempotencyKey: string;
+};
+
+export type AttachReservationToOrderPayload = {
+  reservationId: string;
+  orderId: string;
+  idempotencyKey: string;
+};
+
 const parseIdempotencyKey = (value: unknown): ParseResult<string> => {
   if (!isUuid(value)) {
     return invalid('INVALID_PAYLOAD', 'idempotencyKey must be a UUID');
@@ -369,6 +402,87 @@ const parseRecordPaymentPayload = (
   };
 };
 
+const parseOptionalDateTime = (value: unknown): string | undefined => {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) return undefined;
+  return new Date(value).toISOString();
+};
+
+const parseCreateReservationPayload = (
+  payload: unknown,
+): ParseResult<CreateReservationPayload> => {
+  if (typeof payload !== 'object' || payload === null) {
+    return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  }
+  const { tableId, scheduledAt, guestName, phone, idempotencyKey } =
+    payload as Record<string, unknown>;
+  if (!isUuid(tableId)) return invalid('INVALID_PAYLOAD', 'tableId must be a UUID');
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  if (scheduledAt !== undefined && parseOptionalDateTime(scheduledAt) === undefined) {
+    return invalid('INVALID_PAYLOAD', 'scheduledAt must be a valid ISO date');
+  }
+  if (guestName !== undefined && guestName !== null && typeof guestName !== 'string') {
+    return invalid('INVALID_PAYLOAD', 'guestName must be a string');
+  }
+  if (phone !== undefined && phone !== null && typeof phone !== 'string') {
+    return invalid('INVALID_PAYLOAD', 'phone must be a string');
+  }
+  return {
+    ok: true,
+    data: {
+      tableId,
+      idempotencyKey: parsedKey.data,
+      ...(parseOptionalDateTime(scheduledAt) ? { scheduledAt: parseOptionalDateTime(scheduledAt) } : {}),
+      ...(typeof guestName === 'string' && guestName.trim() ? { guestName: guestName.trim() } : {}),
+      ...(typeof phone === 'string' && phone.trim() ? { phone: phone.trim() } : {}),
+    },
+  };
+};
+
+const parseUpdateReservationStatusPayload = (
+  payload: unknown,
+): ParseResult<UpdateReservationStatusPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const { reservationId, status, idempotencyKey } = payload as Record<string, unknown>;
+  if (!isUuid(reservationId) || !['COMPLETED', 'CANCELLED', 'NO_SHOW'].includes(status as string)) {
+    return invalid('INVALID_PAYLOAD', 'reservationId/status are invalid');
+  }
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return { ok: true, data: { reservationId, status: status as UpdateReservationStatusPayload['status'], idempotencyKey: parsedKey.data } };
+};
+
+const parseCreatePrepaymentPayload = (
+  payload: unknown,
+): ParseResult<CreatePrepaymentPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const { reservationId, paymentMethodId, amountMicros, idempotencyKey } = payload as Record<string, unknown>;
+  if (!isUuid(reservationId) || (paymentMethodId !== undefined && !isUuid(paymentMethodId))) return invalid('INVALID_PAYLOAD', 'reservationId/paymentMethodId must be UUIDs');
+  if (typeof amountMicros !== 'number' || !Number.isSafeInteger(amountMicros) || amountMicros <= 0) return invalid('INVALID_PAYLOAD', 'amountMicros must be a positive safe integer');
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return { ok: true, data: { reservationId, amountMicros, idempotencyKey: parsedKey.data, ...(typeof paymentMethodId === 'string' ? { paymentMethodId } : {}) } };
+};
+
+const parseApplyPrepaymentPayload = (payload: unknown): ParseResult<ApplyPrepaymentPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const { prepaymentId, orderId, idempotencyKey } = payload as Record<string, unknown>;
+  if (!isUuid(prepaymentId) || !isUuid(orderId)) return invalid('INVALID_PAYLOAD', 'prepaymentId/orderId must be UUIDs');
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return { ok: true, data: { prepaymentId, orderId, idempotencyKey: parsedKey.data } };
+};
+
+const parseAttachReservationToOrderPayload = (payload: unknown): ParseResult<AttachReservationToOrderPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const { reservationId, orderId, idempotencyKey } = payload as Record<string, unknown>;
+  if (!isUuid(reservationId) || !isUuid(orderId)) return invalid('INVALID_PAYLOAD', 'reservationId/orderId must be UUIDs');
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return { ok: true, data: { reservationId, orderId, idempotencyKey: parsedKey.data } };
+};
+
 export const parsePosCommandEnvelope = (
   body: unknown,
 ): ParseResult<PosCommandEnvelope> => {
@@ -473,5 +587,15 @@ export const parseCommandPayload = <T>(
       return parseRecordPaymentPayload(payload) as unknown as ParseResult<T>;
     case 'closeOrder':
       return parsePrecheckPayload(payload) as unknown as ParseResult<T>;
+    case 'createReservation':
+      return parseCreateReservationPayload(payload) as unknown as ParseResult<T>;
+    case 'updateReservationStatus':
+      return parseUpdateReservationStatusPayload(payload) as unknown as ParseResult<T>;
+    case 'createPrepayment':
+      return parseCreatePrepaymentPayload(payload) as unknown as ParseResult<T>;
+    case 'applyPrepayment':
+      return parseApplyPrepaymentPayload(payload) as unknown as ParseResult<T>;
+    case 'attachReservationToOrder':
+      return parseAttachReservationToOrderPayload(payload) as unknown as ParseResult<T>;
   }
 };

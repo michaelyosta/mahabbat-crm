@@ -119,6 +119,22 @@
   zero-remaining close, close retry, reload/shared state, previous POS races
   and CRM smoke. Unit total: 227 passed.
 
+## POS Slice 5 — Reservations + Prepayment (PASS)
+
+- `PosReservation` is a POS-specific table-linked reservation layer, separate
+  from the CRM reservation object. It keeps optional scheduled time, guest
+  name/phone, status and authenticated creator; overdue is derived and never
+  auto-deletes the record. A reservation may attach to an order on the same
+  table, including an already reserved table.
+- `PosPrepayment` is an immutable controlled financial record. It starts
+  `UNAPPLIED` and moves to `APPLIED` through a CAS update keyed by an
+  idempotency key. `PosOrder.prepaidTotal` is reconciled from applied records;
+  payment remaining is `total - prepaidTotal - paidTotal`.
+- Live acceptance passed on both pinned targets with 73/73 checks each:
+  reservation persistence/overdue, retry, exactly-once parallel apply,
+  same-table attach, payment/close integration, prior POS races and CRM smoke.
+  Unit total remains 227; lint/typecheck pass; Twenty core modifications: 0.
+
 # PRE-POS hardening (FINAL PASS)
 
 - Loyalty balance: Customer 360 computes the balance from the **full ledger**

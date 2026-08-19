@@ -61,6 +61,7 @@ type OrderRecord = ExistingRecord & {
   subtotal?: unknown;
   total?: unknown;
   paidTotal?: unknown;
+  prepaidTotal?: unknown;
   closedByStaffId?: string | null;
   closeIdempotencyKey?: string | null;
 };
@@ -152,6 +153,30 @@ type PaymentRecord = ExistingRecord & {
   appliedToOrder?: boolean | null;
 };
 
+type ReservationRecord = ExistingRecord & {
+  tableId?: string | null;
+  orderId?: string | null;
+  scheduledAt?: string | null;
+  guestName?: string | null;
+  phone?: string | null;
+  status?: string | null;
+  createdByStaffId?: string | null;
+  idempotencyKey?: string | null;
+};
+
+type PrepaymentRecord = ExistingRecord & {
+  reservationId?: string | null;
+  orderId?: string | null;
+  paymentMethodId?: string | null;
+  amount?: unknown;
+  status?: string | null;
+  createdByStaffId?: string | null;
+  appliedByStaffId?: string | null;
+  idempotencyKey?: string | null;
+  applyIdempotencyKey?: string | null;
+  appliedAt?: string | null;
+};
+
 type CommandResult = { status: number; body: unknown };
 
 export const POS_ERROR_CODES = [
@@ -189,6 +214,13 @@ export const POS_ERROR_CODES = [
   'OVERPAYMENT',
   'PAYMENT_AMOUNT_INVALID',
   'ORDER_NOT_PAID',
+  'RESERVATION_NOT_FOUND',
+  'RESERVATION_STATUS_INVALID',
+  'RESERVATION_TABLE_MISMATCH',
+  'PREPAYMENT_NOT_FOUND',
+  'PREPAYMENT_ALREADY_APPLIED',
+  'PREPAYMENT_AMOUNT_INVALID',
+  'PREPAYMENT_EXCEEDS_ORDER',
   'IDEMPOTENCY_CONFLICT',
   'CONFLICT',
 ] as const;
@@ -259,6 +291,7 @@ const ORDER_FIELDS: NodeSelection = {
   subtotal: { amountMicros: true, currencyCode: true },
   total: { amountMicros: true, currencyCode: true },
   paidTotal: { amountMicros: true, currencyCode: true },
+  prepaidTotal: { amountMicros: true, currencyCode: true },
   closedByStaffId: true,
   closeIdempotencyKey: true,
 };
@@ -356,6 +389,32 @@ const PAYMENT_FIELDS: NodeSelection = {
   paymentMethodTypeSnapshot: true,
   orderPaidTotalBefore: { amountMicros: true, currencyCode: true },
   appliedToOrder: true,
+};
+
+const RESERVATION_FIELDS: NodeSelection = {
+  id: true,
+  tableId: true,
+  orderId: true,
+  scheduledAt: true,
+  guestName: true,
+  phone: true,
+  status: true,
+  createdByStaffId: true,
+  idempotencyKey: true,
+};
+
+const PREPAYMENT_FIELDS: NodeSelection = {
+  id: true,
+  reservationId: true,
+  orderId: true,
+  paymentMethodId: true,
+  amount: { amountMicros: true, currencyCode: true },
+  status: true,
+  createdByStaffId: true,
+  appliedByStaffId: true,
+  idempotencyKey: true,
+  applyIdempotencyKey: true,
+  appliedAt: true,
 };
 
 const queryConnection = async <T extends ExistingRecord>(
@@ -633,6 +692,82 @@ const findPendingPaymentByOrder = async (
   );
   return payments[0] ?? null;
 };
+
+const findReservationById = async (
+  client: CoreApiClientLike,
+  reservationId: string,
+): Promise<ReservationRecord | null> => {
+  const rows = await queryConnection<ReservationRecord>(
+    client,
+    'posReservations',
+    { filter: { id: { eq: reservationId } }, first: 1 },
+    RESERVATION_FIELDS,
+  );
+  return rows[0] ?? null;
+};
+
+const findReservationByIdempotencyKey = async (
+  client: CoreApiClientLike,
+  idempotencyKey: string,
+): Promise<ReservationRecord | null> => {
+  const rows = await queryConnection<ReservationRecord>(
+    client,
+    'posReservations',
+    { filter: { idempotencyKey: { eq: idempotencyKey } }, first: 1 },
+    RESERVATION_FIELDS,
+  );
+  return rows[0] ?? null;
+};
+
+const findPrepaymentById = async (
+  client: CoreApiClientLike,
+  prepaymentId: string,
+): Promise<PrepaymentRecord | null> => {
+  const rows = await queryConnection<PrepaymentRecord>(
+    client,
+    'posPrepayments',
+    { filter: { id: { eq: prepaymentId } }, first: 1 },
+    PREPAYMENT_FIELDS,
+  );
+  return rows[0] ?? null;
+};
+
+const findPrepaymentByIdempotencyKey = async (
+  client: CoreApiClientLike,
+  idempotencyKey: string,
+): Promise<PrepaymentRecord | null> => {
+  const rows = await queryConnection<PrepaymentRecord>(
+    client,
+    'posPrepayments',
+    { filter: { idempotencyKey: { eq: idempotencyKey } }, first: 1 },
+    PREPAYMENT_FIELDS,
+  );
+  return rows[0] ?? null;
+};
+
+const findPrepaymentByApplyIdempotencyKey = async (
+  client: CoreApiClientLike,
+  idempotencyKey: string,
+): Promise<PrepaymentRecord | null> => {
+  const rows = await queryConnection<PrepaymentRecord>(
+    client,
+    'posPrepayments',
+    { filter: { applyIdempotencyKey: { eq: idempotencyKey } }, first: 1 },
+    PREPAYMENT_FIELDS,
+  );
+  return rows[0] ?? null;
+};
+
+const findPrepaymentsByReservation = async (
+  client: CoreApiClientLike,
+  reservationId: string,
+): Promise<PrepaymentRecord[]> =>
+  queryConnection<PrepaymentRecord>(
+    client,
+    'posPrepayments',
+    { filter: { reservationId: { eq: reservationId } }, first: 100 },
+    PREPAYMENT_FIELDS,
+  );
 
 const findOrderByCloseIdempotencyKey = async (
   client: CoreApiClientLike,
@@ -1051,6 +1186,7 @@ export const executeOpenOrder = async (
             subtotal: null,
             total: null,
             paidTotal: microsToCurrency(0),
+            prepaidTotal: microsToCurrency(0),
           },
         },
         id: true,
@@ -1872,11 +2008,13 @@ export const executeCancelPrecheck = async (
 
 const paymentTotals = (order: OrderRecord) => {
   const totalMicros = normalizeCurrency(order.total).amountMicros;
+  const prepaidMicros = normalizeCurrency(order.prepaidTotal).amountMicros;
   const paidMicros = normalizeCurrency(order.paidTotal).amountMicros;
   return {
     totalMicros,
+    prepaidMicros,
     paidMicros,
-    remainingMicros: totalMicros - paidMicros,
+    remainingMicros: totalMicros - prepaidMicros - paidMicros,
   };
 };
 
@@ -1892,6 +2030,7 @@ const paymentResponse = (
     status: payment.status ?? 'PENDING',
     amount: payment.amount ?? null,
     remainingMicros: totals.remainingMicros,
+    prepaidMicros: totals.prepaidMicros,
     orderStatus: order.status ?? null,
   });
 };
@@ -1950,6 +2089,7 @@ const closeOrderResponse = (order: OrderRecord, status: number): CommandResult =
     status: order.status ?? 'CLOSED',
     closedAt: order.closedAt ?? null,
     closedByStaffId: order.closedByStaffId ?? null,
+    prepaidMicros: paymentTotals(order).prepaidMicros,
     remainingMicros: paymentTotals(order).remainingMicros,
   });
 
@@ -2192,6 +2332,257 @@ export const executeCloseOrder = async (
   return closeOrderResponse(closed, 201);
 };
 
+const reservationResponse = (
+  reservation: ReservationRecord,
+  status: number,
+): CommandResult => {
+  const overdue =
+    reservation.status === 'ACTIVE' &&
+    Boolean(reservation.scheduledAt) &&
+    Date.parse(reservation.scheduledAt as string) < Date.now();
+  return okResult(status, {
+    reservationId: reservation.id,
+    tableId: reservation.tableId ?? null,
+    orderId: reservation.orderId ?? null,
+    scheduledAt: reservation.scheduledAt ?? null,
+    guestName: reservation.guestName ?? null,
+    phone: reservation.phone ?? null,
+    status: reservation.status ?? 'ACTIVE',
+    overdue,
+    createdByStaffId: reservation.createdByStaffId ?? null,
+  });
+};
+
+export const executeCreateReservation = async (
+  client: CoreApiClientLike,
+  payload: {
+    tableId: string;
+    scheduledAt?: string;
+    guestName?: string;
+    phone?: string;
+    idempotencyKey: string;
+  },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const table = await findTableById(client, payload.tableId);
+  if (!table) return errorResult('TABLE_NOT_FOUND', 'Table does not exist.');
+  if (table.isActive === false) return errorResult('TABLE_INACTIVE', 'Table is not active.');
+  const existing = await findReservationByIdempotencyKey(client, payload.idempotencyKey);
+  if (existing) {
+    if (existing.tableId !== payload.tableId || existing.createdByStaffId !== actor.staffId) {
+      return idempotencyConflict('The idempotency key belongs to another reservation context.');
+    }
+    return reservationResponse(existing, 200);
+  }
+  try {
+    const result = (await client.mutation({
+      createPosReservation: {
+        __args: {
+          data: {
+            tableId: payload.tableId,
+            ...(payload.scheduledAt ? { scheduledAt: payload.scheduledAt } : {}),
+            ...(payload.guestName ? { guestName: payload.guestName } : {}),
+            ...(payload.phone ? { phone: payload.phone } : {}),
+            status: 'ACTIVE',
+            createdByStaffId: actor.staffId,
+            idempotencyKey: payload.idempotencyKey,
+            label: payload.guestName || `Бронь ${payload.tableId.slice(0, 8)}`,
+          },
+        },
+        id: true,
+        tableId: true,
+        orderId: true,
+        scheduledAt: true,
+        guestName: true,
+        phone: true,
+        status: true,
+        createdByStaffId: true,
+      },
+    })) as { createPosReservation?: ReservationRecord };
+    const reservation = result.createPosReservation;
+    if (!reservation?.id) throw new Error('Reservation was created but not readable.');
+    return reservationResponse({ ...reservation, tableId: reservation.tableId ?? payload.tableId }, 201);
+  } catch {
+    const raced = await findReservationByIdempotencyKey(client, payload.idempotencyKey);
+    if (raced) return reservationResponse(raced, 200);
+    return errorResult('CONFLICT', 'Reservation could not be created.');
+  }
+};
+
+export const executeUpdateReservationStatus = async (
+  client: CoreApiClientLike,
+  payload: { reservationId: string; status: 'COMPLETED' | 'CANCELLED' | 'NO_SHOW'; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const reservation = await findReservationById(client, payload.reservationId);
+  if (!reservation) return errorResult('RESERVATION_NOT_FOUND', 'Reservation does not exist.');
+  if (reservation.createdByStaffId !== actor.staffId && actor.role !== 'ADMIN') {
+    return errorResult('ORDER_NOT_OWNED', 'Reservation belongs to another staff member.');
+  }
+  if (reservation.status !== 'ACTIVE' && reservation.status !== payload.status) {
+    return errorResult('RESERVATION_STATUS_INVALID', 'Reservation is no longer active.');
+  }
+  const existing = await findReservationByIdempotencyKey(client, payload.idempotencyKey);
+  if (existing && existing.id !== reservation.id) return idempotencyConflict('The idempotency key belongs to another reservation.');
+  try {
+    await client.mutation({
+      updatePosReservation: {
+        __args: { id: reservation.id, data: { status: payload.status } },
+        id: true,
+        tableId: true,
+        orderId: true,
+        status: true,
+        scheduledAt: true,
+        guestName: true,
+        phone: true,
+        createdByStaffId: true,
+      },
+    });
+  } catch {
+    return errorResult('CONFLICT', 'Reservation status could not be updated.');
+  }
+  return reservationResponse({ ...reservation, status: payload.status }, 200);
+};
+
+export const executeCreatePrepayment = async (
+  client: CoreApiClientLike,
+  payload: { reservationId: string; paymentMethodId?: string; amountMicros: number; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  if (!Number.isSafeInteger(payload.amountMicros) || payload.amountMicros <= 0) {
+    return errorResult('PREPAYMENT_AMOUNT_INVALID', 'Prepayment amount must be a positive safe integer.');
+  }
+  const reservation = await findReservationById(client, payload.reservationId);
+  if (!reservation) return errorResult('RESERVATION_NOT_FOUND', 'Reservation does not exist.');
+  const existing = await findPrepaymentByIdempotencyKey(client, payload.idempotencyKey);
+  if (existing) {
+    if (existing.reservationId !== payload.reservationId || existing.createdByStaffId !== actor.staffId || normalizeCurrency(existing.amount).amountMicros !== payload.amountMicros) {
+      return idempotencyConflict('The idempotency key belongs to another prepayment context.');
+    }
+    return okResult(200, { prepaymentId: existing.id, status: existing.status ?? 'UNAPPLIED', amount: existing.amount ?? null });
+  }
+  if (payload.paymentMethodId) {
+    const method = await findPaymentMethodById(client, payload.paymentMethodId);
+    if (!method) return errorResult('PAYMENT_METHOD_NOT_FOUND', 'Payment method does not exist.');
+    if (method.isActive === false) return errorResult('PAYMENT_METHOD_INACTIVE', 'Payment method is inactive.');
+  }
+  try {
+    const result = (await client.mutation({
+      createPosPrepayment: {
+        __args: {
+          data: {
+            reservationId: payload.reservationId,
+            ...(payload.paymentMethodId ? { paymentMethodId: payload.paymentMethodId } : {}),
+            amount: microsToCurrency(payload.amountMicros),
+            status: 'UNAPPLIED',
+            createdByStaffId: actor.staffId,
+            idempotencyKey: payload.idempotencyKey,
+            label: `Предоплата ${payload.reservationId.slice(0, 8)}`,
+          },
+        },
+        id: true,
+        reservationId: true,
+        amount: { amountMicros: true, currencyCode: true },
+        status: true,
+        createdByStaffId: true,
+      },
+    })) as { createPosPrepayment?: PrepaymentRecord };
+    const prepayment = result.createPosPrepayment;
+    if (!prepayment?.id) throw new Error('Prepayment was created but not readable.');
+    return okResult(201, { prepaymentId: prepayment.id, status: prepayment.status ?? 'UNAPPLIED', amount: prepayment.amount ?? null });
+  } catch {
+    const raced = await findPrepaymentByIdempotencyKey(client, payload.idempotencyKey);
+    if (raced) return okResult(200, { prepaymentId: raced.id, status: raced.status ?? 'UNAPPLIED', amount: raced.amount ?? null });
+    return errorResult('CONFLICT', 'Prepayment could not be created.');
+  }
+};
+
+const reconcileOrderPrepaidTotal = async (
+  client: CoreApiClientLike,
+  orderId: string,
+): Promise<OrderRecord | null> => {
+  const rows = await queryConnection<PrepaymentRecord>(client, 'posPrepayments', { filter: { orderId: { eq: orderId }, status: { eq: 'APPLIED' } }, first: 100 }, PREPAYMENT_FIELDS);
+  const total = rows.reduce((sum, row) => sum + normalizeCurrency(row.amount).amountMicros, 0);
+  await client.mutation({ updatePosOrder: { __args: { id: orderId, data: { prepaidTotal: microsToCurrency(total) } }, id: true } });
+  return findOrderById(client, orderId);
+};
+
+export const executeApplyPrepayment = async (
+  client: CoreApiClientLike,
+  payload: { prepaymentId: string; orderId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const order = await findOrderById(client, payload.orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+  if (order.status === 'CLOSED') return errorResult('ORDER_NOT_EDITABLE', 'Closed order cannot receive a prepayment.');
+  const keyReplay = await findPrepaymentByApplyIdempotencyKey(client, payload.idempotencyKey);
+  if (keyReplay) {
+    if (keyReplay.id !== payload.prepaymentId || keyReplay.appliedByStaffId !== actor.staffId) return idempotencyConflict('The idempotency key belongs to another prepayment context.');
+    const refreshed = (await reconcileOrderPrepaidTotal(client, payload.orderId)) ?? order;
+    return okResult(200, { prepaymentId: keyReplay.id, orderId: payload.orderId, status: 'APPLIED', prepaidMicros: normalizeCurrency(refreshed.prepaidTotal).amountMicros, remainingMicros: paymentTotals(refreshed).remainingMicros });
+  }
+  const prepayment = await findPrepaymentById(client, payload.prepaymentId);
+  if (!prepayment) return errorResult('PREPAYMENT_NOT_FOUND', 'Prepayment does not exist.');
+  const amountMicros = normalizeCurrency(prepayment.amount).amountMicros;
+  if (prepayment.status === 'APPLIED') {
+    if (prepayment.orderId !== payload.orderId) return errorResult('PREPAYMENT_ALREADY_APPLIED', 'Prepayment is already applied to another order.');
+    const refreshed = (await reconcileOrderPrepaidTotal(client, payload.orderId)) ?? order;
+    return okResult(200, { prepaymentId: prepayment.id, orderId: payload.orderId, status: 'APPLIED', prepaidMicros: normalizeCurrency(refreshed.prepaidTotal).amountMicros, remainingMicros: paymentTotals(refreshed).remainingMicros });
+  }
+  if (amountMicros > normalizeCurrency(order.total).amountMicros && normalizeCurrency(order.total).amountMicros > 0) return errorResult('PREPAYMENT_EXCEEDS_ORDER', 'Prepayment exceeds the order total.');
+  try {
+    const result = await client.mutation({
+      updatePosPrepayments: {
+        __args: {
+          filter: { id: { eq: prepayment.id }, status: { eq: 'UNAPPLIED' } },
+          data: { orderId: payload.orderId, status: 'APPLIED', appliedByStaffId: actor.staffId, appliedAt: new Date().toISOString(), applyIdempotencyKey: payload.idempotencyKey },
+        },
+        id: true,
+      },
+    });
+    if (mutationUpdatedRows(result, 'updatePosPrepayments') === 0) {
+      const raced = await findPrepaymentById(client, prepayment.id);
+      if (!raced || raced.status !== 'APPLIED') return errorResult('CONFLICT', 'Prepayment could not be applied.');
+      if (raced.orderId !== payload.orderId) return errorResult('PREPAYMENT_ALREADY_APPLIED', 'Prepayment is already applied to another order.');
+    }
+  } catch {
+    const raced = await findPrepaymentById(client, prepayment.id);
+    if (!raced || raced.status !== 'APPLIED') return errorResult('CONFLICT', 'Prepayment could not be applied.');
+    if (raced.orderId !== payload.orderId) return errorResult('PREPAYMENT_ALREADY_APPLIED', 'Prepayment is already applied to another order.');
+  }
+  const refreshed = (await reconcileOrderPrepaidTotal(client, payload.orderId)) ?? order;
+  return okResult(201, { prepaymentId: prepayment.id, orderId: payload.orderId, status: 'APPLIED', prepaidMicros: normalizeCurrency(refreshed.prepaidTotal).amountMicros, remainingMicros: paymentTotals(refreshed).remainingMicros });
+};
+
+export const executeAttachReservationToOrder = async (
+  client: CoreApiClientLike,
+  payload: { reservationId: string; orderId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const reservation = await findReservationById(client, payload.reservationId);
+  if (!reservation) return errorResult('RESERVATION_NOT_FOUND', 'Reservation does not exist.');
+  const order = await findOrderById(client, payload.orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+  if (order.tableId !== reservation.tableId) return errorResult('RESERVATION_TABLE_MISMATCH', 'Reservation and order must use the same table.');
+  if (reservation.orderId && reservation.orderId !== payload.orderId) return errorResult('CONFLICT', 'Reservation is already attached to another order.');
+  if (order.ownerStaffId !== actor.staffId && actor.role !== 'ADMIN') return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
+  try {
+    await client.mutation({ updatePosReservation: { __args: { id: reservation.id, data: { orderId: payload.orderId } }, id: true } });
+  } catch {
+    const reread = await findReservationById(client, reservation.id);
+    if (reread?.orderId !== payload.orderId) return errorResult('CONFLICT', 'Reservation could not be attached.');
+  }
+  const prepayments = await findPrepaymentsByReservation(client, reservation.id);
+  const applied: string[] = [];
+  for (const prepayment of prepayments.filter((row) => row.status === 'UNAPPLIED')) {
+    const result = await executeApplyPrepayment(client, { prepaymentId: prepayment.id, orderId: payload.orderId, idempotencyKey: randomUUID() }, actor);
+    if (result.status >= 400) return result;
+    applied.push(prepayment.id);
+  }
+  const refreshed = (await reconcileOrderPrepaidTotal(client, payload.orderId)) ?? order;
+  return okResult(200, { reservationId: reservation.id, orderId: payload.orderId, appliedPrepaymentIds: applied, prepaidMicros: normalizeCurrency(refreshed.prepaidTotal).amountMicros, remainingMicros: paymentTotals(refreshed).remainingMicros });
+};
+
 export const dispatchPosCommand = async (
   client: CoreApiClientLike,
   command: PosCommand,
@@ -2323,6 +2714,39 @@ export const dispatchPosCommand = async (
         },
         actor,
       );
+    case 'createReservation':
+      return executeCreateReservation(client, {
+        tableId: payload.tableId as string,
+        scheduledAt: payload.scheduledAt as string | undefined,
+        guestName: payload.guestName as string | undefined,
+        phone: payload.phone as string | undefined,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'updateReservationStatus':
+      return executeUpdateReservationStatus(client, {
+        reservationId: payload.reservationId as string,
+        status: payload.status as 'COMPLETED' | 'CANCELLED' | 'NO_SHOW',
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'createPrepayment':
+      return executeCreatePrepayment(client, {
+        reservationId: payload.reservationId as string,
+        paymentMethodId: payload.paymentMethodId as string | undefined,
+        amountMicros: payload.amountMicros as number,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'applyPrepayment':
+      return executeApplyPrepayment(client, {
+        prepaymentId: payload.prepaymentId as string,
+        orderId: payload.orderId as string,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'attachReservationToOrder':
+      return executeAttachReservationToOrder(client, {
+        reservationId: payload.reservationId as string,
+        orderId: payload.orderId as string,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
     case 'authenticatePosStaff':
     case 'logoutPosStaff':
       return errorResult(
