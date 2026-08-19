@@ -1,6 +1,6 @@
 # Mahabbat POS — Domain
 
-Слой документации и контрактов POS. Реализованы **Slice 1** (Shift → Table → Order → Guests → Lines), **Slice 2** (Stop List + Kitchen Tickets), **Slice 3** (Precheck + Order Lock), **Slice 4** (Payments + Close), **Slice 5** (Reservations + Prepayment) и **Slice 6** (ADMIN Void + Transfers) через server-side command boundary.
+Слой документации и контрактов POS. Реализованы **Slice 1** (Shift → Table → Order → Guests → Lines), **Slice 2** (Stop List + Kitchen Tickets), **Slice 3** (Precheck + Order Lock), **Slice 4** (Payments + Close), **Slice 5** (Reservations + Prepayment), **Slice 6** (ADMIN Void + Transfers) и **Slice 7** (touch-oriented `Касса` UI) через server-side command boundary.
 
 ## Граница (ADR-2026-08-POS-1)
 

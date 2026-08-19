@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import defaultRole from 'src/default-role';
 import mahabbatPosWaiterRole from 'src/roles/mahabbat-pos-waiter.role';
+import mahabbatDemoUserRole from 'src/roles/mahabbat-demo-user.role';
 import { POS_MENU_ITEM_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-menu-item.object';
 import { POS_ORDER_GUEST_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-order-guest.object';
 import { POS_ORDER_LINE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-order-line.object';
@@ -68,6 +69,33 @@ describe('Mahabbat POS Waiter role boundary', () => {
   it('denies global write access that could bypass per-object rules', () => {
     expect(mahabbatPosWaiterRole.config.canReadAllObjectRecords).toBe(false);
     expect(mahabbatPosWaiterRole.config.canUpdateAllObjectRecords).toBe(false);
+  });
+});
+
+describe('Mahabbat Demo User POS read boundary', () => {
+  it('allows operational reads without POS authentication records or writes', () => {
+    expect(mahabbatDemoUserRole.success).toBe(true);
+    expect(mahabbatDemoUserRole.config.canReadAllObjectRecords).toBe(false);
+    expect(mahabbatDemoUserRole.config.canUpdateAllObjectRecords).toBe(false);
+
+    for (const objectUniversalIdentifier of POS_OBJECT_IDS) {
+      const permission = mahabbatDemoUserRole.config.objectPermissions?.find(
+        (entry) => entry.objectUniversalIdentifier === objectUniversalIdentifier,
+      );
+      expect(permission, objectUniversalIdentifier).toBeTruthy();
+      expect(permission?.canReadObjectRecords).toBe(true);
+      expect(permission?.canUpdateObjectRecords).toBe(false);
+      expect(permission?.canSoftDeleteObjectRecords).toBe(false);
+      expect(permission?.canDestroyObjectRecords).toBe(false);
+    }
+
+    expect(
+      mahabbatDemoUserRole.config.objectPermissions?.some(
+        (entry) =>
+          entry.objectUniversalIdentifier === POS_STAFF_UNIVERSAL_IDENTIFIER ||
+          entry.objectUniversalIdentifier === POS_SESSION_UNIVERSAL_IDENTIFIER,
+      ),
+    ).toBe(false);
   });
 });
 

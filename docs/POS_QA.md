@@ -15,7 +15,7 @@
 - `src/pos/__tests__/pos-command-input.test.ts` — client actor/role rejection;
   command payload no longer carries trusted staff identity.
 - `src/roles/__tests__/pos-roles-permission-boundary.test.ts` — role-level CRUD границы.
-- График: `yarn test:unit` (сейчас 222 passed / 20 файлов); новые кейсы добавляются через `yarn test:unit -- --runInBand <file>` (в Windows) или `npx jest scripts`-паттерн в Linux-контейнере.
+- График: `yarn test:unit` (сейчас 230 passed / 20 файлов); новые кейсы добавляются через `yarn test:unit -- --runInBand <file>` (в Windows) или `npx jest scripts`-паттерн в Linux-контейнере.
 
 ## Runtime acceptance (:2020 — dev workspace)
 1. `seed-pos`: `MAHABBAT_API_URL=... MAHABBAT_API_KEY=... MAHABBAT_POS_SEED_ADMIN_PIN=... MAHABBAT_POS_SEED_WAITER_PIN=... yarn seed:pos` → deterministic master data plus the `POS Acceptance` zone and `POS-A1`/`POS-A2`/`POS-A3` tables. Repeated runs create no duplicates and reconcile only the two synthetic PIN hashes. `--dry-run` reports the plan without writes.
@@ -63,19 +63,39 @@
 - Physical printer, fiscalization, refunds and bank-terminal behavior remain
   outside this pilot; cancellation output uses the existing mock adapter.
 
+## Live Slice 7 result — 2026-08-20
+
+- `:2020`: PASS, the full 78/78 command acceptance remained green after the
+  demo-role permission update. It still covers stop-list, kitchen delta,
+  precheck lock, payments, reservations/prepayment, void/transfer, audit,
+  concurrency, idempotency and CRM smoke.
+- `:3000`: PASS, the same 78/78 API checks passed after identical plan/apply;
+  sequential replans on both targets returned `No changes`.
+- Browser on self-hosted `:3000`: PASS for the real `Касса` front component:
+  synthetic POS PIN login, open shift, zone/table selection, open order,
+  two guests, lines with server totals, reload and re-authentication,
+  kitchen print, precheck lock, payment and close/release. The data was
+  reloaded from the server after the browser refresh.
+- The app remains App-only with Twenty core modifications `0`. The UI keeps
+  `PosStaff`/`PosSession` out of the read-only demo role to avoid exposing
+  authentication hashes; transfer-to-waiter remains available at the
+  server command/API boundary rather than exposing staff records to the demo
+  browser.
+- Local gates: `yarn lint`, `yarn typecheck`, `yarn test:unit` (230/230).
+
 ## CJ (frontend-IST)
 - Не входит в runtime acceptance slice 1 (серверная граница). Пользовательский сценарий клиента через Vue компоненты — слайс UI (отдельно от slice 1).
 
 ## Exit criteria (STOP после чистого PASS)
 - [x] typecheck чисто
-- [x] `yarn test:unit` зелёный (222 tests)
+- [x] `yarn test:unit` зелёный (230 tests)
 - [x] `yarn lint` 0 warnings/errors
 - [x] seed-pos idempotent на :2020 (staff provisioning uses private PIN env)
-- [x] auth/domain unit tests: `yarn test:unit` (222 tests)
-- [x] acceptance flow прошёл на :2020 (`scripts/accept-pos.mjs`, 47 checks)
+- [x] auth/domain unit tests: `yarn test:unit` (230 tests)
+- [x] acceptance flow прошёл на :2020 (`scripts/accept-pos.mjs`, 78 checks)
 - [x] concurrency race подтверждён (не более 1 смены/заказа, ошибка не 500)
 - [x] CRM smoke на :2020 (people+orders не сломались)
-- [x] :3000 plan/apply + тот же POS command acceptance (55 checks)
+- [x] :3000 plan/apply + тот же POS command acceptance (78 checks)
 - [x] acceptance tables are deterministic and reconciliation is limited to POS Acceptance fixtures
 - [x] документация и текущий execution order обновлены
 
@@ -114,7 +134,7 @@
   claimed.
 
 ## Не входит в этот маршрут
-Предоплаты, void, transfer и аудит — следующие bounded слайсы. POS PIN/card
-auth context and Slice 1–4 are implemented; полноценные
-Internet auth controls (2FA, refresh rotation, distributed rate limiting) и
-физическая печать остаются отдельными инициативами.
+Физическая печать, fiscalization, refunds, bank-terminal APIs, inventory и
+полноценные Internet auth controls (2FA, refresh rotation, distributed rate
+limiting) остаются отдельными инициативами. Slice 2–7 реализованы и
+проверены; следующий шаг требует отдельного human product review.

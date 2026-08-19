@@ -90,3 +90,21 @@ complete boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
 identity, so outer route authentication and the Mahabbat POS session are
 deliberately separate layers. The POS session is a pilot operational boundary,
 not a claim that Twenty's outer API-key route is a full Internet auth platform.
+
+## POS Slice 7 UI surface
+
+The operational POS is a standalone Twenty page layout (`Касса`) hosting the
+Mahabbat front component in `src/front-components/pos.front-component.tsx`.
+It is not implemented through generic Twenty CRUD: after the user opens the
+page, the component authenticates a POS PIN through `/s/pos/command`, reads
+POS objects through the authenticated REST data plane, and sends every
+mutation back through the signed command boundary. The short-lived POS token
+exists only in React memory and is cleared on logout.
+
+The UI is a touch-oriented client of the existing domain, not a second source
+of truth. Server commands still derive actor/role, recalculate money, enforce
+locks/ownership and perform idempotent writes. The file in `prototypes/` is
+reference material for layout and labels only; it is not part of the App
+manifest. The read-only demo role has POS operational read permissions but
+excludes `PosStaff`/`PosSession`, so PIN hashes and session records are not
+exposed to browser reads.

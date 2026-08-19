@@ -441,3 +441,20 @@ Twenty v2.29.0; core modifications remain `0`.
 
 Live acceptance: `:2020` and `:3000`, 78/78 checks each. Physical printer
 routing, fiscalization and refund semantics remain outside the pilot.
+
+## 2026-08-20 — POS Slice 7: standalone touch UI
+
+Решение: подключить первый operational UI отдельной page layout/front
+component (`Касса`), а не переделывать generic Twenty CRUD и не форкать core.
+`src/front-components/pos.front-component.tsx` использует prototype только
+как визуальный reference, хранит POS session token в памяти и вызывает уже
+проверенный `/s/pos/command` boundary для каждой мутации. Это сохраняет
+server-owned actor, money, state locks и idempotency.
+
+Для read-only demo account добавлены только POS object read permissions.
+`PosStaff`/`PosSession` исключены, чтобы не раскрывать PIN hashes и session
+records через REST. Transfer-to-waiter остаётся доступным server/API ADMIN
+command без выдачи staff directory браузеру. Twenty core modifications: 0.
+Browser acceptance на self-hosted `:3000` и полный 78-check API acceptance на
+`:2020`/`:3000` прошли; следующий шаг требует human review, а не дальнейшего
+автоматического расширения домена.

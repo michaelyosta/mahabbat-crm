@@ -107,8 +107,14 @@ temporary handoff and wait for the user's decision on the next phase.
   Live acceptance passed on both `:2020` and `:3000` (78/78 checks per target);
   Twenty core changes: 0.
 
+- [x] POS Slice 7 — standalone touch-oriented `Касса` front component connected
+  to the real POS auth/session, read APIs and controlled commands. Browser
+  acceptance on self-hosted `:3000` covered login → shift → zone/table → order
+  → guests/lines → print → precheck → payment → close/reload; the same 78/78
+  live API acceptance passed on `:2020` and `:3000`. Twenty core changes: 0.
+
 ## NEXT
 
-- `REAL TOUCH POS UI` — connect the prototype-informed operational flow to the
-  already verified command boundary. Keep domain/server as source of truth and
-  verify the UI first on disposable `:2020`, then bounded `:3000`.
+- `HUMAN PRODUCT REVIEW / HARDWARE DISCOVERY` — review the pilot UI with the
+  restaurant owner and separately decide on physical printer, fiscal and
+  payment-terminal discovery. Do not begin those integrations automatically.

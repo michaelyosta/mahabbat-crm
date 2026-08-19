@@ -73,3 +73,13 @@ boundary, затем создаёт короткую `PosSession`. В Twenty х�
 - c двух терминалов: один закрыл смену — другой получает честную ошибку (не 500).
 - bounded `:3000` + role-boundary-тесты = off.
 - `isActive=false` столов/меню НЕ мешает открытию активной смены, но мешает openOrder/addLine на неактивном.
+
+## Read-only demo UI
+
+Роль Twenty `Mahabbat Demo User` получает только `canReadObjectRecords` для
+операционных POS-объектов, необходимых странице `Касса`, без create/update/
+delete, settings или tools. `PosStaff` и `PosSession` намеренно не входят в
+эту read-поверхность: browser demo не должен получать PIN hashes или записи
+сессий. POS ADMIN/WAITER authorization по-прежнему выполняется внутри
+Mahabbat command boundary после PIN-аутентификации; разрешение Twenty на
+чтение не заменяет эту проверку.

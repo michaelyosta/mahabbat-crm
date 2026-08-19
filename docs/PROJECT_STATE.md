@@ -359,19 +359,21 @@ views and discoverable business views) is complete; the generic scaffold page
 has been removed.
 
 The current POS slice is the server-side operational foundation through
-Kitchen Print, Stop List, Precheck lock, payments, reservations/prepayments and
-ADMIN void/transfers:
+Kitchen Print, Stop List, Precheck lock, payments, reservations/prepayments,
+ADMIN void/transfers and the first touch-oriented operational UI:
 PosStaff PIN/card -> PosSession -> active Shift -> free Table -> POS Order ->
 multiple Guests -> independent OrderLines -> server totals -> persistence.
-There is no physical touch POS UI yet; kitchen, precheck and cancellation
-adapters are mock-only.
+The UI is mounted as the standalone `Касса` page layout/front component. It is
+connected to real read APIs and the signed POS command boundary; kitchen,
+precheck and cancellation adapters are still mock-only.
 
 # Следующий лучший шаг
 
 CRM foundation, aggregate import, Dashboard, Reservations, Demo-ready shell and
-PRE-POS hardening are complete. POS Slices 1–6 are PASS on both runtime
-targets. The next slice is `REAL TOUCH POS UI`, connected to the existing
-server command boundary and prototype-informed only.
+PRE-POS hardening are complete. POS Slices 1–7 are PASS on both runtime
+targets, including the real `Касса` UI flow on self-hosted `:3000`. The next
+phase is human review and bounded hardware/printer/fiscal-payment discovery;
+do not start it automatically.
 
 ## P0 loyalty write boundary status
 
@@ -431,3 +433,22 @@ server command boundary and prototype-informed only.
 - The same App build was applied on disposable `:2020` and self-hosted `:3000`;
   both real UI paths now create and persist the correction. No Twenty core files
   were changed.
+
+## POS Slice 7 checkpoint — 2026-08-20
+
+- The standalone `Касса` page uses `src/front-components/pos.front-component.tsx`
+  and the existing signed command route; the visual reference remains the
+  untracked `prototypes/mahabbat-pos-ultra-premium.html` only.
+- Browser acceptance on self-hosted `:3000` covered synthetic PIN login,
+  opening a shift, selecting a zone/table, opening an order, two guests,
+  server-priced lines, reload/re-authentication, kitchen print, precheck lock,
+  payment, close and table release. The UI reads real records; no mock cards
+  or local state are used for operational data.
+- The read-only `Mahabbat Demo User` role now has read permission for the POS
+  operational objects required by the screen. `PosStaff` and `PosSession` stay
+  outside that role so PIN hashes/session records are not exposed to the
+  browser. ADMIN transfer-to-waiter remains a server/API command; table
+  transfer and other bounded admin controls remain visible in the UI.
+- Local gates: lint, typecheck and 230 unit tests pass. Both pinned targets
+  passed the full 78-check POS acceptance after the role update. SDK replan on
+  `:2020` and `:3000` reports `No changes`; Twenty core modifications remain 0.

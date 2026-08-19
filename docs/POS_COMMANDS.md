@@ -70,7 +70,13 @@ POS UI (2nd terminal / web)
 
 `prototypes/mahabbat-pos-ultra-premium.html` — standalone-прототип touch-oriented POS UI. Он используется как reference для будущей последовательности экранов (POS → зал → стол → гости → меню → заказ → оплата), размеров touch-targets и русских operational labels. Прототип не является runtime, источником данных или security boundary.
 
-Реальный UI должен сначала вызвать `authenticatePosStaff`, хранить короткоживущий `sessionToken` только в памяти приложения, передавать его в POS commands и очищать при logout. Поля `actor`, `staffId` и `role` из прототипа/клиента не должны отправляться как доверенный контекст: actor выводится сервером из `PosSession`. До отдельного UI-slice prototype не подключается к Twenty.
+Реальный UI `src/front-components/pos.front-component.tsx` вызывает
+`authenticatePosStaff`, хранит короткоживущий `sessionToken` только в памяти
+компонента, передаёт его в POS commands и очищает при logout. Поля `actor`,
+`staffId` и `role` из прототипа/клиента не отправляются как доверенный контекст:
+actor выводится сервером из `PosSession`. `prototypes/mahabbat-pos-ultra-premium.html`
+остаётся только визуальным reference; runtime-данные и security boundary
+находятся в App/API.
 
 ## Race-fallback (обязательный шаг dispatch)
 Каждый execute пишет в ветке, где идём через transaction-подобную семантику:
