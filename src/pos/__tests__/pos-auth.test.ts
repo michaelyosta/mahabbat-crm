@@ -74,13 +74,13 @@ class FakeAuthDb implements CoreApiClientLike {
 const staffRow = async (
   id: string,
   displayName: string,
-  role: 'WAITER' | 'ADMIN',
+  staffRole: 'WAITER' | 'ADMIN',
   pin: string,
   extra: Record<string, unknown> = {},
 ): Promise<Row> => ({
   id,
   displayName,
-  role,
+  staffRole,
   pinHash: await hashPosPin(pin),
   cardIdentifier: null,
   isActive: true,

@@ -26,14 +26,14 @@ POS — **отдельный операционный слой** на собст
 
 ### PosStaff — РЕАЛИЗОВАНО
 
-- Поля: `displayName`, `role` (`WAITER|ADMIN`), `pinHash` (scrypt),
+- Поля: `displayName`, `staffRole` (`WAITER|ADMIN`), `pinHash` (scrypt),
   `cardIdentifier`, `isActive`, служебные `failedLoginCount`/`lockedUntil`.
 - Plaintext PIN не хранится и не возвращается. Запись недоступна generic UI.
 - Card identifier — только lookup value, не криптографический секрет.
 
 ### PosSession — РЕАЛИЗОВАНО
 
-- Поля: `sessionId`, `staffId`, `role`, `tokenHash`, `issuedAt`, `expiresAt`,
+- Поля: `sessionId`, `staffId`, `staffRole`, `tokenHash`, `issuedAt`, `expiresAt`,
   `revokedAt`, `terminalId`.
 - `authenticatePosStaff` возвращает raw short-lived token только клиенту
   login-flow; в Twenty хранится только SHA-256 hash.

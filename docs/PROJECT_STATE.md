@@ -123,6 +123,12 @@
   `yarn test:unit` (222/222) and `yarn seed:pos:dry` pass. `:2020/healthz` and
   `:3000/healthz` are green, but live data-plane/auth acceptance is not claimed
   because no workspace API key/POS seed PINs are present in the environment.
+- 2026-08-19 live schema gate: the current App manifest was applied through a
+  Linux Node 24 container to both disposable `:2020` and self-hosted `:3000`;
+  replan on each target returned `No changes`. The Windows-only backslash
+  resource-path errors remain a development-toolchain limitation. The live POS
+  acceptance flow is still BLOCKED because the required private API key and POS
+  PINs are absent; no staff or POS mutations were attempted.
 - On 2026-08-09 Linux `twenty-sdk@2.29.0` plan/apply updated Customer 360 on
   pinned Twenty `v2.29.0` without a core change; the same update was applied
   to disposable `:2020` and ordinary self-hosted `:3000`.

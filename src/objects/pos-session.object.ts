@@ -63,7 +63,7 @@ export default defineObject({
     {
       universalIdentifier: POS_SESSION_ROLE_FIELD_UNIVERSAL_IDENTIFIER,
       type: FieldType.SELECT,
-      name: 'role',
+      name: 'staffRole',
       label: 'Роль',
       description: 'Роль фиксируется на момент входа и читается сервером',
       icon: 'IconShieldCheck',

@@ -30,7 +30,7 @@ type Connection<T> = {
 type PosStaffRecord = {
   id: string;
   displayName?: string | null;
-  role?: string | null;
+  staffRole?: string | null;
   pinHash?: string | null;
   cardIdentifier?: string | null;
   isActive?: boolean | null;
@@ -42,7 +42,7 @@ type PosSessionRecord = {
   id: string;
   sessionId?: string | null;
   staffId?: string | null;
-  role?: string | null;
+  staffRole?: string | null;
   tokenHash?: string | null;
   issuedAt?: string | null;
   expiresAt?: string | null;
@@ -221,7 +221,7 @@ const queryRecords = async <T>(
 const STAFF_FIELDS = {
   id: true,
   displayName: true,
-  role: true,
+  staffRole: true,
   pinHash: true,
   cardIdentifier: true,
   isActive: true,
@@ -233,7 +233,7 @@ const SESSION_FIELDS = {
   id: true,
   sessionId: true,
   staffId: true,
-  role: true,
+  staffRole: true,
   tokenHash: true,
   issuedAt: true,
   expiresAt: true,
@@ -406,7 +406,7 @@ export const authenticatePosStaff = async (
   const expiresAt = new Date(issuedAt.getTime() + SESSION_TTL_MS);
   const sessionToken = randomBytes(32).toString('base64url');
   const sessionId = randomUUID();
-  const role = roleFromValue(candidate.role);
+  const role = roleFromValue(candidate.staffRole);
 
   if (!role) {
     return response(500, {
@@ -421,7 +421,7 @@ export const authenticatePosStaff = async (
         data: {
           sessionId,
           staffId: candidate.id,
-          role,
+          staffRole: role,
           tokenHash: hashPosSessionToken(sessionToken),
           issuedAt: issuedAt.toISOString(),
           expiresAt: expiresAt.toISOString(),
@@ -507,9 +507,9 @@ export const getAuthenticatedPosContext = async (
       1,
     )
   )[0];
-  const role = roleFromValue(staff?.role);
+  const role = roleFromValue(staff?.staffRole);
 
-  if (!staff || staff.isActive === false || !role || role !== session.role) {
+  if (!staff || staff.isActive === false || !role || role !== session.staffRole) {
     return {
       ok: false,
       result: response(401, {

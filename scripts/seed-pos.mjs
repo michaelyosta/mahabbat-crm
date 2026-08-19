@@ -107,7 +107,7 @@ const posStaffs = [
     ? {
         id: idFor('posStaff', 0),
         displayName: 'Демо официант',
-        role: 'WAITER',
+        staffRole: 'WAITER',
         pinHash: pinHash(waiterPin),
         cardIdentifier: null,
         isActive: true,
@@ -119,7 +119,7 @@ const posStaffs = [
     ? {
         id: idFor('posStaff', 1),
         displayName: 'Демо администратор',
-        role: 'ADMIN',
+        staffRole: 'ADMIN',
         pinHash: pinHash(adminPin),
         cardIdentifier: null,
         isActive: true,
@@ -172,7 +172,7 @@ function validate() {
     if (!staff.displayName || !staff.pinHash) {
       errors.push(`posStaffs[${i}]: displayName and pinHash must be set`);
     }
-    if (!['WAITER', 'ADMIN'].includes(staff.role)) {
+    if (!['WAITER', 'ADMIN'].includes(staff.staffRole)) {
       errors.push(`posStaffs[${i}]: role must be WAITER or ADMIN`);
     }
   });

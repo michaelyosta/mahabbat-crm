@@ -48,7 +48,7 @@ export default defineObject({
     {
       universalIdentifier: POS_STAFF_ROLE_FIELD_UNIVERSAL_IDENTIFIER,
       type: FieldType.SELECT,
-      name: 'role',
+      name: 'staffRole',
       label: 'Роль POS',
       description: 'Серверная роль операционного сотрудника',
       icon: 'IconShieldCheck',

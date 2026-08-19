@@ -324,8 +324,8 @@ auth/security boundary; real authentication/sessions are a future slice.
 
 ADR-2026-08-POS-2's client-supplied actor context is superseded for runtime
 commands. Twenty `WorkspaceMember` remains the CRM/backoffice identity, while
-POS uses `PosStaff` (`displayName`, `role`, `pinHash`, card identifier and
-active/lock state) and `PosSession` (hashed token, staff, role, issue/expiry,
+POS uses `PosStaff` (`displayName`, `staffRole`, `pinHash`, card identifier and
+active/lock state) and `PosSession` (hashed token, staff, `staffRole`, issue/expiry,
 revocation and terminal). `authenticatePosStaff` is the only command without a
 session; all other commands resolve actor staff/role via
 `getAuthenticatedPosContext()`. `TWENTY_APP_ACCESS_TOKEN` remains a service
@@ -338,3 +338,7 @@ rate boundary; distributed throttling, 2FA and refresh rotation remain outside
 this foundation. `body.staffId`, `body.actorStaffId` and `body.role` are not
 trusted; target staff IDs in future transfer commands remain business targets,
 distinct from the authenticated actor.
+
+Twenty v2.29.0 reserves the persisted field name `role` in this App metadata
+path. The storage fields therefore use `staffRole`; the in-process authenticated
+context still exposes the domain property `role`.
