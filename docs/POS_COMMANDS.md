@@ -55,6 +55,12 @@ POS UI (2nd terminal / web)
 
 Та же логика покрывает `closeShift`, `openOrder` (double-transaction-конфликт на unique claim).
 
+Idempotency replay is context-bound. The resolver compares the stored command
+context before returning an existing record; a key reused for another staff,
+table, order, guest or line payload returns `409 IDEMPOTENCY_CONFLICT` instead
+of exposing or mutating the first result. `openShift` also rejects a payload
+staff ID that differs from the actor context.
+
 ## Вычисления и статусы (server-owned)
 - **subtotal/total** считаются в микроумножениях по sum -> integer safe math; после addLine/changeQuantity выполняется пересчёт `PosOrder.subtotal`, `PosOrder.total`, `PosOrderGuest.subtotal`.
 - **status** строк/заказа не пишется клиентом; переходы — только через команды (см. POS_STATE_MACHINES.md).

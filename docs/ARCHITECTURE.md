@@ -57,7 +57,17 @@ datasets into a synthetic operational history.
 
 ## POS boundary
 
-The foundation does not implement POS entities or operations. The expected POS
-model (order identity, zones/tables, payments, fiscalisation, server commands)
-and its invariants are documented in `docs/POS_BOUNDARY.md`; they are not built
-before an explicit `MAHABBAT POS DOMAIN DISCOVERY` phase.
+POS is a separate operational layer on `pos*` custom objects, not an extension
+of the CRM `Order`. Slice 1 currently implements `PosShift`, `PosZone`,
+`PosTable`, `PosOrder`, `PosOrderGuest`, `PosOrderLine`, `PosMenuItem` and the
+stop-list read/check surface. Mutations go through the signed `/pos/command`
+route and server dispatcher; generic waiter CRUD is read-only. POS money uses
+Twenty Currency micro-units, and CRM Orders/OrderItems remain untouched.
+
+Kitchen printing, prechecks, payments, reservations/prepayments, voids,
+transfers and append-only operational audit remain explicitly deferred. The
+complete boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
+`docs/POS_DOMAIN.md`. The current command actor is an authenticated-route
+payload context because Twenty v2.29.0's App event does not expose a member
+identity; this is documented as a platform limitation and is not an Internet
+security claim.

@@ -77,10 +77,18 @@ temporary handoff and wait for the user's decision on the next phase.
   branding overlay, aligned source-of-truth docs and documented POS boundary.
   Status: **FINAL PASS** — see `docs/PRE-POS-CHECKLIST.md`.
 
+## POS FOUNDATION CHECKPOINT
+
+- [x] `MAHABBAT POS DOMAIN DISCOVERY` — POS/CRM boundary, state machines,
+  permissions, command contracts and non-goals are documented in `docs/POS_*`.
+- [ ] POS Foundation Slice 1 — server-side Shift → Zone/Table → Order → Guests
+  → OrderLines, context-bound idempotency, server totals, owner checks,
+  persistence and close-shift-with-open-order behavior. Implementation and
+  unit gates pass; live `:2020`/`:3000` command acceptance remains pending a
+  user-managed workspace API key. Twenty core changes: 0.
+
 ## NEXT
 
-- `MAHABBAT POS DOMAIN DISCOVERY` — operational phase: define POS order
-  identity, zones/tables, payments/fiscalisation and server-command invariants
-  against `docs/POS_BOUNDARY.md`. This is **domain discovery**, not an
-  implementation sprint; it starts only on an explicit
-  `MAHABBAT POS DOMAIN DISCOVERY` prompt.
+- `KITCHEN PRINT + STOP LIST` — immutable kitchen ticket abstraction and
+  server-side stop-list commands. Do not start automatically until this
+  checkpoint is accepted.

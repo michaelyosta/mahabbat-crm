@@ -84,6 +84,11 @@ POS — **отдельный операционный слой** на собст
 `PosShift.idempotencyKey`, `PosOrder.idempotencyKey`, `PosOrderGuest.idempotencyKey`, `PosOrderLine.idempotencyKey`.
 Повторный вызов с тем же ключом возвращает существующий объект (200), при конфликте чужого ключа — не создаёт дубль и не маскирует ошибки.
 
+Ключ не является безусловным глобальным алиасом: повтор принимается только если
+контекст совпадает (staff для Shift, table/owner для Order, order/name для Guest,
+order/guest/menu/quantity/creator для Line). Повтор с изменённым контекстом
+получает `409 IDEMPOTENCY_CONFLICT`.
+
 ## Concurrency (слайс 1)
 - Одна активная смена на staff: UNIQUE(`staffId`, `isOpen`).
 - Один активный заказ на стол: UNIQUE(`tableId`, `claimToken`), `claimToken`=tableId пока открыт.

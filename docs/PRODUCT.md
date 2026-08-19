@@ -1,15 +1,16 @@
 # Mahabbat CRM / Backoffice Foundation
 
 Restaurant CRM for one Kazakhstan business. The current phase is the **Mahabbat
-CRM Backoffice Foundation**: customers, orders, order items, reservations and an
-append-only loyalty ledger, plus aggregate sales history, a native Dashboard and
-bounded operational roles.
+CRM Backoffice + POS Foundation**: customers, CRM orders and order items,
+reservations and an append-only loyalty ledger, plus aggregate sales history, a
+native Dashboard, bounded operational roles and the first server-side POS slice
+(shifts, zones/tables, POS orders, guests and order lines).
 
-Not yet implemented: POS, payments, fiscalisation, full restaurant operations
-(floor/table management, menu/stop-list, shifts), accounting, bulk messaging and
-production deployment. This is a **current-phase boundary, not a permanent
-exclusion** — the next product stage is `MAHABBAT POS DOMAIN DISCOVERY`
-(see `docs/POS_BOUNDARY.md`), not an immediate POS implementation.
+Not yet implemented: POS UI, kitchen printing, prechecks, payments,
+fiscalisation, reservations/prepayments in the POS flow, voids/transfers,
+operational audit, inventory, accounting, bulk messaging and production
+deployment. These are **future slices, not permanent exclusions**; the current
+POS boundary and sequence are in `docs/POS_DOMAIN.md` and `docs/ROADMAP.md`.
 
 The controlled UI is Russian, desktop-first, ru-KZ and ₸. The foundation favours
 working Twenty capabilities over branding or a bespoke framework. Distribution

@@ -49,6 +49,26 @@
   setup, the supported native object entry plus view picker is retained for
   these views and for `Не возвращались 30 дней`/`Ближайшие бронирования`.
 
+## POS Foundation Slice 1
+
+- POS is a separate operational layer on `pos*` custom objects; the CRM
+  `Order`/`OrderItem` model and Customer 360 remain unchanged.
+- Implemented objects: `PosShift`, `PosZone`, `PosTable`, `PosOrder`,
+  `PosOrderGuest`, `PosOrderLine`, `PosMenuItem` and `PosStopListEntry`.
+- The signed `/pos/command` route dispatches `openShift`, `closeShift`,
+  `openOrder`, `addGuest`, `addLine` and `changeLineQuantity`. Server-owned
+  Currency micro-unit totals, ownership checks, active-table claims and
+  context-bound idempotency are enforced in `src/pos/pos-command.dispatch.ts`.
+- Duplicate active shifts/orders are prevented by unique indexes; identical
+  menu items remain independent POS lines; closing a shift leaves its order
+  open and owned.
+- POS Slice 1 docs and acceptance harness are in `docs/POS_DOMAIN.md`,
+  `docs/POS_STATE_MACHINES.md`, `docs/POS_PERMISSIONS.md`,
+  `docs/POS_COMMANDS.md`, `docs/POS_QA.md` and `scripts/accept-pos.mjs`.
+- Twenty core modifications remain `0`. A real member identity is not exposed
+  in Twenty v2.29.0 App `RoutePayload`; the signed actor context is therefore
+  an explicitly documented foundation limitation, not an Internet RBAC claim.
+
 # PRE-POS hardening (FINAL PASS)
 
 - Loyalty balance: Customer 360 computes the balance from the **full ledger**
@@ -77,11 +97,14 @@
 - Destructive integration-test setup is fail-closed (target allowlist guard,
   11 tests). Branding overlay is fail-closed (7 tests) and fails the build when
   a target literal is missing.
-- POS boundary is documented in `docs/POS_BOUNDARY.md` and is not implemented
-  ahead of an explicit `MAHABBAT POS DOMAIN DISCOVERY` phase.
+- POS Foundation Slice 1 is implemented after the documented boundary
+  decision; kitchen print, stop-list mutation commands, precheck, payments,
+  reservations/prepayment, void/transfer and operational audit remain future
+  slices.
 - Gate totals after the corrective checkpoint: `yarn lint` 0/0, `yarn typecheck`
-  clean, `yarn test:unit` 176/176, `yarn seed:demo:dry` PASS, SDK plan/apply on
-  `:2020` clean with sequential replan `No changes`.
+  clean, `yarn test:unit` 215/215, `yarn seed:pos:dry` PASS. The POS live
+  acceptance harness is ready but requires a user-managed workspace API key;
+  health checks for both `:2020` and `:3000` are currently green.
 
 # Сейчас не работает
 
@@ -92,6 +115,10 @@
 
 # Последняя проверка
 
+- 2026-08-19 POS checkpoint: `:2020/healthz` and `:3000/healthz` both return
+  200; `yarn typecheck`, `yarn lint`, `yarn test:unit` (215/215) and
+  `yarn seed:pos:dry` pass. Live command acceptance is not claimed because no
+  workspace API key is present in the environment.
 - On 2026-08-09 Linux `twenty-sdk@2.29.0` plan/apply updated Customer 360 on
   pinned Twenty `v2.29.0` without a core change; the same update was applied
   to disposable `:2020` and ordinary self-hosted `:3000`.
@@ -174,10 +201,10 @@
 
 # Известные проблемы
 
-- POS, payments, fiscalisation and full restaurant operations are not
-  implemented. The expected POS model and its invariants are documented in
-  `docs/POS_BOUNDARY.md`; building them requires an explicit
-  `MAHABBAT POS DOMAIN DISCOVERY` phase.
+- POS Slice 1 is implemented and covered by the server-side command boundary.
+  Kitchen printing, payments, fiscalisation and the remaining restaurant
+  operations are not implemented; their bounded sequence is documented in
+  `docs/POS_DOMAIN.md` and requires separate checkpoints.
 - Native Windows Apps SDK paths are a development-environment limitation.
   Standard development is Linux/WSL; it is not a Twenty architectural blocker.
 - Twenty v2.29.0 cannot plan a composite App index on standard Person; the
@@ -194,8 +221,8 @@
 - The user-managed one-time API-key handoff file could not be deleted by the
   local execution policy after successful deployment. It was never displayed;
   remove `C:\Users\misa\.mahabbat-selfhost-api-key` manually.
-- The initial App commit is staged and passes `git diff --cached --check`, but
-  Git has no local author name/email, so no commit was created.
+- The current POS checkpoint has local source/doc changes pending commit; the
+  unrelated `prototypes/` workspace is intentionally not part of this slice.
 - Generic standard navigation (`Companies`, `People`, `Opportunities`,
   `Tasks`, `Notes`, `Dashboards`, `Workflows`) cannot be hidden from an App
   manifest. The supported compromise is Mahabbat-first negative positions and
@@ -234,15 +261,17 @@ product shell (Dashboard-first navigation, Russian labels, clean Orders/Loyalty
 views and discoverable business views) is complete; the generic scaffold page
 has been removed.
 
+The current POS slice is the server-side operational foundation:
+Staff context -> active Shift -> free Table -> POS Order -> multiple Guests ->
+independent OrderLines -> server totals -> persistence. There is no POS UI,
+printer, precheck or payment path yet.
+
 # Следующий лучший шаг
 
-Checkpoint P0 Customer Identity + Import Idempotency, Customer 360 polish, the
-native Orders UX slice, the synthetic aggregate snapshot API, the private
-workbook adapter, the native Dashboard, the Reservations UX view, the 30-day
-return-frequency segment, the external demo smoke and the Demo-ready product
-shell are complete. The next slice is external demo preparation, keeping
-aggregate history separate from operational Orders and using the verified
-identity/upsert contract.
+CRM foundation, aggregate import, Dashboard, Reservations, Demo-ready shell and
+PRE-POS hardening are complete. POS Foundation Slice 1 is now the current
+checkpoint; after its disposable/self-hosted runtime gate the next recommended
+slice is `KITCHEN PRINT + STOP LIST`.
 
 ## P0 loyalty write boundary status
 

@@ -63,6 +63,7 @@ type GuestRecord = ExistingRecord & {
   orderId?: string | null;
   ordinal?: number | null;
   displayNumber?: string | null;
+  name?: string | null;
   subtotal?: unknown;
   idempotencyKey?: string | null;
 };
@@ -108,6 +109,7 @@ export const POS_ERROR_CODES = [
   'STOP_LISTED',
   'LINE_NOT_FOUND',
   'LINE_NOT_EDITABLE',
+  'IDEMPOTENCY_CONFLICT',
   'CONFLICT',
 ] as const;
 
@@ -124,6 +126,11 @@ const errorResult = (
 const okResult = (status: number, body: unknown): CommandResult => ({
   status,
   body,
+});
+
+const idempotencyConflict = (message: string): CommandResult => ({
+  status: 409,
+  body: { code: 'IDEMPOTENCY_CONFLICT', message },
 });
 
 type NodeSelection = Record<string, boolean | Record<string, boolean>>;
@@ -172,6 +179,7 @@ const GUEST_FIELDS: NodeSelection = {
   orderId: true,
   ordinal: true,
   displayNumber: true,
+  name: true,
   subtotal: { amountMicros: true, currencyCode: true },
   idempotencyKey: true,
 };
@@ -584,8 +592,16 @@ const createShift = async (
 export const executeOpenShift = async (
   client: CoreApiClientLike,
   payload: { staffId: string; idempotencyKey: string },
+  actor?: PosActor,
 ): Promise<CommandResult> => {
   const { staffId, idempotencyKey } = payload;
+
+  if (actor && actor.staffId !== staffId) {
+    return errorResult(
+      'INVALID_STAFF',
+      'staffId must match the authenticated POS actor.',
+    );
+  }
 
   if (!(await workspaceMemberExists(client, staffId))) {
     return errorResult('INVALID_STAFF', 'Staff member does not exist.');
@@ -597,6 +613,12 @@ export const executeOpenShift = async (
   );
 
   if (existingByIdempotency) {
+    if (existingByIdempotency.staffId !== staffId) {
+      return idempotencyConflict(
+        'The idempotency key belongs to another staff member.',
+      );
+    }
+
     return okResult(200, {
       shiftId: existingByIdempotency.id,
       status: existingByIdempotency.status ?? 'OPEN',
@@ -687,6 +709,15 @@ export const executeOpenOrder = async (
   );
 
   if (existingByIdempotency) {
+    if (
+      existingByIdempotency.tableId !== payload.tableId ||
+      existingByIdempotency.ownerStaffId !== actor.staffId
+    ) {
+      return idempotencyConflict(
+        'The idempotency key belongs to another order context.',
+      );
+    }
+
     return okResult(200, {
       orderId: existingByIdempotency.id,
       status: existingByIdempotency.status ?? 'OPEN',
@@ -772,6 +803,18 @@ export const executeAddGuest = async (
   );
 
   if (existingByIdempotency) {
+    const existingName = existingByIdempotency.name ?? null;
+    const requestedName = payload.name ?? null;
+
+    if (
+      existingByIdempotency.orderId !== payload.orderId ||
+      existingName !== requestedName
+    ) {
+      return idempotencyConflict(
+        'The idempotency key belongs to another guest context.',
+      );
+    }
+
     return okResult(200, { guestId: existingByIdempotency.id });
   }
 
@@ -866,6 +909,18 @@ export const executeAddLine = async (
   );
 
   if (existingByIdempotency) {
+    if (
+      existingByIdempotency.orderId !== payload.orderId ||
+      existingByIdempotency.guestId !== payload.guestId ||
+      existingByIdempotency.menuItemId !== payload.menuItemId ||
+      existingByIdempotency.quantity !== payload.quantity ||
+      existingByIdempotency.createdByStaffId !== actor.staffId
+    ) {
+      return idempotencyConflict(
+        'The idempotency key belongs to another line context.',
+      );
+    }
+
     return okResult(200, { lineId: existingByIdempotency.id });
   }
 
@@ -971,7 +1026,7 @@ export const dispatchPosCommand = async (
       return executeOpenShift(client, {
         staffId: payload.staffId as string,
         idempotencyKey: payload.idempotencyKey as string,
-      });
+      }, actor);
     case 'closeShift':
       return executeCloseShift(
         client,

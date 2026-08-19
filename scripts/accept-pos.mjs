@@ -18,9 +18,9 @@
 import { randomUUID } from 'node:crypto';
 
 const RESOLVER_UID = '54be0dfa-2fd6-45bc-be93-6ba4c64a21d9';
-const STAFF_A = '20202020-0687-4c41-b707-ed1bfca972a7';
-const STAFF_B = '32323232-0001-4000-8000-000000000000';
-const OTHER_STAFF = '00000000-0000-4000-8000-000000000000';
+const STAFF_A = process.env.MAHABBAT_STAFF_A ?? '20202020-0687-4c41-b707-ed1bfca972a7';
+const STAFF_B = process.env.MAHABBAT_STAFF_B ?? '32323232-0001-4000-8000-000000000000';
+const OTHER_STAFF = process.env.MAHABBAT_OTHER_STAFF ?? '00000000-0000-4000-8000-000000000000';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

@@ -569,4 +569,106 @@ describe('pos domain concurrency races', () => {
     );
     expect(adminClose.status).toBe(200);
   });
+
+  it('rejects actor spoofing and foreign idempotency-key reuse', async () => {
+    const db = dbWithBaseline();
+
+    const spoofedShift = await dispatchPosCommand(
+      db,
+      'openShift',
+      { staffId: STAFF, idempotencyKey: key(20) },
+      { staffId: OTHER_STAFF, role: 'WAITER' },
+    );
+    expect(spoofedShift.status).toBe(400);
+    expect((spoofedShift.body as { code: string }).code).toBe('INVALID_STAFF');
+
+    const firstShift = await executeOpenShift(db, {
+      staffId: STAFF,
+      idempotencyKey: key(21),
+    });
+    expect(firstShift.status).toBe(201);
+
+    const foreignShiftKey = await dispatchPosCommand(
+      db,
+      'openShift',
+      { staffId: OTHER_STAFF, idempotencyKey: key(21) },
+      { staffId: OTHER_STAFF, role: 'WAITER' },
+    );
+    expect(foreignShiftKey.status).toBe(409);
+    expect((foreignShiftKey.body as { code: string }).code).toBe(
+      'IDEMPOTENCY_CONFLICT',
+    );
+
+    await executeOpenShift(db, {
+      staffId: OTHER_STAFF,
+      idempotencyKey: key(22),
+    });
+    const firstOrder = await executeOpenOrder(
+      db,
+      { tableId: TABLE, idempotencyKey: key(23) },
+      waiter,
+    );
+    expect(firstOrder.status).toBe(201);
+
+    const foreignOrderKey = await executeOpenOrder(
+      db,
+      { tableId: TABLE, idempotencyKey: key(23) },
+      { staffId: OTHER_STAFF, role: 'WAITER' },
+    );
+    expect(foreignOrderKey.status).toBe(409);
+    expect((foreignOrderKey.body as { code: string }).code).toBe(
+      'IDEMPOTENCY_CONFLICT',
+    );
+
+    const orderId = (firstOrder.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(
+      db,
+      'addGuest',
+      { orderId, idempotencyKey: key(24), name: 'Гость A' },
+      waiter,
+    );
+    const guestId = (guest.body as { guestId: string }).guestId;
+
+    const foreignGuestKey = await dispatchPosCommand(
+      db,
+      'addGuest',
+      { orderId, idempotencyKey: key(24), name: 'Гость B' },
+      waiter,
+    );
+    expect(foreignGuestKey.status).toBe(409);
+    expect((foreignGuestKey.body as { code: string }).code).toBe(
+      'IDEMPOTENCY_CONFLICT',
+    );
+
+    const firstLine = await dispatchPosCommand(
+      db,
+      'addLine',
+      {
+        orderId,
+        guestId,
+        menuItemId: MENU_A,
+        quantity: 1,
+        idempotencyKey: key(25),
+      },
+      waiter,
+    );
+    expect(firstLine.status).toBe(201);
+
+    const foreignLineKey = await dispatchPosCommand(
+      db,
+      'addLine',
+      {
+        orderId,
+        guestId,
+        menuItemId: MENU_A,
+        quantity: 2,
+        idempotencyKey: key(25),
+      },
+      waiter,
+    );
+    expect(foreignLineKey.status).toBe(409);
+    expect((foreignLineKey.body as { code: string }).code).toBe(
+      'IDEMPOTENCY_CONFLICT',
+    );
+  });
 });

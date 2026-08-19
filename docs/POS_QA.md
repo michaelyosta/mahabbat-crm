@@ -8,8 +8,10 @@
 - `src/pos/__tests__/pos-permissions.test.ts` — owner-проверки; WAITER не закрывает чужое.
 - `src/pos/__tests__/pos-command-input.test.ts` — рваные payload, ID валидация, envelope.
 - `src/pos/__tests__/pos-domain.test.ts` — FakePosDb: unique race (два терминала), idempotency-повтор, stop-list block, totals/status recompute.
+- `src/pos/__tests__/pos-domain.test.ts` — foreign idempotency-key reuse and
+  actor/payload staff mismatch are rejected with an honest conflict.
 - `src/roles/__tests__/pos-roles-permission-boundary.test.ts` — role-level CRUD границы.
-- График: `yarn test:unit` (сейчас 214 passed / 19 файлов); новые кейсы добавляются через `yarn test:unit -- --runInBand <file>` (в Windows) или `npx jest scripts`-паттерн в Linux-контейнере.
+- График: `yarn test:unit` (сейчас 215 passed / 19 файлов); новые кейсы добавляются через `yarn test:unit -- --runInBand <file>` (в Windows) или `npx jest scripts`-паттерн в Linux-контейнере.
 
 ## Runtime acceptance (:2020 — dev workspace)
 1. `seed-pos`: `MAHABBAT_API_URL=... MAHABBAT_API_KEY=... yarn seed:pos` → зоны/столы/меню созданы; повторный запуск — 0 создано; `--dry-run` сообщает план без записи.
@@ -31,9 +33,9 @@
 - Не входит в runtime acceptance slice 1 (серверная граница). Пользовательский сценарий клиента через Vue компоненты — слайс UI (отдельно от slice 1).
 
 ## Exit criteria (STOP после чистого PASS)
-- [ ] typecheck чисто
-- [ ] `yarn test:unit` зелёный
-- [ ] `yarn lint` 0 warnings/errors
+- [x] typecheck чисто
+- [x] `yarn test:unit` зелёный (215 tests)
+- [x] `yarn lint` 0 warnings/errors
 - [ ] seed-pos idempotent на :2020
 - [ ] acceptance 2–7 прошли на :2020 (скрипт/curl)
 - [ ] concurrency race подтверждён (не более 1 смены/заказа, ошибка не 500)
