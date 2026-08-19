@@ -58,7 +58,7 @@ datasets into a synthetic operational history.
 ## POS boundary
 
 POS is a separate operational layer on `pos*` custom objects, not an extension
-of the CRM `Order`. Slices 1–2 implement `PosShift`, `PosZone`, `PosTable`,
+of the CRM `Order`. Slices 1–3 implement `PosShift`, `PosZone`, `PosTable`,
 `PosOrder`, `PosOrderGuest`, `PosOrderLine`, `PosMenuItem`, `PosStopListEntry`,
 `PosKitchenTicket`, `PosKitchenTicketLine` and the operational identity objects
 `PosStaff`/`PosSession`. Mutations go through the signed `/pos/command` route
@@ -72,10 +72,10 @@ command resolves actor staff/role from that session. `TWENTY_APP_ACCESS_TOKEN`
 remains only the service credential used by the resolver to access the Twenty
 data plane.
 
-Prechecks, payments, reservations/prepayments, voids, transfers and append-only
-operational audit remain explicitly deferred. Slice 2 kitchen output is
-immutable and delta-based, but uses only a `MockKitchenPrintAdapter`; physical
-printer routing is not claimed. The
+Payments, reservations/prepayments, voids, transfers and append-only
+operational audit remain explicitly deferred. Slice 2 kitchen output and Slice 3
+precheck output are immutable snapshots using mock adapters; physical printer
+routing is not claimed. The
 complete boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
 `docs/POS_DOMAIN.md`. Twenty v2.29.0's App event still does not expose a member
 identity, so outer route authentication and the Mahabbat POS session are

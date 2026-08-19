@@ -10,6 +10,8 @@ export const POS_COMMANDS = [
   'addStopListEntry',
   'clearStopListEntry',
   'printKitchenTicket',
+  'createPrecheck',
+  'cancelPrecheck',
 ] as const;
 
 export type PosCommand = (typeof POS_COMMANDS)[number];
@@ -29,7 +31,9 @@ export const POS_AUTH_COMMANDS = new Set<PosCommand>([
 ]);
 
 const WAITER_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(
-  POS_COMMANDS.filter((command) => command !== 'authenticatePosStaff'),
+  POS_COMMANDS.filter(
+    (command) => command !== 'authenticatePosStaff' && command !== 'cancelPrecheck',
+  ),
 );
 
 const ADMIN_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(POS_COMMANDS);

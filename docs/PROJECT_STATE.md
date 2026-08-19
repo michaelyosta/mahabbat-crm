@@ -92,6 +92,18 @@
   sent-quantity guard, persistence, Slice 1 races and CRM smoke. Unit total:
   225 passed.
 
+## POS Slice 3 — Precheck + Order Lock (PASS)
+
+- `PosPrecheck` stores immutable server-owned order/guest money snapshots and
+  lifecycle `ACTIVE → CANCELLED`; `activeOrderKey`, create key and cancel key
+  provide deterministic retry/concurrency boundaries.
+- `createPrecheck` moves the order to `PRECHECK_PRINTED` and the existing command
+  lock rejects guest/line/quantity/new kitchen mutations. `cancelPrecheck` is
+  ADMIN-only, records cancellation and restores `IN_PROGRESS`.
+- Live acceptance passed on `:2020` and `:3000` with 62/62 checks each,
+  including lock, waiter denial, ADMIN cancel, retries and CRM smoke. Unit total:
+  226 passed.
+
 # PRE-POS hardening (FINAL PASS)
 
 - Loyalty balance: Customer 360 computes the balance from the **full ledger**
@@ -120,23 +132,22 @@
 - Destructive integration-test setup is fail-closed (target allowlist guard,
   11 tests). Branding overlay is fail-closed (7 tests) and fails the build when
   a target literal is missing.
-- POS Foundation Slices 1–2 are implemented after the documented boundary
-  decision; precheck, payments, reservations/prepayment, void/transfer and
-  operational audit remain future slices. Kitchen output is mock-adapter only.
+- POS Foundation Slices 1–3 are implemented after the documented boundary
+  decision; payments, reservations/prepayment, void/transfer and operational
+  audit remain future slices. Kitchen and precheck output use mock adapters only.
 - Gate totals after the corrective checkpoint: `yarn lint` 0/0, `yarn typecheck`
-  clean, `yarn test:unit` 225/225, `yarn seed:pos:dry` PASS. Slice 2 live
+  clean, `yarn test:unit` 226/226, `yarn seed:pos:dry` PASS. Slice 3 live
   acceptance is recorded below.
 
-# POS Slice 2 live checkpoint — 2026-08-19
+# POS Slice 3 live checkpoint — 2026-08-19
 
-- Disposable `:2020`: `scripts/accept-pos.mjs` PASS 55/55 after Linux
-  plan/apply/replan. It proved server stop-list lifecycle, stale-client
-  rejection, first/retry/no-op/delta PRINT, sent-quantity guard, parallel
-  PRINT convergence, reload/second-client state, Slice 1 races and CRM smoke.
-- Self-hosted `:3000`: the same manifest and deterministic harness PASS 55/55;
+- Disposable `:2020`: `scripts/accept-pos.mjs` PASS 62/62 after Linux
+  plan/apply/replan. It proved Slice 1/2 behavior plus precheck snapshot,
+  server lock, ADMIN cancel and retry repair.
+- Self-hosted `:3000`: the same manifest and deterministic harness PASS 62/62;
   plan after apply returned `No changes`.
-- No physical printer, fiscal, payment or precheck behavior is implied by this
-  checkpoint; Twenty core modifications remain 0.
+- No physical printer, fiscal or payment behavior is implied by this checkpoint;
+  Twenty core modifications remain 0.
 
 # Сейчас не работает
 
@@ -147,13 +158,10 @@
 
 # Последняя проверка
 
-- 2026-08-19 POS Slice 1 live acceptance: `:2020` PASS (47/47) and `:3000`
-  PASS (47/47). Verified ADMIN/WAITER authentication, deterministic acceptance
-  fixtures, shift/order/guest/line flow, server totals, reload/second-client
-  consistency, close-shift-with-open-order and concurrency/idempotency. The
-  self-hosted run required removal/rebuild of one stale non-persistent SDK layer
-  cache; persistent PostgreSQL data and Twenty core were untouched. Final local
-  gates: `yarn lint`, `yarn typecheck`, `yarn test:unit` (222/222) PASS.
+- 2026-08-19 POS Slice 3 live acceptance: `:2020` PASS (62/62) and `:3000`
+  PASS (62/62). This includes the prior Slice 1/2 checks plus precheck snapshot,
+  server lock, ADMIN cancel, retry repair and CRM smoke. Final local gates:
+  `yarn lint`, `yarn typecheck`, `yarn test:unit` (226/226) PASS.
 - On 2026-08-09 Linux `twenty-sdk@2.29.0` plan/apply updated Customer 360 on
   pinned Twenty `v2.29.0` without a core change; the same update was applied
   to disposable `:2020` and ordinary self-hosted `:3000`.
@@ -303,17 +311,17 @@ views and discoverable business views) is complete; the generic scaffold page
 has been removed.
 
 The current POS slice is the server-side operational foundation plus Kitchen
-Print + Stop List:
+Print + Stop List + Precheck lock:
 PosStaff PIN/card -> PosSession -> active Shift -> free Table -> POS Order ->
 multiple Guests -> independent OrderLines -> server totals -> persistence.
-There is no physical POS UI, precheck, payment or reservation/prepayment path
-yet; the kitchen adapter is mock-only.
+There is no physical POS UI, payment or reservation/prepayment path yet; kitchen
+and precheck adapters are mock-only.
 
 # Следующий лучший шаг
 
 CRM foundation, aggregate import, Dashboard, Reservations, Demo-ready shell and
-PRE-POS hardening are complete. POS Foundation Slices 1 and 2 are PASS on both
-runtime targets. The next slice is `PRECHECK + ORDER LOCK`.
+PRE-POS hardening are complete. POS Foundation Slices 1–3 are PASS on both
+runtime targets. The next slice is `PAYMENTS + PARTIAL PAYMENTS + CLOSE ORDER`.
 
 ## P0 loyalty write boundary status
 

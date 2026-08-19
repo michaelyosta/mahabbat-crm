@@ -35,7 +35,7 @@ authenticatePosStaff ─► ACTIVE ─► EXPIRED
  Site ──────► OPEN ────────► IN_PROGRESS ────► PRECHECK_PRINTED ───► CLOSED
                 │  ▲                                  │              │
                 │  │ changeLineQuantity               │ cancelPrecheck(ADMIN) ─┘
-                │  │ addGuest / addLine               │ (slice 3, NOT implemented)
+                │  │ addGuest / addLine               │ (server lock)
                 │  └─ PREP (в слайсе 1 не существует  │
                 │     отдельно на строках; строки      │ transferOrder*(ADMIN, slice 6)
                 │     ACTIVE)                          └► Transfer готовит новый контекст
@@ -49,7 +49,7 @@ authenticatePosStaff ─► ACTIVE ─► EXPIRED
 | IN_PROGRESS    | addGuest        | owner  | OPEN или IN_PROGRESS (незакрытый, не PRECHECK)        |
 | IN_PROGRESS    | addLine         | owner  | OPEN или IN_PROGRESS; нет активной стоп-лист записи; гости уже добавлены (кроме snack addLine) |
 | IN_PROGRESS    | changeLineQuantity | owner | только ACTIVE строки, qty ≥ 1, незакрытый заказ      |
-| PRECHECK_PRINTED | checkPrecheck | ADMIN  | slice 3, НЕ реализовано                                |
+| PRECHECK_PRINTED | createPrecheck | owner/ADMIN | server snapshot; add/change/guest/print locked |
 | CLOSED         | close (полная оплата) | ADMIN | slice 4, НЕ реализовано                              |
 | (пер. в новый контекст) | transferOrder* | ADMIN | slice 6, НЕ реализовано                              |
 
@@ -74,6 +74,15 @@ authenticatePosStaff ─► ACTIVE ─► EXPIRED
 повтор без дельты возвращает `NO_UNSENT_LINES`. Semantic/request idempotency и
 уникальная `(ticket, orderLine)` строка защищают retry/concurrency. Будущий
 `CANCELLATION` ticket остаётся частью Slice 6.
+
+## Precheck (Slice 3)
+
+`createPrecheck` создаёт ровно один ACTIVE snapshot на заказ (`activeOrderKey`
+unique), переводит заказ в `PRECHECK_PRINTED` и вызывает
+`PrecheckPrintAdapter`. Повтор того же ключа или гонка возвращает тот же
+snapshot и repair-ит статус заказа. `cancelPrecheck` — ADMIN-only; он сохраняет
+историческую запись как `CANCELLED`, очищает active lock и возвращает заказ в
+`IN_PROGRESS`. Отмена также идемпотентна по отдельному ключу.
 
 ## ESC
 Выход из flow (пункт 6 спеки) — **клиентская симуляция**: закрывает модалку, ничего с итогами не делает. Никакого серверного состояния не трогает (слайс 1).

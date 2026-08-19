@@ -372,3 +372,20 @@ Slice 2 uses `MockKitchenPrintAdapter`. `addLine` rechecks the live stop-list
 on the server, so a stale menu client cannot bypass a stop-list change.
 This required only Mahabbat App objects/logic; Twenty core modifications remain
 0. Live acceptance: `:2020` and `:3000`, 55/55 checks each.
+
+## 2026-08-19 — POS Slice 3: precheck snapshot and order lock
+
+Precheck is a separate immutable `PosPrecheck` record, not a mutable flag or a
+frontend-only print action. `createPrecheck` recalculates server-owned order and
+guest totals, writes one ACTIVE snapshot per order using a unique
+`activeOrderKey`, then moves the order to `PRECHECK_PRINTED`. All guest/line/
+quantity/new-kitchen mutations are rejected by the existing server command
+lock. `PrecheckPrintAdapter` is mock-only at this stage.
+
+`cancelPrecheck` is an ADMIN-only command. It preserves the historical snapshot
+as `CANCELLED`, records actor/time and a separate cancel idempotency key, clears
+the active lock and repairs the order to `IN_PROGRESS`. Retries and a crash
+between snapshot creation and order locking re-read the winner and repair state;
+no second precheck is created. This is App-only metadata/logic on Twenty
+v2.29.0; core modifications remain `0`. Live acceptance: `:2020` and `:3000`,
+62/62 checks each.

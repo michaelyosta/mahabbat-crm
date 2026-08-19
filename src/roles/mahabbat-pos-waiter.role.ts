@@ -9,6 +9,7 @@ import { POS_SHIFT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-shift.object';
 import { POS_STOP_LIST_ENTRY_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-stop-list-entry.object';
 import { POS_TABLE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-table.object';
 import { POS_ZONE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-zone.object';
+import { POS_PRECHECK_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-precheck.object';
 
 export default defineRole({
   universalIdentifier: MAHABBAT_POS_WAITER_ROLE_UNIVERSAL_IDENTIFIER,
@@ -32,6 +33,7 @@ export default defineRole({
     POS_ORDER_LINE_UNIVERSAL_IDENTIFIER,
     POS_MENU_ITEM_UNIVERSAL_IDENTIFIER,
     POS_STOP_LIST_ENTRY_UNIVERSAL_IDENTIFIER,
+    POS_PRECHECK_UNIVERSAL_IDENTIFIER,
   ].map((objectUniversalIdentifier) => ({
     objectUniversalIdentifier,
     canReadObjectRecords: true,

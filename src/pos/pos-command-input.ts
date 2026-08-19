@@ -83,6 +83,11 @@ export type PrintKitchenTicketPayload = {
   idempotencyKey: string;
 };
 
+export type PrecheckPayload = {
+  orderId: string;
+  idempotencyKey: string;
+};
+
 const parseIdempotencyKey = (value: unknown): ParseResult<string> => {
   if (!isUuid(value)) {
     return invalid('INVALID_PAYLOAD', 'idempotencyKey must be a UUID');
@@ -315,6 +320,17 @@ const parsePrintKitchenTicket = (
   return { ok: true, data: { orderId, idempotencyKey: parsedKey.data } };
 };
 
+const parsePrecheckPayload = (payload: unknown): ParseResult<PrecheckPayload> => {
+  if (typeof payload !== 'object' || payload === null) {
+    return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  }
+  const { orderId, idempotencyKey } = payload as Record<string, unknown>;
+  if (!isUuid(orderId)) return invalid('INVALID_PAYLOAD', 'orderId must be a UUID');
+  const parsedKey = parseIdempotencyKey(idempotencyKey);
+  if (!parsedKey.ok) return parsedKey;
+  return { ok: true, data: { orderId, idempotencyKey: parsedKey.data } };
+};
+
 export const parsePosCommandEnvelope = (
   body: unknown,
 ): ParseResult<PosCommandEnvelope> => {
@@ -412,5 +428,8 @@ export const parseCommandPayload = <T>(
       return parseStopListPayload(payload) as unknown as ParseResult<T>;
     case 'printKitchenTicket':
       return parsePrintKitchenTicket(payload) as unknown as ParseResult<T>;
+    case 'createPrecheck':
+    case 'cancelPrecheck':
+      return parsePrecheckPayload(payload) as unknown as ParseResult<T>;
   }
 };

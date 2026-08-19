@@ -20,6 +20,7 @@ import {
 import { EXTERNAL_IDENTITY_KEY_ON_PERSON_FIELD_UNIVERSAL_IDENTIFIER } from 'src/fields/person/external-identity-key-on-person.field';
 import { EXTERNAL_ID_ON_PERSON_FIELD_UNIVERSAL_IDENTIFIER } from 'src/fields/person/external-id-on-person.field';
 import { EXTERNAL_PROVIDER_ON_PERSON_FIELD_UNIVERSAL_IDENTIFIER } from 'src/fields/person/external-provider-on-person.field';
+import { POS_PRECHECK_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-precheck.object';
 
 export default defineRole({
   universalIdentifier: MAHABBAT_STAFF_ROLE_UNIVERSAL_IDENTIFIER,
@@ -73,6 +74,13 @@ export default defineRole({
     },
     {
       objectUniversalIdentifier: LOYALTY_ADJUSTMENT_REQUEST_UNIVERSAL_IDENTIFIER,
+      canReadObjectRecords: true,
+      canUpdateObjectRecords: false,
+      canSoftDeleteObjectRecords: false,
+      canDestroyObjectRecords: false,
+    },
+    {
+      objectUniversalIdentifier: POS_PRECHECK_UNIVERSAL_IDENTIFIER,
       canReadObjectRecords: true,
       canUpdateObjectRecords: false,
       canSoftDeleteObjectRecords: false,

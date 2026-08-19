@@ -1,6 +1,6 @@
 # Mahabbat POS — Domain
 
-Слой документации и контрактов POS. Реализованы **Slice 1** (Shift → Table → Order → Guests → Lines) и **Slice 2** (Stop List + Kitchen Tickets) через server-side command boundary. Слайсы 3–6 остаются отдельными bounded slices.
+Слой документации и контрактов POS. Реализованы **Slice 1** (Shift → Table → Order → Guests → Lines), **Slice 2** (Stop List + Kitchen Tickets) и **Slice 3** (Precheck + Order Lock) через server-side command boundary. Слайсы 4–6 остаются отдельными bounded slices.
 
 ## Граница (ADR-2026-08-POS-1)
 
@@ -101,9 +101,17 @@ POS — **отдельный операционный слой** на собст
 - `kitchenSentQuantity` различает sent/unsent; semantic hash и request key защищены unique indexes. Повтор без новых строк — `NO_UNSENT_LINES`; повтор/параллельный вызов не создаёт дубль.
 - `KitchenPrintAdapter` отделяет physical printer; текущий `MockKitchenPrintAdapter` не заявляет реальную печать.
 
-### 10–16. Future (задокументированы, не реализованы)
-- **Precheck** (слайс 3): денежный снапшот, PRECHECK_PRINTED lock, cancelPrecheck только ADMIN.
-- **Precheck** (слайс 3): денежный снапшот, PRECHECK_PRINTED lock, cancelPrecheck только ADMIN.
+### 10. Precheck — Slice 3 РЕАЛИЗОВАН
+- `PosPrecheck` хранит immutable order/guest monetary snapshot, actor, print status,
+  lifecycle `ACTIVE → CANCELLED` и отдельные create/cancel idempotency keys.
+- `createPrecheck` пересчитывает server totals, создаёт один active snapshot на
+  order и переводит заказ в `PRECHECK_PRINTED`; server-side mutation lock
+  запрещает гостей, строки, quantity и новые kitchen prints.
+- `cancelPrecheck` доступен только ADMIN, сохраняет cancelled history и
+  возвращает заказ в `IN_PROGRESS`; retry/crash recovery не создаёт второй
+  snapshot.
+
+### 11–16. Future (задокументированы, не реализованы)
 - **PaymentMethod** / **Payment** (слайс 4): конфигурируемые методы (Cash/Card база; Kaspi/Halyk/Freedom — не хардкодить), платежи, remaining=0 ⇒ close.
 - **Reservation** (слайс 5): все поля optional, протухшие NOT auto-deleted, negative-timer UI.
 - **Prepayment** (слайс 5): авто-применяется к remaining, не скидка.

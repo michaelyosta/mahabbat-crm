@@ -34,6 +34,8 @@ export const POS_ORDER_NOTES_FIELD_UNIVERSAL_IDENTIFIER =
   '8121484b-87ef-4917-8e3c-9be13166cb3b';
 export const POS_ORDER_KITCHEN_TICKETS_FIELD_UNIVERSAL_IDENTIFIER =
   'f1e6d6a2-7b63-4c9a-8d21-1e5f4a6b7c80';
+export const POS_ORDER_PRECHECKS_FIELD_UNIVERSAL_IDENTIFIER =
+  'a2b3c4d5-e6f7-4890-8123-456789abcdef';
 export const POS_ORDER_UNIQUE_TABLE_CLAIM_INDEX_UNIVERSAL_IDENTIFIER =
   '20629f11-1305-4671-b7f7-0ddd4028afd6';
 export const POS_ORDER_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
@@ -279,6 +281,19 @@ export default defineObject({
         '7c1a2f34-5b67-4d89-8e01-23456789abcd',
       relationTargetFieldMetadataUniversalIdentifier:
         '7c1a2f34-5b67-4d89-8e01-23456789abcf',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
+    },
+    {
+      universalIdentifier: POS_ORDER_PRECHECKS_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'prechecks',
+      label: 'Пречеки',
+      description: 'История серверных snapshots заказа',
+      icon: 'IconReceipt',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '9e3c4f56-7a89-4f01-8123-456789abcdef',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '9e3c4f56-7a89-4f01-8123-456789abcdf1',
       universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
   ],

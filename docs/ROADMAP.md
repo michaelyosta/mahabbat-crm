@@ -91,8 +91,12 @@ temporary handoff and wait for the user's decision on the next phase.
   Tickets/Lines, delta printing, MockKitchenPrintAdapter and retry/concurrency
   safety. Live acceptance passed on both `:2020` and `:3000` (55/55 checks per
   target); Twenty core changes: 0.
+- [x] POS Slice 3 — server-side Precheck snapshot, `PRECHECK_PRINTED` order lock,
+  ADMIN-only cancel and retry/crash repair. Live acceptance passed on both
+  `:2020` and `:3000` (62/62 checks per target); Twenty core changes: 0.
 
 ## NEXT
 
-- `PRECHECK + ORDER LOCK` — next bounded slice: server-side precheck snapshot,
-  `PRECHECK_PRINTED` lock and ADMIN-only cancel path.
+- `PAYMENTS + PARTIAL PAYMENTS + CLOSE ORDER` — next bounded slice: configurable
+  payment methods, immutable successful payments, remaining calculation and
+  server-authoritative close.

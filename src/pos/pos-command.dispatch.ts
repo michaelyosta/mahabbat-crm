@@ -20,6 +20,7 @@ import {
   sumActiveLinesMicros,
 } from 'src/pos/pos-money';
 import { kitchenPrintAdapter } from 'src/pos/kitchen-print-adapter';
+import { precheckPrintAdapter } from 'src/pos/precheck-print-adapter';
 
 type ExistingRecord = {
   id: string;
@@ -111,6 +112,21 @@ type KitchenTicketLineRecord = ExistingRecord & {
   action?: string | null;
 };
 
+type PrecheckRecord = ExistingRecord & {
+  orderId?: string | null;
+  status?: string | null;
+  subtotalSnapshot?: unknown;
+  totalSnapshot?: unknown;
+  guestTotalsSnapshot?: string | null;
+  createdByStaffId?: string | null;
+  cancelledAt?: string | null;
+  cancelledByStaffId?: string | null;
+  activeOrderKey?: string | null;
+  idempotencyKey?: string | null;
+  cancelIdempotencyKey?: string | null;
+  printStatus?: string | null;
+};
+
 type CommandResult = { status: number; body: unknown };
 
 export const POS_ERROR_CODES = [
@@ -138,6 +154,8 @@ export const POS_ERROR_CODES = [
   'LINE_ALREADY_SENT',
   'STOP_LIST_NOT_FOUND',
   'KITCHEN_TICKET_NOT_FOUND',
+  'PRECHECK_NOT_FOUND',
+  'PRECHECK_NOT_ACTIVE',
   'IDEMPOTENCY_CONFLICT',
   'CONFLICT',
 ] as const;
@@ -263,6 +281,22 @@ const KITCHEN_TICKET_LINE_FIELDS: NodeSelection = {
   itemNameSnapshot: true,
   quantity: true,
   action: true,
+};
+
+const PRECHECK_FIELDS: NodeSelection = {
+  id: true,
+  orderId: true,
+  status: true,
+  subtotalSnapshot: { amountMicros: true, currencyCode: true },
+  totalSnapshot: { amountMicros: true, currencyCode: true },
+  guestTotalsSnapshot: true,
+  createdByStaffId: true,
+  cancelledAt: true,
+  cancelledByStaffId: true,
+  activeOrderKey: true,
+  idempotencyKey: true,
+  cancelIdempotencyKey: true,
+  printStatus: true,
 };
 
 const queryConnection = async <T extends ExistingRecord>(
@@ -461,6 +495,45 @@ const findKitchenTicketLine = async (
     KITCHEN_TICKET_LINE_FIELDS,
   );
   return lines[0] ?? null;
+};
+
+const findPrecheckByIdempotencyKey = async (
+  client: CoreApiClientLike,
+  idempotencyKey: string,
+): Promise<PrecheckRecord | null> => {
+  const prechecks = await queryConnection<PrecheckRecord>(
+    client,
+    'posPrechecks',
+    { filter: { idempotencyKey: { eq: idempotencyKey } }, first: 1 },
+    PRECHECK_FIELDS,
+  );
+  return prechecks[0] ?? null;
+};
+
+const findActivePrecheckByOrderId = async (
+  client: CoreApiClientLike,
+  orderId: string,
+): Promise<PrecheckRecord | null> => {
+  const prechecks = await queryConnection<PrecheckRecord>(
+    client,
+    'posPrechecks',
+    { filter: { activeOrderKey: { eq: orderId } }, first: 1 },
+    PRECHECK_FIELDS,
+  );
+  return prechecks.find((precheck) => precheck.status === 'ACTIVE') ?? null;
+};
+
+const findPrecheckByCancelIdempotencyKey = async (
+  client: CoreApiClientLike,
+  cancelIdempotencyKey: string,
+): Promise<PrecheckRecord | null> => {
+  const prechecks = await queryConnection<PrecheckRecord>(
+    client,
+    'posPrechecks',
+    { filter: { cancelIdempotencyKey: { eq: cancelIdempotencyKey } }, first: 1 },
+    PRECHECK_FIELDS,
+  );
+  return prechecks[0] ?? null;
 };
 
 const findOrderById = async (
@@ -1437,6 +1510,254 @@ export const executePrintKitchenTicket = async (
   });
 };
 
+const repairPrecheckOrderLock = async (
+  client: CoreApiClientLike,
+  order: OrderRecord,
+): Promise<void> => {
+  if (order.status === 'PRECHECK_PRINTED') return;
+
+  await client.mutation({
+    updatePosOrder: {
+      __args: { id: order.id, data: { status: 'PRECHECK_PRINTED' } },
+      id: true,
+    },
+  });
+};
+
+const repairCancelledPrecheckOrder = async (
+  client: CoreApiClientLike,
+  order: OrderRecord,
+): Promise<void> => {
+  if (order.status !== 'PRECHECK_PRINTED') return;
+
+  await client.mutation({
+    updatePosOrder: {
+      __args: { id: order.id, data: { status: 'IN_PROGRESS' } },
+      id: true,
+    },
+  });
+};
+
+const buildPrecheckSnapshot = async (
+  client: CoreApiClientLike,
+  order: OrderRecord,
+): Promise<{
+  order: OrderRecord;
+  subtotal: ReturnType<typeof normalizeCurrency>;
+  guestTotals: Array<{ displayNumber: string; amountMicros: number; currencyCode: string }>;
+}> => {
+  await updateLinesTotals(client, order);
+  const refreshedOrder = await findOrderById(client, order.id);
+  if (!refreshedOrder) throw new Error('Order disappeared while creating precheck.');
+
+  const guests = await findGuestsByOrder(client, order.id);
+  const guestTotals = guests.map((guest) => {
+    const subtotal = normalizeCurrency(guest.subtotal);
+    return {
+      displayNumber: guest.displayNumber ?? `Гость ${guest.ordinal ?? 0}`,
+      amountMicros: subtotal.amountMicros,
+      currencyCode: subtotal.currencyCode,
+    };
+  });
+
+  return {
+    order: refreshedOrder,
+    subtotal: normalizeCurrency(refreshedOrder.subtotal),
+    guestTotals,
+  };
+};
+
+const precheckResponse = (
+  precheck: PrecheckRecord,
+  order: OrderRecord,
+  status: number,
+): CommandResult => ({
+  status,
+  body: {
+    precheckId: precheck.id,
+    orderId: order.id,
+    orderStatus: order.status ?? 'PRECHECK_PRINTED',
+    status: precheck.status ?? 'ACTIVE',
+    printStatus: precheck.printStatus ?? 'PRINTED',
+    totalSnapshot: precheck.totalSnapshot ?? null,
+  },
+});
+
+export const executeCreatePrecheck = async (
+  client: CoreApiClientLike,
+  payload: { orderId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const order = await findOrderById(client, payload.orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+
+  const existingByIdempotency = await findPrecheckByIdempotencyKey(
+    client,
+    payload.idempotencyKey,
+  );
+  if (existingByIdempotency) {
+    if (
+      existingByIdempotency.orderId !== payload.orderId ||
+      existingByIdempotency.createdByStaffId !== actor.staffId
+    ) {
+      return idempotencyConflict('The idempotency key belongs to another precheck context.');
+    }
+
+    if (existingByIdempotency.status === 'ACTIVE') {
+      await repairPrecheckOrderLock(client, order);
+    }
+    const refreshed = (await findOrderById(client, payload.orderId)) ?? order;
+    return precheckResponse(existingByIdempotency, refreshed, 200);
+  }
+
+  const active = await findActivePrecheckByOrderId(client, payload.orderId);
+  if (active) {
+    await repairPrecheckOrderLock(client, order);
+    const refreshed = (await findOrderById(client, payload.orderId)) ?? order;
+    return precheckResponse(active, refreshed, 200);
+  }
+
+  const editableIssue = assertOrderEditableForActor(order, actor);
+  if (editableIssue) return editableIssue;
+
+  const snapshot = await buildPrecheckSnapshot(client, order);
+  const createdAt = new Date().toISOString();
+  const guestTotalsSnapshot = JSON.stringify(snapshot.guestTotals);
+  let precheck: PrecheckRecord | null = null;
+  let createdNew = false;
+
+  try {
+    const result = (await client.mutation({
+      createPosPrecheck: {
+        __args: {
+          data: {
+            orderId: payload.orderId,
+            label: `Предчек ${payload.orderId.slice(0, 8)}`,
+            status: 'ACTIVE',
+            subtotalSnapshot: snapshot.subtotal,
+            totalSnapshot: normalizeCurrency(snapshot.order.total),
+            guestTotalsSnapshot,
+            createdByStaffId: actor.staffId,
+            activeOrderKey: payload.orderId,
+            idempotencyKey: payload.idempotencyKey,
+            printStatus: 'PRINTED',
+            createdAt,
+          },
+        },
+        id: true,
+        orderId: true,
+        status: true,
+        subtotalSnapshot: { amountMicros: true, currencyCode: true },
+        totalSnapshot: { amountMicros: true, currencyCode: true },
+        guestTotalsSnapshot: true,
+        createdByStaffId: true,
+        activeOrderKey: true,
+        idempotencyKey: true,
+        printStatus: true,
+      },
+    })) as { createPosPrecheck?: PrecheckRecord };
+    precheck = result.createPosPrecheck ?? null;
+    createdNew = true;
+  } catch {
+    const raced =
+      (await findPrecheckByIdempotencyKey(client, payload.idempotencyKey)) ??
+      (await findActivePrecheckByOrderId(client, payload.orderId));
+    if (!raced) return errorResult('CONFLICT', 'Precheck could not be created.');
+    precheck = raced;
+  }
+
+  if (!precheck?.id) return errorResult('CONFLICT', 'Precheck could not be read back.');
+
+  await repairPrecheckOrderLock(client, order);
+  const lockedOrder = (await findOrderById(client, payload.orderId)) ?? order;
+
+  if (createdNew) {
+    await precheckPrintAdapter.print({
+      precheckId: precheck.id,
+      orderId: payload.orderId,
+      subtotalMicros: snapshot.subtotal.amountMicros,
+      totalMicros: normalizeCurrency(snapshot.order.total).amountMicros,
+      guestTotals: snapshot.guestTotals,
+    });
+  }
+
+  return precheckResponse(precheck, lockedOrder, createdNew ? 201 : 200);
+};
+
+export const executeCancelPrecheck = async (
+  client: CoreApiClientLike,
+  payload: { orderId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const order = await findOrderById(client, payload.orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+
+  const replay = await findPrecheckByCancelIdempotencyKey(client, payload.idempotencyKey);
+  if (replay) {
+    if (replay.orderId !== payload.orderId || replay.cancelledByStaffId !== actor.staffId) {
+      return idempotencyConflict('The idempotency key belongs to another cancellation context.');
+    }
+    await repairCancelledPrecheckOrder(client, order);
+    const refreshed = (await findOrderById(client, payload.orderId)) ?? order;
+    return precheckResponse(replay, refreshed, 200);
+  }
+
+  const active = await findActivePrecheckByOrderId(client, payload.orderId);
+  if (!active) {
+    return errorResult('PRECHECK_NOT_FOUND', 'No active precheck exists for this order.');
+  }
+
+  const cancelledAt = new Date().toISOString();
+  try {
+    await client.mutation({
+      updatePosPrecheck: {
+        __args: {
+          id: active.id,
+          data: {
+            status: 'CANCELLED',
+            activeOrderKey: null,
+            cancelledAt,
+            cancelledByStaffId: actor.staffId,
+            cancelIdempotencyKey: payload.idempotencyKey,
+          },
+        },
+        id: true,
+        orderId: true,
+        status: true,
+        cancelledAt: true,
+        cancelledByStaffId: true,
+        cancelIdempotencyKey: true,
+        activeOrderKey: true,
+        printStatus: true,
+      },
+    });
+  } catch {
+    const raced = await findPrecheckByCancelIdempotencyKey(client, payload.idempotencyKey);
+    if (!raced) return errorResult('CONFLICT', 'Precheck could not be cancelled.');
+    await repairCancelledPrecheckOrder(client, order);
+    const refreshed = (await findOrderById(client, payload.orderId)) ?? order;
+    return precheckResponse(raced, refreshed, 200);
+  }
+
+  await client.mutation({
+    updatePosOrder: {
+      __args: { id: order.id, data: { status: 'IN_PROGRESS' } },
+      id: true,
+    },
+  });
+
+  const cancelled = (await findPrecheckByCancelIdempotencyKey(client, payload.idempotencyKey)) ?? {
+    ...active,
+    status: 'CANCELLED',
+    activeOrderKey: null,
+    cancelledAt,
+    cancelledByStaffId: actor.staffId,
+    cancelIdempotencyKey: payload.idempotencyKey,
+  };
+  const editableOrder = (await findOrderById(client, payload.orderId)) ?? order;
+  return precheckResponse(cancelled, editableOrder, 200);
+};
+
 export const dispatchPosCommand = async (
   client: CoreApiClientLike,
   command: PosCommand,
@@ -1523,6 +1844,24 @@ export const dispatchPosCommand = async (
       );
     case 'printKitchenTicket':
       return executePrintKitchenTicket(
+        client,
+        {
+          orderId: payload.orderId as string,
+          idempotencyKey: payload.idempotencyKey as string,
+        },
+        actor,
+      );
+    case 'createPrecheck':
+      return executeCreatePrecheck(
+        client,
+        {
+          orderId: payload.orderId as string,
+          idempotencyKey: payload.idempotencyKey as string,
+        },
+        actor,
+      );
+    case 'cancelPrecheck':
+      return executeCancelPrecheck(
         client,
         {
           orderId: payload.orderId as string,

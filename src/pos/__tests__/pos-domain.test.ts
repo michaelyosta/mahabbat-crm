@@ -4,6 +4,8 @@ import {
   dispatchPosCommand,
   executeAddStopListEntry,
   executeClearStopListEntry,
+  executeCancelPrecheck,
+  executeCreatePrecheck,
   executeOpenOrder,
   executeOpenShift,
   executePrintKitchenTicket,
@@ -20,7 +22,8 @@ type TableKind =
   | 'posOrderLines'
   | 'posStopListEntries'
   | 'posKitchenTickets'
-  | 'posKitchenTicketLines';
+  | 'posKitchenTicketLines'
+  | 'posPrechecks';
 
 class UniqueViolationError extends Error {
   constructor(message: string) {
@@ -40,6 +43,7 @@ class FakePosDb {
     posStopListEntries: [],
     posKitchenTickets: [],
     posKitchenTicketLines: [],
+    posPrechecks: [],
   };
 
   seed(kind: TableKind, row: Row): Row {
@@ -100,6 +104,23 @@ class FakePosDb {
         (row) => row.ticketId === data.ticketId && row.orderLineId === data.orderLineId,
       );
       if (conflict) throw new UniqueViolationError('duplicate ticket line');
+      return;
+    }
+
+    if (kind === 'posPrechecks') {
+      this.assertIdempotencyUnique(this.rows.posPrechecks, data);
+      if (
+        typeof data.activeOrderKey === 'string' &&
+        this.rows.posPrechecks.some((row) => row.activeOrderKey === data.activeOrderKey)
+      ) {
+        throw new UniqueViolationError('duplicate activeOrderKey');
+      }
+      if (
+        typeof data.cancelIdempotencyKey === 'string' &&
+        this.rows.posPrechecks.some((row) => row.cancelIdempotencyKey === data.cancelIdempotencyKey)
+      ) {
+        throw new UniqueViolationError('duplicate cancelIdempotencyKey');
+      }
       return;
     }
 
@@ -202,6 +223,8 @@ class FakePosDb {
       createPosKitchenTicket: 'posKitchenTickets',
       createPosKitchenTicketLine: 'posKitchenTicketLines',
       updatePosKitchenTicket: 'posKitchenTickets',
+      createPosPrecheck: 'posPrechecks',
+      updatePosPrecheck: 'posPrechecks',
     };
 
     const kind = map[root];
@@ -227,6 +250,7 @@ class FakePosDb {
       posStopListEntries: 'posStopListEntries',
       posKitchenTickets: 'posKitchenTickets',
       posKitchenTicketLines: 'posKitchenTicketLines',
+      posPrechecks: 'posPrechecks',
     };
 
     return map[root] ?? 'posOrders';
@@ -607,6 +631,79 @@ describe('pos domain happy path', () => {
     const changed = await dispatchPosCommand(db, 'changeLineQuantity', { lineId, quantity: 1 }, waiter);
     expect(changed.status).toBe(400);
     expect((changed.body as { code: string }).code).toBe('LINE_ALREADY_SENT');
+  });
+
+  it('creates an immutable precheck snapshot, locks the order, and restores editability only after admin cancel', async () => {
+    const db = dbWithBaseline();
+    await executeOpenShift(db, { idempotencyKey: key(95) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(96) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(97) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 2, idempotencyKey: key(98) },
+      waiter,
+    );
+
+    const created = await executeCreatePrecheck(db, { orderId, idempotencyKey: key(99) }, waiter);
+    expect(created.status).toBe(201);
+    const precheckId = (created.body as { precheckId: string }).precheckId;
+    expect(db.rows.posPrechecks).toHaveLength(1);
+    expect(db.rows.posPrechecks[0].status).toBe('ACTIVE');
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.status).toBe('PRECHECK_PRINTED');
+    expect((db.rows.posPrechecks[0].totalSnapshot as { amountMicros: number }).amountMicros).toBe(
+      3_000_000_000,
+    );
+
+    const retry = await executeCreatePrecheck(db, { orderId, idempotencyKey: key(99) }, waiter);
+    expect(retry.status).toBe(200);
+    expect((retry.body as { precheckId: string }).precheckId).toBe(precheckId);
+
+    const locked = await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_B, quantity: 1, idempotencyKey: key(100) },
+      waiter,
+    );
+    expect(locked.status).toBe(400);
+    expect((locked.body as { code: string }).code).toBe('ORDER_NOT_EDITABLE');
+
+    const waiterCancel = await dispatchPosCommand(
+      db,
+      'cancelPrecheck',
+      { orderId, idempotencyKey: key(101) },
+      waiter,
+    );
+    expect(waiterCancel.status).toBe(403);
+    expect((waiterCancel.body as { code: string }).code).toBe('COMMAND_FORBIDDEN');
+
+    const admin = { staffId: OTHER_STAFF, role: 'ADMIN' as const };
+    const cancelled = await executeCancelPrecheck(
+      db,
+      { orderId, idempotencyKey: key(101) },
+      admin,
+    );
+    expect(cancelled.status).toBe(200);
+    expect(db.rows.posPrechecks[0].status).toBe('CANCELLED');
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.status).toBe('IN_PROGRESS');
+
+    const cancelRetry = await executeCancelPrecheck(
+      db,
+      { orderId, idempotencyKey: key(101) },
+      admin,
+    );
+    expect(cancelRetry.status).toBe(200);
+    expect((cancelRetry.body as { precheckId: string }).precheckId).toBe(precheckId);
+
+    const restored = await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_B, quantity: 1, idempotencyKey: key(102) },
+      waiter,
+    );
+    expect(restored.status).toBe(201);
   });
 });
 

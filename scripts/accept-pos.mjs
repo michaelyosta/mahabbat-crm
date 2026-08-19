@@ -136,13 +136,14 @@ const requireUuid = (label, value) => {
 };
 
 const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) => {
-  const [orders, guests, lines, shifts, kitchenTickets, kitchenTicketLines] = await Promise.all([
+  const [orders, guests, lines, shifts, kitchenTickets, kitchenTicketLines, prechecks] = await Promise.all([
     restGet(apiUrl, apiKey, 'posOrders'),
     restGet(apiUrl, apiKey, 'posOrderGuests'),
     restGet(apiUrl, apiKey, 'posOrderLines'),
     restGet(apiUrl, apiKey, 'posShifts'),
     restGet(apiUrl, apiKey, 'posKitchenTickets'),
     restGet(apiUrl, apiKey, 'posKitchenTicketLines'),
+    restGet(apiUrl, apiKey, 'posPrechecks'),
   ]);
   const acceptanceOrders = orders.filter((order) => tableIds.has(order.tableId));
   const acceptanceOrderIds = new Set(acceptanceOrders.map((order) => order.id));
@@ -151,6 +152,11 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
   const acceptanceTickets = kitchenTickets.filter((ticket) => acceptanceOrderIds.has(ticket.orderId));
   const acceptanceTicketIds = new Set(acceptanceTickets.map((ticket) => ticket.id));
   const acceptanceTicketLines = kitchenTicketLines.filter((line) => acceptanceTicketIds.has(line.ticketId));
+  const acceptancePrechecks = prechecks.filter((precheck) => acceptanceOrderIds.has(precheck.orderId));
+
+  for (const precheck of acceptancePrechecks) {
+    await deleteRecord(apiUrl, apiKey, 'posPrechecks', precheck.id);
+  }
 
   for (const ticketLine of acceptanceTicketLines) {
     await deleteRecord(apiUrl, apiKey, 'posKitchenTicketLines', ticketLine.id);
@@ -194,6 +200,7 @@ const reconcileAcceptanceFixtures = async (apiUrl, apiKey, tableIds, sessions) =
     guests: acceptanceGuests.length,
     lines: acceptanceLines.length,
     shifts: openAcceptanceShifts.length,
+    prechecks: acceptancePrechecks.length,
   };
 };
 
@@ -660,6 +667,103 @@ const main = async () => {
               'foreign staff cannot mutate an order they do not own',
               notOwned.status === 400 && notOwned.body?.code === 'ORDER_NOT_OWNED',
               `status ${notOwned.status}, code ${notOwned.body?.code}`,
+            );
+
+            const precheckKey = randomUUID();
+            const createPrecheck = await postCommand(apiUrl, apiKey, 'createPrecheck', admin, {
+              orderId: order2Id,
+              idempotencyKey: precheckKey,
+            });
+            const prechecksAfterCreate = (await restGet(apiUrl, apiKey, 'posPrechecks'))
+              .filter((precheck) => precheck.orderId === order2Id);
+            const activePrecheck = prechecksAfterCreate.find((precheck) => precheck.status === 'ACTIVE');
+            const lockedOrder = (await restGet(apiUrl, apiKey, 'posOrders')).find((order) => order.id === order2Id);
+            check(
+              'createPrecheck snapshots totals and locks the order',
+              [200, 201].includes(createPrecheck.status) &&
+                createPrecheck.body?.precheckId === activePrecheck?.id &&
+                activePrecheck?.printStatus === 'PRINTED' &&
+                activePrecheck?.totalSnapshot?.amountMicros === lockedOrder?.total?.amountMicros &&
+                lockedOrder?.status === 'PRECHECK_PRINTED',
+              `status ${createPrecheck.status}, prechecks=${prechecksAfterCreate.length}, orderStatus=${lockedOrder?.status}`,
+            );
+
+            const precheckRetry = await postCommand(apiUrl, apiKey, 'createPrecheck', admin, {
+              orderId: order2Id,
+              idempotencyKey: precheckKey,
+            });
+            const prechecksAfterRetry = (await restGet(apiUrl, apiKey, 'posPrechecks'))
+              .filter((precheck) => precheck.orderId === order2Id && precheck.status === 'ACTIVE');
+            check(
+              'createPrecheck retry is idempotent',
+              precheckRetry.status === 200 &&
+                precheckRetry.body?.precheckId === createPrecheck.body?.precheckId &&
+                prechecksAfterRetry.length === 1,
+              `status ${precheckRetry.status}, activePrechecks=${prechecksAfterRetry.length}`,
+            );
+
+            const lockedMutation = await postCommand(apiUrl, apiKey, 'addLine', admin, {
+              orderId: order2Id,
+              guestId: guest2Id,
+              menuItemId: menu[1 % menu.length],
+              quantity: 1,
+              idempotencyKey: randomUUID(),
+            });
+            check(
+              'PRECHECK_PRINTED rejects server-side order mutations',
+              lockedMutation.status === 400 && lockedMutation.body?.code === 'ORDER_NOT_EDITABLE',
+              `status ${lockedMutation.status}, code ${lockedMutation.body?.code}`,
+            );
+
+            const waiterCancelPrecheck = await postCommand(apiUrl, apiKey, 'cancelPrecheck', waiter, {
+              orderId: order2Id,
+              idempotencyKey: randomUUID(),
+            });
+            check(
+              'WAITER cannot cancel a precheck',
+              waiterCancelPrecheck.status === 403 && waiterCancelPrecheck.body?.code === 'COMMAND_FORBIDDEN',
+              `status ${waiterCancelPrecheck.status}, code ${waiterCancelPrecheck.body?.code}`,
+            );
+
+            const cancelPrecheckKey = randomUUID();
+            const cancelPrecheck = await postCommand(apiUrl, apiKey, 'cancelPrecheck', admin, {
+              orderId: order2Id,
+              idempotencyKey: cancelPrecheckKey,
+            });
+            const cancelledPrecheck = (await restGet(apiUrl, apiKey, 'posPrechecks'))
+              .find((precheck) => precheck.id === createPrecheck.body?.precheckId);
+            const unlockedOrder = (await restGet(apiUrl, apiKey, 'posOrders')).find((order) => order.id === order2Id);
+            check(
+              'ADMIN cancelPrecheck restores editability with audit state',
+              cancelPrecheck.status === 200 &&
+                cancelledPrecheck?.status === 'CANCELLED' &&
+                cancelledPrecheck?.cancelIdempotencyKey === cancelPrecheckKey &&
+                unlockedOrder?.status === 'IN_PROGRESS',
+              `status ${cancelPrecheck.status}, precheckStatus=${cancelledPrecheck?.status}, orderStatus=${unlockedOrder?.status}`,
+            );
+
+            const cancelRetry = await postCommand(apiUrl, apiKey, 'cancelPrecheck', admin, {
+              orderId: order2Id,
+              idempotencyKey: cancelPrecheckKey,
+            });
+            check(
+              'cancelPrecheck retry is idempotent',
+              cancelRetry.status === 200 &&
+                cancelRetry.body?.precheckId === cancelPrecheck.body?.precheckId,
+              `status ${cancelRetry.status}`,
+            );
+
+            const postCancelLine = await postCommand(apiUrl, apiKey, 'addLine', admin, {
+              orderId: order2Id,
+              guestId: guest2Id,
+              menuItemId: menu[1 % menu.length],
+              quantity: 1,
+              idempotencyKey: randomUUID(),
+            });
+            check(
+              'order is editable again after ADMIN cancelPrecheck',
+              [200, 201].includes(postCancelLine.status),
+              `status ${postCancelLine.status}`,
             );
           }
         }

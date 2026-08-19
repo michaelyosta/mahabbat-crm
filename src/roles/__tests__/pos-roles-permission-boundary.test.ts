@@ -12,6 +12,7 @@ import { POS_TABLE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-table.object';
 import { POS_ZONE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-zone.object';
 import { POS_STAFF_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-staff.object';
 import { POS_SESSION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-session.object';
+import { POS_PRECHECK_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-precheck.object';
 
 const POS_OBJECT_IDS = [
   POS_SHIFT_UNIVERSAL_IDENTIFIER,
@@ -22,6 +23,7 @@ const POS_OBJECT_IDS = [
   POS_ORDER_LINE_UNIVERSAL_IDENTIFIER,
   POS_MENU_ITEM_UNIVERSAL_IDENTIFIER,
   POS_STOP_LIST_ENTRY_UNIVERSAL_IDENTIFIER,
+  POS_PRECHECK_UNIVERSAL_IDENTIFIER,
 ];
 
 describe('Mahabbat POS Waiter role boundary', () => {
