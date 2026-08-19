@@ -12,6 +12,14 @@ import { LOYALTY_ADJUSTMENT_REQUEST_UNIVERSAL_IDENTIFIER } from 'src/objects/loy
 import { ORDER_ITEM_UNIVERSAL_IDENTIFIER } from 'src/objects/order-item.object';
 import { ORDER_UNIVERSAL_IDENTIFIER } from 'src/objects/order.object';
 import { RESERVATION_UNIVERSAL_IDENTIFIER } from 'src/objects/reservation.object';
+import { POS_MENU_ITEM_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-menu-item.object';
+import { POS_ORDER_GUEST_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-order-guest.object';
+import { POS_ORDER_LINE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-order-line.object';
+import { POS_ORDER_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-order.object';
+import { POS_SHIFT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-shift.object';
+import { POS_STOP_LIST_ENTRY_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-stop-list-entry.object';
+import { POS_TABLE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-table.object';
+import { POS_ZONE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-zone.object';
 
 export default defineApplicationRole({
   universalIdentifier: DEFAULT_ROLE_UNIVERSAL_IDENTIFIER,
@@ -69,5 +77,21 @@ export default defineApplicationRole({
       canSoftDeleteObjectRecords: false,
       canDestroyObjectRecords: false,
     },
+    ...[
+      POS_SHIFT_UNIVERSAL_IDENTIFIER,
+      POS_ZONE_UNIVERSAL_IDENTIFIER,
+      POS_TABLE_UNIVERSAL_IDENTIFIER,
+      POS_ORDER_UNIVERSAL_IDENTIFIER,
+      POS_ORDER_GUEST_UNIVERSAL_IDENTIFIER,
+      POS_ORDER_LINE_UNIVERSAL_IDENTIFIER,
+      POS_MENU_ITEM_UNIVERSAL_IDENTIFIER,
+      POS_STOP_LIST_ENTRY_UNIVERSAL_IDENTIFIER,
+    ].map((objectUniversalIdentifier) => ({
+      objectUniversalIdentifier,
+      canReadObjectRecords: true,
+      canUpdateObjectRecords: true,
+      canSoftDeleteObjectRecords: false,
+      canDestroyObjectRecords: false,
+    })),
   ],
 });

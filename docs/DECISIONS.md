@@ -287,3 +287,35 @@ expected POS model and its invariants (order identity, server commands, money
 only as CURRENCY, idempotency, no destruction of operational records) are
 recorded in `docs/POS_BOUNDARY.md`. POS is a future operational phase (domain
 discovery first), not a permanent exclusion and not a current implementation.
+
+## 2026-08-19 — ADR-2026-08-POS-1: POS is a separate layer, not a CRM Order extension
+
+The POS foundation is implemented on **own custom `pos*` objects** (Shift,
+Zone, Table, Order, OrderGuest, OrderLine, MenuItem, StopListEntry) with a
+server-side command boundary, rather than extending the CRM `Order`, for three
+reasons: (1) CRM `OrderItem` has a native UNIQUE(`orderId`, `menuItemId`)
+relation incompatible with the spec's requirement of independent identical
+lines; (2) POS orders have a different lifecycle (OPEN→IN_PROGRESS→
+PRECHECK_PRINTED→CLOSED), shift lifetime, waiter ownership, table seating and
+guests; (3) extending the CRM order model risks regressing existing reports
+without benefit. The CRM→POS pull bridge for reporting is a future slice
+outside the current boundary. Consequences: all POS objects are prefixed `pos`;
+references to `workspaceMember` (staffId/ownerStaffId) are logical TEXT UUID
+fields validated server-side at command time (not foreign keys), keeping
+standard objects untouched; money stays CURRENCY micro-units. See
+`docs/POS_DOMAIN.md`, `docs/POS_STATE_MACHINES.md`, `docs/POS_PERMISSIONS.md`,
+`docs/POS_COMMANDS.md`, `docs/POS_QA.md`.
+
+## 2026-08-19 — ADR-2026-08-POS-2: server-side command boundary with honest owner check
+
+POS mounts do not write to objects via GraphQL/REST directly. Clients call a
+single authenticated HTTP route (`/pos/command`, logic function with HMAC
+signature `x-mahabbat-signature`) which forwards to a server resolver executing
+the domain dispatcher with `{ staffId, role }` actor context. Idempotency and
+concurrency are enforced by unique indexes (idempotencyKey per object,
+UNIQUE(staffId, isOpen) for one open shift per staff, UNIQUE(tableId,
+claimToken) for one active order per table, claimToken=tableId while open).
+Waiter is server-checked as owner of the order/shift it mutates (FORBIDDEN on
+other owners). Because Twenty App exposes no real multi-user RBAC at this
+layer, the actor context is a documented platform limitation, not a full
+auth/security boundary; real authentication/sessions are a future slice.

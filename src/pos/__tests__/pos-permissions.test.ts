@@ -1,0 +1,38 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  commandAllowedForRole,
+  orderCanBeEditedBy,
+  shiftCanBeClosedBy,
+} from 'src/pos/pos-permissions';
+
+const waiter = { staffId: '10000000-0000-4000-8000-000000000001', role: 'WAITER' as const };
+const admin = { staffId: '10000000-0000-4000-8000-000000000002', role: 'ADMIN' as const };
+
+describe('pos permissions', () => {
+  it('allows slice-1 commands for both WAITER and ADMIN', () => {
+    for (const command of [
+      'openShift',
+      'closeShift',
+      'openOrder',
+      'addGuest',
+      'addLine',
+      'changeLineQuantity',
+    ] as const) {
+      expect(commandAllowedForRole(command, 'WAITER')).toBe(true);
+      expect(commandAllowedForRole(command, 'ADMIN')).toBe(true);
+    }
+  });
+
+  it('lets the owner and admins edit an order', () => {
+    expect(orderCanBeEditedBy('10000000-0000-4000-8000-000000000001', waiter)).toBe(true);
+    expect(orderCanBeEditedBy('10000000-0000-4000-8000-000000000099', waiter)).toBe(false);
+    expect(orderCanBeEditedBy('10000000-0000-4000-8000-000000000099', admin)).toBe(true);
+  });
+
+  it('lets only the shift owner or admins close a shift', () => {
+    expect(shiftCanBeClosedBy('10000000-0000-4000-8000-000000000001', waiter)).toBe(true);
+    expect(shiftCanBeClosedBy('10000000-0000-4000-8000-000000000099', waiter)).toBe(false);
+    expect(shiftCanBeClosedBy('10000000-0000-4000-8000-000000000099', admin)).toBe(true);
+  });
+});

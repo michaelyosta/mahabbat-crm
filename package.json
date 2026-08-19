@@ -19,6 +19,8 @@
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "seed:demo": "node scripts/seed-demo.mjs",
     "seed:demo:dry": "node scripts/seed-demo.mjs --dry-run",
+    "seed:pos": "node scripts/seed-pos.mjs",
+    "seed:pos:dry": "node scripts/seed-pos.mjs --dry-run",
     "identity:smoke": "node scripts/identity-import-smoke.mjs",
     "aggregate-sales:smoke": "node scripts/aggregate-sales-smoke.mjs"
   },
