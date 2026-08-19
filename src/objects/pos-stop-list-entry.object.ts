@@ -76,7 +76,7 @@ export default defineObject({
       icon: 'IconUserPlus',
       isNullable: false,
       isUIEditable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_STOP_LIST_ENTRY_CLEARED_AT_FIELD_UNIVERSAL_IDENTIFIER,

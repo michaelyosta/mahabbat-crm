@@ -32,7 +32,7 @@ export default defineObject({
       description: 'Номер или название стола',
       icon: 'IconHash',
       isNullable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_TABLE_ZONE_FIELD_UNIVERSAL_IDENTIFIER,

@@ -34,7 +34,7 @@ export default defineObject({
       description: 'Название позиции меню',
       icon: 'IconTag',
       isNullable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_MENU_ITEM_CATEGORY_FIELD_UNIVERSAL_IDENTIFIER,
@@ -53,8 +53,8 @@ export default defineObject({
       label: 'Цена',
       description: 'Актуальная цена позиции',
       icon: 'IconCash',
-      isNullable: false,
-      defaultValue: { amountMicros: '0', currencyCode: 'KZT' },
+      isNullable: true,
+      defaultValue: null,
     },
     {
       universalIdentifier: POS_MENU_ITEM_IS_ACTIVE_FIELD_UNIVERSAL_IDENTIFIER,

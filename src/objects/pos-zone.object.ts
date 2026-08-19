@@ -28,7 +28,7 @@ export default defineObject({
       description: 'Название зоны зала',
       icon: 'IconMapPin',
       isNullable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_ZONE_IS_ACTIVE_FIELD_UNIVERSAL_IDENTIFIER,

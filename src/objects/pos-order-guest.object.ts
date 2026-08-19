@@ -68,7 +68,7 @@ export default defineObject({
       description: 'Отображаемое имя гостя, например "Гость 1"',
       icon: 'IconTag',
       isNullable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_ORDER_GUEST_NAME_FIELD_UNIVERSAL_IDENTIFIER,

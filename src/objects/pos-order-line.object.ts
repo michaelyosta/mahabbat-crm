@@ -101,7 +101,7 @@ export default defineObject({
       description: 'Название позиции на момент заказа',
       icon: 'IconTag',
       isNullable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_ORDER_LINE_UNIT_PRICE_FIELD_UNIVERSAL_IDENTIFIER,
@@ -110,8 +110,8 @@ export default defineObject({
       label: 'Цена (снапшот)',
       description: 'Цена позиции на момент заказа',
       icon: 'IconCash',
-      isNullable: false,
-      defaultValue: { amountMicros: '0', currencyCode: 'KZT' },
+      isNullable: true,
+      defaultValue: null,
     },
     {
       universalIdentifier: POS_ORDER_LINE_QUANTITY_FIELD_UNIVERSAL_IDENTIFIER,
@@ -218,7 +218,7 @@ export default defineObject({
       icon: 'IconUserPlus',
       isNullable: false,
       isUIEditable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_ORDER_LINE_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER,

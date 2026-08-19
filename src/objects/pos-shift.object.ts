@@ -55,7 +55,7 @@ export default defineObject({
       icon: 'IconUser',
       isNullable: false,
       isUIEditable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_SHIFT_STATUS_FIELD_UNIVERSAL_IDENTIFIER,

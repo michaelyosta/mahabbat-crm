@@ -148,7 +148,7 @@ export default defineObject({
       icon: 'IconUser',
       isNullable: false,
       isUIEditable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_ORDER_OPENED_BY_STAFF_ID_FIELD_UNIVERSAL_IDENTIFIER,
@@ -159,7 +159,7 @@ export default defineObject({
       icon: 'IconUserPlus',
       isNullable: false,
       isUIEditable: false,
-      defaultValue: '',
+      defaultValue: "''",
     },
     {
       universalIdentifier: POS_ORDER_OPENED_AT_FIELD_UNIVERSAL_IDENTIFIER,
