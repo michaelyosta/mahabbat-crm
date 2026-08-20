@@ -10,6 +10,15 @@ Linux Node 24 Docker CLI environment and has been applied successfully to the
 same pinned Twenty `v2.29.0` App server. Standardise App development on
 Linux/WSL; do not patch Twenty core or SDK as part of Mahabbat.
 
+## POS canvas chrome (bounded UI limitation)
+
+Twenty v2.29.0 renders App page layouts inside its native navigation/header
+shell. The Front Component sandbox does not expose a supported way to hide that
+shell or enter browser fullscreen reliably. Mahabbat therefore fills the
+available App canvas and supports Twenty's native collapsed-navigation mode;
+it does not patch core for kiosk chrome removal. This is a bounded presentation
+limitation, not a POS/domain blocker and not a Twenty core modification.
+
 ## SDK limitation: strict database-level ledger immutability
 
 Twenty `v2.29.0` roles do not expose a create-only record permission or a

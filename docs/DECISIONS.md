@@ -458,3 +458,16 @@ command без выдачи staff directory браузеру. Twenty core modifi
 Browser acceptance на self-hosted `:3000` и полный 78-check API acceptance на
 `:2020`/`:3000` прошли; следующий шаг требует human review, а не дальнейшего
 автоматического расширения домена.
+
+## 2026-08-20 — POS product/UX refinement stays inside the App canvas
+
+Решение: улучшать `Касса` как touch-first App front component, а не менять
+Twenty core или POS domain. Внутри доступного canvas закреплены зоны, столы,
+меню и панель заказа; длинные workflow вынесены в sheets. При 1366×768 и
+1920×1080 scroll страницы не является частью рабочего пути: прокручиваются
+только menu/order panels.
+
+В sandbox Twenty pointer events дочерних controls могут ретаргетироваться к
+overlay. Поэтому закрытие sheets не привязано к клику по фону, а выполняется
+только явной кнопкой `×`; это сохраняет надёжный payment/touch workflow. Эта
+UI-деталь не меняет server authorization, financial rules или command API.

@@ -16,6 +16,7 @@ generated
 
 # testing
 /coverage
+/artifacts/
 
 # dev
 /dist/

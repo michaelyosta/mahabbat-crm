@@ -108,3 +108,18 @@ reference material for layout and labels only; it is not part of the App
 manifest. The read-only demo role has POS operational read permissions but
 excludes `PosStaff`/`PosSession`, so PIN hashes and session records are not
 exposed to browser reads.
+
+## POS product/UX workspace
+
+The POS front component is intentionally a presentation layer over the same
+command/read boundaries. `pos.front-component.tsx` composes the shell, zone
+navigation, table board, menu browser and persistent order panel; pure money,
+state and error-display helpers live in `pos-ui.helpers.ts`, while the isolated
+dark/touch visual language lives in `pos-ui.styles.ts`. Payment, reservation,
+stop-list and ADMIN workflows are sheets, not separate generic Twenty records.
+
+The component measures the available Twenty canvas and sets its own height so
+the page document does not become the POS scroll surface. This is a bounded
+presentation adaptation: no server/domain rules, permissions or command
+payloads changed. A 12-second read polling interval is the bounded shared-state
+refresh mechanism; the server remains authoritative.

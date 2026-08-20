@@ -113,6 +113,13 @@ temporary handoff and wait for the user's decision on the next phase.
   → guests/lines → print → precheck → payment → close/reload; the same 78/78
   live API acceptance passed on `:2020` and `:3000`. Twenty core changes: 0.
 
+- [x] POS Product/UX refinement — the existing operational UI is now a
+  three-column touch workspace with a persistent order panel, explicit table
+  and kitchen/precheck states, internal rather than document scrolling, and
+  reservation/payment/admin sheets. Browser QA passed at 1920×1080 and
+  1366×768; `:2020`/`:3000` command acceptance remains 78/78. Twenty core
+  changes: 0.
+
 ## NEXT
 
 - `HUMAN PRODUCT REVIEW / HARDWARE DISCOVERY` — review the pilot UI with the

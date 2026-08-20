@@ -358,22 +358,25 @@ product shell (Dashboard-first navigation, Russian labels, clean Orders/Loyalty
 views and discoverable business views) is complete; the generic scaffold page
 has been removed.
 
-The current POS slice is the server-side operational foundation through
-Kitchen Print, Stop List, Precheck lock, payments, reservations/prepayments,
-ADMIN void/transfers and the first touch-oriented operational UI:
+The current POS checkpoint is the product/UX refinement of the already proven
+operational foundation through Kitchen Print, Stop List, Precheck lock,
+payments, reservations/prepayments and ADMIN void/transfers:
 PosStaff PIN/card -> PosSession -> active Shift -> free Table -> POS Order ->
 multiple Guests -> independent OrderLines -> server totals -> persistence.
-The UI is mounted as the standalone `Касса` page layout/front component. It is
-connected to real read APIs and the signed POS command boundary; kitchen,
-precheck and cancellation adapters are still mock-only.
+The UI is mounted as the standalone `Касса` page layout/front component. Its
+touch workspace now has a compact header, zones, table board, menu and a
+persistent order panel; reservation, payment and admin workflows use sheets
+instead of page-length forms. It remains connected to real read APIs and the
+signed POS command boundary; kitchen, precheck and cancellation adapters are
+still mock-only.
 
 # Следующий лучший шаг
 
 CRM foundation, aggregate import, Dashboard, Reservations, Demo-ready shell and
-PRE-POS hardening are complete. POS Slices 1–7 are PASS on both runtime
-targets, including the real `Касса` UI flow on self-hosted `:3000`. The next
-phase is human review and bounded hardware/printer/fiscal-payment discovery;
-do not start it automatically.
+PRE-POS hardening are complete. POS Slices 1–7 and the product/UX refinement
+are PASS on both runtime targets, including the real `Касса` UI flow on
+self-hosted `:3000`. The next phase is human review and bounded
+hardware/printer/fiscal-payment discovery; do not start it automatically.
 
 ## P0 loyalty write boundary status
 
@@ -452,3 +455,22 @@ do not start it automatically.
 - Local gates: lint, typecheck and 230 unit tests pass. Both pinned targets
   passed the full 78-check POS acceptance after the role update. SDK replan on
   `:2020` and `:3000` reports `No changes`; Twenty core modifications remain 0.
+
+## POS product/UX refinement — 2026-08-20
+
+- The same `Касса` front component was refactored into a three-column touch
+  workspace: zones, table/menu workspace and a persistent order panel. Table
+  states are explicit (free, own/other order, reservation, overdue, precheck
+  and partial payment); menu and order lists scroll internally while total and
+  primary actions stay visible.
+- Reservation, payment, stop-list and ADMIN controls are bounded sheets. A
+  cancellation/transfer/no-show confirmation is explicit; normal table, guest,
+  dish and kitchen actions are immediate. UI errors map to operational Russian
+  copy without changing the command contract.
+- Browser checks: PIN login, hall/table states, guest/order workflow, stop-list
+  visual state, overdue reservation, precheck lock, payment sheet and admin
+  sheet passed. The root fits the available Twenty canvas at 1920×1080 and
+  1366×768 with `document` scroll at zero; only panel scrolling remains.
+- Local gates: lint/typecheck pass; unit tests are 236/236. The unchanged
+  78-check live API harness passed on both `:2020` and `:3000`; both Linux SDK
+  replans are clean. Twenty core modifications remain 0.

@@ -1,174 +1,2334 @@
-import { useCallback, useEffect, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
 import { defineFrontComponent } from 'twenty-sdk/define';
 
 import { MAHABBAT_POS_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
+import {
+  commandError,
+  dateTime,
+  formatMicrosForInput,
+  formatNegativeTimer,
+  formatShiftDuration,
+  initials,
+  isActiveOrder,
+  isOverdueReservation,
+  listRows,
+  micros,
+  money,
+  parseMoneyInputToMicros,
+  tableVisualState,
+  timeOnly,
+  uuid,
+  type PosRow,
+  type PosSession,
+  type PosTableVisualState,
+} from 'src/front-components/pos-ui.helpers';
+import { POS_UI_CSS } from 'src/front-components/pos-ui.styles';
 
-type Currency = { amountMicros?: number | string | null; currencyCode?: string | null };
-type AnyRow = Record<string, any> & { id: string };
-type Session = { sessionToken: string; staff: { id: string; displayName: string; role: 'WAITER' | 'ADMIN' } };
-type ApiEnvelope = { status?: string; message?: string; code?: string; [key: string]: any };
+type ApiEnvelope = {
+  status?: string;
+  message?: string;
+  code?: string;
+  [key: string]: any;
+};
+
+type SheetName =
+  | 'reservation'
+  | 'payment'
+  | 'admin'
+  | 'void'
+  | 'stop-list'
+  | 'session'
+  | 'confirm'
+  | null;
+
+type PendingAction = {
+  title: string;
+  description: string;
+  command: string;
+  payload: Record<string, unknown>;
+  success: string;
+  returnTo: Exclude<SheetName, 'confirm' | null>;
+  danger?: boolean;
+};
 
 const rest = new RestApiClient();
 
-const css = `
-  .mah-pos{min-height:100%;height:100%;overflow:auto;background:#0b0b0c;color:#f5f2eb;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-  .mah-pos *{box-sizing:border-box}.mah-pos button,.mah-pos input,.mah-pos select{font:inherit}.mah-pos button{cursor:pointer}
-  .mah-pos-login{min-height:100%;display:grid;place-items:center;padding:24px;background:radial-gradient(850px 500px at 50% -15%,rgba(128,91,55,.24),transparent 60%),#0b0b0c}
-  .mah-pos-login-card{width:min(440px,100%);border:1px solid #39352f;border-radius:22px;background:#151517;padding:30px;box-shadow:0 18px 45px rgba(0,0,0,.34)}
-  .mah-pos-mark{width:48px;height:48px;border:1px solid #66553a;border-radius:15px;display:grid;place-items:center;color:#c8ad77;font:700 27px Georgia,serif;background:#201b13;margin-bottom:18px}
-  .mah-pos-title{font-size:28px;margin:0 0 5px;letter-spacing:-.03em}.mah-pos-sub{color:#96928a;margin:0 0 24px}
-  .mah-pos-pin{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:15px}.mah-pos-pin button{height:56px;border:1px solid #39393e;border-radius:12px;background:#202024;color:#f5f2eb;font-size:20px}.mah-pos-pin button:hover{border-color:#c8ad77;background:#29241c}
-  .mah-pos-pin-clear{grid-column:span 2}.mah-pos-input,.mah-pos-select{width:100%;height:48px;border:1px solid #39393e;border-radius:11px;background:#111113;color:#f5f2eb;padding:0 12px;outline:none}.mah-pos-input:focus,.mah-pos-select:focus{border-color:#c8ad77}
-  .mah-pos-top{position:sticky;top:0;z-index:4;display:flex;align-items:center;gap:18px;min-height:70px;padding:10px 18px;border-bottom:1px solid #29292d;background:rgba(11,11,12,.96);backdrop-filter:blur(12px)}
-  .mah-pos-brand{display:flex;align-items:center;gap:10px;min-width:190px;font-weight:720}.mah-pos-brand b{color:#c8ad77;font:700 25px Georgia,serif}.mah-pos-brand small{display:block;color:#96928a;font-size:10px;letter-spacing:.12em;text-transform:uppercase}
-  .mah-pos-top-actions{display:flex;align-items:center;gap:8px;margin-left:auto}.mah-pos-status{display:flex;align-items:center;gap:8px;color:#b9b4ab;font-size:13px}.mah-pos-dot{width:8px;height:8px;border-radius:50%;background:#7fc29a;box-shadow:0 0 0 4px rgba(127,194,154,.1)}
-  .mah-pos-shell{display:grid;grid-template-columns:minmax(160px,220px) minmax(370px,1fr) minmax(340px,420px);min-height:calc(100vh - 70px)}
-  .mah-pos-sidebar{padding:14px 10px;border-right:1px solid #29292d;background:#0f0f10}.mah-pos-section-label{padding:8px 9px;color:#6f6c66;font-size:11px;letter-spacing:.12em;text-transform:uppercase}.mah-pos-zone{width:100%;min-height:50px;padding:0 12px;margin:3px 0;text-align:left;border:1px solid transparent;border-radius:11px;background:transparent;color:#aca9a3}.mah-pos-zone.active,.mah-pos-zone:hover{background:#1a1815;border-color:#3b3429;color:#f4efe5}.mah-pos-mini{margin-top:16px;padding:12px;border:1px solid #29292d;border-radius:12px;background:#111113;color:#aaa69e;font-size:12px}.mah-pos-mini strong{display:block;color:#f5f2eb;font-size:13px;margin-bottom:4px}
-  .mah-pos-main{min-width:0;padding:17px;overflow:auto}.mah-pos-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:15px}.mah-pos-toolbar h2{margin:0;font-size:20px;letter-spacing:-.025em}.mah-pos-toolbar span{color:#96928a;font-size:12px}.mah-pos-spacer{flex:1}
-  .mah-pos-table-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:11px}.mah-pos-table{min-height:112px;padding:14px;text-align:left;border:1px solid #35353a;border-radius:15px;background:linear-gradient(180deg,#19191b,#151517);color:#f5f2eb}.mah-pos-table:hover{border-color:#c8ad77;transform:translateY(-1px)}.mah-pos-table.occupied{border-color:#704b52}.mah-pos-table.reserved{border-color:#a77c3d}.mah-pos-table strong{display:block;font-size:18px}.mah-pos-table small{display:block;color:#96928a;margin-top:8px}.mah-pos-table .mah-pos-table-total{color:#c8ad77;font-weight:700;margin-top:8px}
-  .mah-pos-menu{margin-top:22px}.mah-pos-menu-head{display:flex;align-items:end;gap:10px;margin-bottom:10px}.mah-pos-menu-head h3{margin:0;font-size:17px}.mah-pos-menu-head span{color:#96928a;font-size:12px}.mah-pos-search{max-width:260px;margin-left:auto}.mah-pos-menu-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}.mah-pos-dish{min-height:122px;padding:13px;text-align:left;border:1px solid #29292d;border-radius:14px;background:#151517;color:#f5f2eb}.mah-pos-dish:hover{border-color:#c8ad77;background:#1b1a1a}.mah-pos-dish.disabled{opacity:.42;cursor:not-allowed}.mah-pos-dish b{display:block;line-height:1.25}.mah-pos-dish small{display:block;margin-top:8px;color:#96928a}.mah-pos-dish strong{display:block;margin-top:15px;color:#e6dfd2}.mah-pos-category{display:inline-flex;min-height:38px;align-items:center;padding:0 12px;margin:0 5px 8px 0;border:1px solid #29292d;border-radius:10px;background:#111113;color:#96928a}.mah-pos-category.active{border-color:#6b593b;color:#f4efe5;background:#201b13}
-  .mah-pos-panel{padding:17px;border-left:1px solid #29292d;background:#111113;overflow:auto}.mah-pos-panel h2{margin:0;font-size:19px}.mah-pos-panel h3{margin:17px 0 9px;font-size:14px;color:#c8ad77}.mah-pos-muted{color:#96928a;font-size:12px}.mah-pos-guest-list{display:flex;gap:7px;overflow:auto;padding:9px 0}.mah-pos-guest{min-width:87px;min-height:48px;padding:8px;text-align:left;border:1px solid #39393e;border-radius:10px;background:#1a1a1d;color:#b9b4ab}.mah-pos-guest.active{border-color:#c8ad77;color:#f4efe5;background:#201b13}.mah-pos-lines{display:grid;gap:7px}.mah-pos-line{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:10px;border:1px solid #29292d;border-radius:10px;background:#151517}.mah-pos-line b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mah-pos-line small{color:#96928a}.mah-pos-line-actions{display:flex;align-items:center;gap:4px}.mah-pos-line-actions button{width:32px;height:32px;border:1px solid #39393e;border-radius:8px;background:#202024;color:#f5f2eb}.mah-pos-chip{display:inline-flex;align-items:center;min-height:24px;padding:0 7px;border-radius:6px;font-size:10px;background:#242429;color:#96928a}.mah-pos-chip.sent{color:#7fc29a}.mah-pos-chip.unsent{color:#d0a96c}.mah-pos-chip.voided{color:#d57a7a}.mah-pos-totals{display:grid;gap:5px;margin:14px 0;padding-top:12px;border-top:1px solid #29292d}.mah-pos-total-row{display:flex;justify-content:space-between;gap:12px;color:#b9b4ab}.mah-pos-total-row.total{font-size:20px;font-weight:750;color:#f4efe5}.mah-pos-total-row.total strong{color:#c8ad77}.mah-pos-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0}.mah-pos-btn{min-height:48px;padding:0 13px;border:1px solid #3a393a;border-radius:10px;background:#202024;color:#f5f2eb}.mah-pos-btn:hover{border-color:#c8ad77}.mah-pos-btn.primary{border-color:#765f39;background:#3a2b18;color:#f4efe5}.mah-pos-btn.danger{border-color:#70454d;color:#efb3b3;background:#28171b}.mah-pos-btn:disabled{opacity:.42;cursor:not-allowed}.mah-pos-notice{margin:9px 0;padding:10px 12px;border:1px solid #4a4437;border-radius:9px;background:#211c14;color:#dbc69f;font-size:12px}.mah-pos-error{margin:9px 0;padding:10px 12px;border:1px solid #70454d;border-radius:9px;background:#28171b;color:#efb3b3;font-size:12px}.mah-pos-form{display:grid;gap:8px}.mah-pos-pay{display:grid;grid-template-columns:1fr 1fr;gap:8px}.mah-pos-pay label{color:#96928a;font-size:11px}.mah-pos-pay label>*{margin-top:4px}.mah-pos-reservation{padding:12px;border:1px solid #29292d;border-radius:12px;background:#151517}.mah-pos-reservation-row{display:flex;justify-content:space-between;gap:8px;font-size:12px;padding:6px 0;border-bottom:1px solid #29292d}.mah-pos-reservation-row:last-child{border-bottom:0}.mah-pos-overdue{color:#d57a7a}.mah-pos-divider{height:1px;background:#29292d;margin:16px 0}
-  @media(max-width:1050px){.mah-pos-shell{grid-template-columns:150px minmax(300px,1fr)}.mah-pos-panel{grid-column:1/-1;border-left:0;border-top:1px solid #29292d}.mah-pos-brand{min-width:150px}}@media(max-width:700px){.mah-pos-top{flex-wrap:wrap}.mah-pos-shell{display:block}.mah-pos-sidebar{display:flex;overflow:auto;border-right:0;border-bottom:1px solid #29292d}.mah-pos-zone{min-width:120px}.mah-pos-main,.mah-pos-panel{padding:12px}.mah-pos-menu-grid,.mah-pos-table-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.mah-pos-top-actions{margin-left:0}}
-  .mah-pos-admin-transfer-waiter,.mah-pos-panel .mah-pos-form > .mah-pos-select:nth-child(2){display:none}
-`;
+const CORE_COLLECTIONS = [
+  'posZones',
+  'posTables',
+  'posOrders',
+  'posOrderGuests',
+  'posOrderLines',
+  'posMenuItems',
+  'posShifts',
+  'posReservations',
+  'posStopListEntries',
+  'posKitchenTickets',
+  'posKitchenTicketLines',
+  'posPrechecks',
+  'posPayments',
+  'posPaymentMethods',
+  'posPrepayments',
+] as const;
 
-const uuid = (): string => {
-  const bytes = new Uint8Array(16);
-  try { globalThis.crypto?.getRandomValues(bytes); } catch { for (let i = 0; i < bytes.length; i += 1) bytes[i] = (Date.now() + i * 31 + Math.random() * 255) & 255; }
-  bytes[6] = (bytes[6] & 0x0f) | 0x40; bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+const Sheet = ({
+  title,
+  subtitle,
+  onClose,
+  children,
+  footer,
+  wide = false,
+}: {
+  title: string;
+  subtitle?: string;
+  onClose: () => void;
+  children: ReactNode;
+  footer?: ReactNode;
+  wide?: boolean;
+}) => (
+  <div className="mah-pos-overlay" role="presentation">
+    <section
+      className={`mah-pos-sheet ${wide ? 'wide' : ''}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+    >
+      <header className="mah-pos-sheet-head">
+        <div>
+          <h2>{title}</h2>
+          {subtitle && <p>{subtitle}</p>}
+        </div>
+        <button
+          type="button"
+          className="mah-pos-icon-btn mah-pos-sheet-close"
+          aria-label="Закрыть"
+          onClick={onClose}
+        >
+          ×
+        </button>
+      </header>
+      <div className="mah-pos-sheet-body">{children}</div>
+      {footer && <footer className="mah-pos-sheet-footer">{footer}</footer>}
+    </section>
+  </div>
+);
+
+const LoginView = ({
+  pin,
+  busy,
+  error,
+  onPinChange,
+  onLogin,
+}: {
+  pin: string;
+  busy: boolean;
+  error: string;
+  onPinChange: (value: string) => void;
+  onLogin: () => void;
+}) => (
+  <div className="mah-pos-login">
+    <div className="mah-pos-login-card">
+      <div className="mah-pos-mark">M</div>
+      <h1 className="mah-pos-title">Mahabbat POS</h1>
+      <p className="mah-pos-sub">Вход сотрудника в операционную кассу</p>
+      <input
+        className="mah-pos-input mah-pos-pin-display"
+        aria-label="PIN"
+        inputMode="numeric"
+        type="password"
+        value={pin}
+        onChange={(event) => onPinChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') onLogin();
+        }}
+        placeholder="••••"
+        autoFocus
+      />
+      <div className="mah-pos-pin">
+        {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => (
+          <button
+            type="button"
+            key={digit}
+            onClick={() => onPinChange(`${pin}${digit}`)}
+          >
+            {digit}
+          </button>
+        ))}
+        <button
+          type="button"
+          className="mah-pos-pin-clear"
+          onClick={() => onPinChange('')}
+        >
+          Очистить
+        </button>
+        <button type="button" onClick={() => onPinChange(pin.slice(0, -1))}>
+          ⌫
+        </button>
+      </div>
+      <button
+        type="button"
+        className="mah-pos-btn primary"
+        style={{ width: '100%', marginTop: 14 }}
+        disabled={busy}
+        onClick={onLogin}
+      >
+        {busy ? 'Входим…' : 'Войти'}
+      </button>
+      {error && <div className="mah-pos-toast error">{error}</div>}
+      <div className="mah-pos-login-hint">PIN хранится только на сервере</div>
+    </div>
+  </div>
+);
+
+const PosHeader = ({
+  session,
+  activeShift,
+  reservationCount,
+  overdueCount,
+  now,
+  syncing,
+  onReservation,
+  onSessionMenu,
+}: {
+  session: PosSession;
+  activeShift?: PosRow;
+  reservationCount: number;
+  overdueCount: number;
+  now: number;
+  syncing: boolean;
+  onReservation: () => void;
+  onSessionMenu: () => void;
+}) => (
+  <header className="mah-pos-top">
+    <div className="mah-pos-brand">
+      <div className="mah-pos-brand-mark">M</div>
+      <div>
+        Mahabbat
+        <small>restaurant POS</small>
+      </div>
+    </div>
+    <button
+      type="button"
+      className={`mah-pos-shift-pill ${activeShift ? 'open' : ''}`}
+      onClick={onSessionMenu}
+    >
+      <i className="mah-pos-dot" />
+      {activeShift
+        ? `Смена открыта · ${formatShiftDuration(activeShift.openedAt, now)}`
+        : 'Смена закрыта'}
+    </button>
+    <button
+      type="button"
+      className="mah-pos-top-action"
+      onClick={onReservation}
+    >
+      Брони · {reservationCount}
+      {overdueCount > 0 && <span>⚠ {overdueCount}</span>}
+    </button>
+    <div className="mah-pos-top-actions">
+      <div className={`mah-pos-sync ${syncing ? 'loading' : ''}`}>
+        <i />
+        {syncing ? 'Синхронизация' : 'Данные актуальны'}
+      </div>
+      <div className="mah-pos-staff">
+        <div className="mah-pos-avatar">
+          {initials(session.staff.displayName)}
+        </div>
+        <div className="mah-pos-staff-copy">
+          <strong>{session.staff.displayName}</strong>
+          <small>
+            {session.staff.role === 'ADMIN' ? 'Администратор' : 'Официант'}
+          </small>
+        </div>
+      </div>
+      <button
+        type="button"
+        className="mah-pos-icon-btn"
+        aria-label="Действия сессии"
+        onClick={onSessionMenu}
+      >
+        ⋯
+      </button>
+    </div>
+  </header>
+);
+
+const ZoneNavigation = ({
+  zones,
+  zoneId,
+  reservations,
+  now,
+  onZone,
+  onReservations,
+}: {
+  zones: PosRow[];
+  zoneId: string | null;
+  reservations: PosRow[];
+  now: number;
+  onZone: (id: string) => void;
+  onReservations: () => void;
+}) => {
+  const overdue = reservations.filter((item) =>
+    isOverdueReservation(item, now),
+  ).length;
+  return (
+    <aside className="mah-pos-sidebar">
+      <div className="mah-pos-section-label">Зоны</div>
+      <div className="mah-pos-zones">
+        {zones.map((zone) => (
+          <button
+            type="button"
+            className={`mah-pos-zone ${zone.id === zoneId ? 'active' : ''}`}
+            key={zone.id}
+            onClick={() => onZone(zone.id)}
+          >
+            {zone.name}
+          </button>
+        ))}
+      </div>
+      <div className="mah-pos-sidebar-bottom">
+        <button
+          type="button"
+          className={`mah-pos-sidebar-card ${overdue ? 'alert' : ''}`}
+          onClick={onReservations}
+        >
+          <strong>Брони · {reservations.length}</strong>
+          <small>
+            {overdue ? `${overdue} просрочено` : 'Открыть список'}
+          </small>
+        </button>
+      </div>
+    </aside>
+  );
 };
 
-const micros = (value: Currency | number | string | null | undefined): number => {
-  if (typeof value === 'object' && value) return Number(value.amountMicros ?? 0);
-  return Number(value ?? 0);
+const tableStateCopy: Record<
+  PosTableVisualState,
+  { label: string; icon: string }
+> = {
+  free: { label: 'Свободен', icon: '○' },
+  'my-order': { label: 'Мой заказ', icon: '●' },
+  'other-order': { label: 'Другой официант', icon: '◆' },
+  reserved: { label: 'Бронь', icon: '◷' },
+  overdue: { label: 'Просрочено', icon: '!' },
+  precheck: { label: 'Пречек', icon: '▣' },
+  payment: { label: 'Частично оплачено', icon: '₸' },
 };
-const money = (value: Currency | number | string | null | undefined): string =>
-  `${new Intl.NumberFormat('ru-KZ', { maximumFractionDigits: 0 }).format(Math.round(micros(value) / 1_000_000))} ₸`;
-const dateTime = (value?: string | null): string => value ? new Intl.DateTimeFormat('ru-KZ', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)) : '—';
-const listRows = <T extends AnyRow>(payload: any, plural: string): T[] => payload?.data?.[plural] ?? [];
-const activeOrder = (order: AnyRow | undefined): boolean => Boolean(order && ['OPEN', 'IN_PROGRESS', 'PRECHECK_PRINTED'].includes(order.status));
-const isOverdue = (reservation: AnyRow): boolean => Boolean(reservation.scheduledAt && new Date(reservation.scheduledAt).getTime() < Date.now() && reservation.status === 'ACTIVE');
-const commandError = (error: unknown): string => {
-  const body = (error as any)?.body;
-  return body?.message || body?.code || (error instanceof Error ? error.message : 'Операция не выполнена');
+
+const TableBoard = ({
+  zoneName,
+  tables,
+  orders,
+  reservations,
+  staffNames,
+  currentStaffId,
+  selectedTableId,
+  now,
+  loading,
+  onSelect,
+}: {
+  zoneName: string;
+  tables: PosRow[];
+  orders: PosRow[];
+  reservations: PosRow[];
+  staffNames: Map<string, string>;
+  currentStaffId: string;
+  selectedTableId: string | null;
+  now: number;
+  loading: boolean;
+  onSelect: (table: PosRow) => void;
+}) => (
+  <section className="mah-pos-board">
+    <div className="mah-pos-section-head">
+      <h2>{zoneName || 'Зал'}</h2>
+      <span>Выберите стол</span>
+      <div className="mah-pos-spacer" />
+      <span className="mah-pos-count">{tables.length} столов</span>
+    </div>
+    <div className="mah-pos-table-grid">
+      {loading
+        ? Array.from({ length: 8 }, (_, index) => (
+            <div className="mah-pos-skeleton" key={index} />
+          ))
+        : tables.map((table) => {
+            const order = orders.find(
+              (row) => row.tableId === table.id && isActiveOrder(row),
+            );
+            const reservation = reservations.find(
+              (row) => row.tableId === table.id,
+            );
+            const visualState = tableVisualState({
+              order,
+              reservation,
+              currentStaffId,
+              now,
+            });
+            const copy = tableStateCopy[visualState];
+            const owner = order?.ownerStaffId
+              ? staffNames.get(order.ownerStaffId)
+              : null;
+            const reservationMeta = reservation
+              ? `${timeOnly(reservation.scheduledAt)}${reservation.guestName ? ` · ${reservation.guestName}` : ''}`
+              : '';
+            const ownerMeta =
+              visualState === 'other-order'
+                ? owner || 'Другой официант'
+                : visualState === 'my-order'
+                  ? 'Ваш стол'
+                  : '';
+            return (
+              <button
+                type="button"
+                className={`mah-pos-table ${visualState} ${selectedTableId === table.id ? 'selected' : ''}`}
+                key={table.id}
+                aria-label={`Стол ${table.number}: ${copy.label}`}
+                onClick={() => onSelect(table)}
+              >
+                <div className="mah-pos-table-top">
+                  <strong>Стол {table.number}</strong>
+                  <span>{copy.icon}</span>
+                </div>
+                <span className="mah-pos-table-state">{copy.label}</span>
+                {(reservationMeta || ownerMeta) && (
+                  <span
+                    className={`mah-pos-table-meta ${visualState === 'overdue' ? 'mah-pos-negative-time' : ''}`}
+                  >
+                    {visualState === 'overdue'
+                      ? `${formatNegativeTimer(reservation?.scheduledAt, now)}${reservation?.guestName ? ` · ${reservation.guestName}` : ''}`
+                      : reservationMeta || ownerMeta}
+                  </span>
+                )}
+                {order && (
+                  <span className="mah-pos-table-total">
+                    {money(order.total)}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+    </div>
+  </section>
+);
+
+const MenuBrowser = ({
+  menu,
+  stopList,
+  search,
+  category,
+  selectedGuest,
+  orderLocked,
+  busy,
+  onSearch,
+  onCategory,
+  onItem,
+  onStopList,
+}: {
+  menu: PosRow[];
+  stopList: Set<string>;
+  search: string;
+  category: string;
+  selectedGuest?: PosRow;
+  orderLocked: boolean;
+  busy: boolean;
+  onSearch: (value: string) => void;
+  onCategory: (value: string) => void;
+  onItem: (item: PosRow) => void;
+  onStopList: () => void;
+}) => {
+  const categories = useMemo(
+    () => [
+      'Все',
+      ...Array.from(
+        new Set(menu.map((item) => item.category).filter(Boolean)),
+      ),
+    ],
+    [menu],
+  );
+  const filteredMenu = useMemo(
+    () =>
+      menu.filter(
+        (item) =>
+          (category === 'Все' || item.category === category) &&
+          String(item.name ?? '')
+            .toLowerCase()
+            .includes(search.trim().toLowerCase()),
+      ),
+    [category, menu, search],
+  );
+  const hasOrder = Boolean(selectedGuest);
+  const context = orderLocked
+    ? 'Заказ заблокирован пречеком'
+    : selectedGuest
+      ? `Добавляем: ${selectedGuest.displayNumber ?? selectedGuest.name ?? 'гость'}`
+      : 'Сначала выберите или откройте стол';
+
+  return (
+    <section className="mah-pos-menu">
+      <div className="mah-pos-menu-head">
+        <h3>Меню</h3>
+        <span className="mah-pos-menu-context">{context}</span>
+        <input
+          className="mah-pos-input mah-pos-search"
+          value={search}
+          onChange={(event) => onSearch(event.target.value)}
+          placeholder="Поиск блюда"
+          aria-label="Поиск блюда"
+        />
+      </div>
+      <div className="mah-pos-menu-tools">
+        <div className="mah-pos-categories">
+          {categories.map((item) => (
+            <button
+              type="button"
+              key={item}
+              className={`mah-pos-category ${item === category ? 'active' : ''}`}
+              onClick={() => onCategory(item)}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="mah-pos-stop-button"
+          onClick={onStopList}
+        >
+          Стоп-лист · {stopList.size}
+        </button>
+      </div>
+      <div className="mah-pos-menu-grid">
+        {filteredMenu.length ? (
+          filteredMenu.map((item) => {
+            const stopped = stopList.has(item.id);
+            return (
+              <button
+                type="button"
+                className={`mah-pos-dish ${stopped ? 'stopped' : ''} ${!hasOrder && !stopped ? 'preview' : ''}`}
+                key={item.id}
+                disabled={stopped || !hasOrder || orderLocked || busy}
+                onClick={() => onItem(item)}
+              >
+                {stopped && (
+                  <span className="mah-pos-stopped-badge">
+                    × НЕТ В НАЛИЧИИ
+                  </span>
+                )}
+                <b>{item.name}</b>
+                <strong>{money(item.price)}</strong>
+              </button>
+            );
+          })
+        ) : (
+          <div className="mah-pos-menu-empty">Ничего не найдено</div>
+        )}
+      </div>
+    </section>
+  );
+};
+
+const EmptyOrderPanel = ({
+  session,
+  activeShift,
+  recentOrders,
+  tables,
+  onOrder,
+  onOpenShift,
+}: {
+  session: PosSession;
+  activeShift?: PosRow;
+  recentOrders: PosRow[];
+  tables: PosRow[];
+  onOrder: (order: PosRow) => void;
+  onOpenShift: () => void;
+}) => (
+  <div className="mah-pos-empty-panel">
+    <div className="mah-pos-panel-meta">
+      {session.staff.displayName} ·{' '}
+      {activeShift ? 'смена открыта' : 'смена закрыта'}
+    </div>
+    <div className="mah-pos-empty-hero">
+      <div className="mah-pos-empty-icon">⌖</div>
+      <h2>{activeShift ? 'Выберите стол' : 'Откройте смену'}</h2>
+      <p>
+        {activeShift
+          ? 'Свободный стол можно открыть или забронировать. Занятый стол откроет текущий заказ.'
+          : 'После открытия смены станут доступны столы и новые заказы.'}
+      </p>
+      {!activeShift && (
+        <button
+          type="button"
+          className="mah-pos-btn primary"
+          style={{ marginTop: 15 }}
+          onClick={onOpenShift}
+        >
+          Открыть смену
+        </button>
+      )}
+    </div>
+    {recentOrders.length > 0 && (
+      <div className="mah-pos-recent">
+        <h3>Ваши активные столы</h3>
+        {recentOrders.slice(0, 3).map((order) => {
+          const table = tables.find((item) => item.id === order.tableId);
+          return (
+            <button type="button" key={order.id} onClick={() => onOrder(order)}>
+              <span>Стол {table?.number ?? '—'}</span>
+              <strong>{money(order.total)}</strong>
+            </button>
+          );
+        })}
+      </div>
+    )}
+  </div>
+);
+
+const TableContextPanel = ({
+  table,
+  reservation,
+  activeShift,
+  busy,
+  now,
+  onOpen,
+  onReserve,
+}: {
+  table: PosRow;
+  reservation?: PosRow;
+  activeShift?: PosRow;
+  busy: boolean;
+  now: number;
+  onOpen: () => void;
+  onReserve: () => void;
+}) => (
+  <div className="mah-pos-table-context">
+    <span className="mah-pos-table-context-status">
+      {reservation
+        ? isOverdueReservation(reservation, now)
+          ? 'БРОНЬ ПРОСРОЧЕНА'
+          : 'СТОЛ ЗАБРОНИРОВАН'
+        : 'СВОБОДНЫЙ СТОЛ'}
+    </span>
+    <div className="mah-pos-table-context-main">
+      <div className="mah-pos-empty-icon">{reservation ? '◷' : '○'}</div>
+      <h2>Стол {table.number}</h2>
+      <p>
+        {activeShift
+          ? 'Выберите действие'
+          : 'Для открытия заказа сначала откройте смену'}
+      </p>
+      {reservation && (
+        <div className="mah-pos-reservation-card">
+          <strong>
+            {isOverdueReservation(reservation, now)
+              ? `Просрочено ${formatNegativeTimer(reservation.scheduledAt, now)}`
+              : timeOnly(reservation.scheduledAt)}
+          </strong>
+          <span>{reservation.guestName || 'Имя не указано'}</span>
+          {reservation.phone && <span>{reservation.phone}</span>}
+        </div>
+      )}
+    </div>
+    <div className="mah-pos-actions">
+      <button
+        type="button"
+        className="mah-pos-btn primary"
+        disabled={!activeShift || busy}
+        onClick={onOpen}
+      >
+        {reservation ? 'Открыть заказ' : 'Открыть стол'}
+      </button>
+      <button
+        type="button"
+        className="mah-pos-btn"
+        disabled={busy}
+        onClick={onReserve}
+      >
+        {reservation ? 'Бронь' : 'Забронировать'}
+      </button>
+    </div>
+  </div>
+);
+
+const OrderPanel = ({
+  session,
+  order,
+  table,
+  guests,
+  lines,
+  selectedGuest,
+  precheck,
+  totalMicros,
+  prepaidMicros,
+  paidMicros,
+  remainingMicros,
+  unsentCount,
+  sentCount,
+  busy,
+  onGuest,
+  onAddGuest,
+  onQuantity,
+  onPrint,
+  onPrecheck,
+  onPayment,
+  onCloseOrder,
+  onAdmin,
+}: {
+  session: PosSession;
+  order: PosRow;
+  table?: PosRow;
+  guests: PosRow[];
+  lines: PosRow[];
+  selectedGuest?: PosRow;
+  precheck?: PosRow;
+  totalMicros: number;
+  prepaidMicros: number;
+  paidMicros: number;
+  remainingMicros: number;
+  unsentCount: number;
+  sentCount: number;
+  busy: boolean;
+  onGuest: (id: string) => void;
+  onAddGuest: () => void;
+  onQuantity: (line: PosRow, quantity: number) => void;
+  onPrint: () => void;
+  onPrecheck: () => void;
+  onPayment: () => void;
+  onCloseOrder: () => void;
+  onAdmin: () => void;
+}) => {
+  const locked = Boolean(precheck);
+  return (
+    <>
+      <header className="mah-pos-panel-head">
+        <div className="mah-pos-panel-title">
+          <h2>Стол {table?.number ?? '—'}</h2>
+          <span
+            className={`mah-pos-status-chip ${locked ? 'locked' : 'success'}`}
+          >
+            {locked ? 'ПРЕЧЕК' : 'В РАБОТЕ'}
+          </span>
+          <div className="mah-pos-spacer" />
+          {session.staff.role === 'ADMIN' && (
+            <button
+              type="button"
+              className="mah-pos-icon-btn"
+              aria-label="Действия администратора"
+              onClick={onAdmin}
+            >
+              ⋯
+            </button>
+          )}
+        </div>
+        <div className="mah-pos-panel-meta">
+          {order.ownerStaffId === session.staff.id
+            ? `${session.staff.displayName} · ваш заказ`
+            : 'Заказ другого официанта'}
+        </div>
+      </header>
+      <div className="mah-pos-guest-list">
+        {guests.map((guest) => {
+          const guestLines = lines.filter((line) => line.guestId === guest.id);
+          return (
+            <button
+              type="button"
+              key={guest.id}
+              className={`mah-pos-guest ${guest.id === selectedGuest?.id ? 'active' : ''}`}
+              onClick={() => onGuest(guest.id)}
+            >
+              <strong>
+                {guest.displayNumber ?? guest.name ?? `Гость ${guest.ordinal}`}
+              </strong>
+              <small>
+                {guestLines.length} поз. · {money(guest.subtotal)}
+              </small>
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          className="mah-pos-guest mah-pos-add-guest"
+          disabled={busy || locked}
+          onClick={onAddGuest}
+        >
+          + Гость
+        </button>
+      </div>
+      <div className="mah-pos-lines">
+        {guests.length === 0 ? (
+          <div className="mah-pos-empty-lines">
+            <div>
+              <strong>Добавьте первого гостя</strong>
+              После этого можно добавлять блюда из меню
+            </div>
+          </div>
+        ) : lines.length === 0 ? (
+          <div className="mah-pos-empty-lines">
+            <div>
+              <strong>Заказ пока пуст</strong>
+              Выберите гостя и коснитесь блюда
+            </div>
+          </div>
+        ) : (
+          guests.map((guest) => {
+            const guestLines = lines.filter((line) => line.guestId === guest.id);
+            if (!guestLines.length) return null;
+            return (
+              <section className="mah-pos-guest-group" key={guest.id}>
+                <div
+                  className={`mah-pos-guest-group-head ${guest.id === selectedGuest?.id ? 'active' : ''}`}
+                >
+                  <button type="button" onClick={() => onGuest(guest.id)}>
+                    {guest.displayNumber ?? guest.name ?? `Гость ${guest.ordinal}`}
+                  </button>
+                  <strong>{money(guest.subtotal)}</strong>
+                </div>
+                {guestLines.map((line) => {
+                  const voided = line.status === 'VOIDED';
+                  const sent = Number(line.kitchenSentQuantity ?? 0) > 0;
+                  return (
+                    <div
+                      className={`mah-pos-line ${voided ? 'voided' : ''}`}
+                      key={line.id}
+                    >
+                      <div>
+                        <strong className="mah-pos-line-name">
+                          {line.itemNameSnapshot ?? 'Позиция'}
+                        </strong>
+                        <div className="mah-pos-line-sub">
+                          <span>{money(line.unitPrice)}</span>
+                          <span
+                            className={`mah-pos-line-state ${voided ? 'voided' : sent ? 'sent' : 'new'}`}
+                          >
+                            {voided ? '× Отменено' : sent ? '✓ На кухне' : '● Новое'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="mah-pos-line-actions">
+                        <button
+                          type="button"
+                          className="mah-pos-qty-button"
+                          aria-label={`Уменьшить ${line.itemNameSnapshot}`}
+                          disabled={
+                            busy ||
+                            locked ||
+                            voided ||
+                            Number(line.quantity ?? 1) <= 1
+                          }
+                          onClick={() =>
+                            onQuantity(line, Number(line.quantity ?? 1) - 1)
+                          }
+                        >
+                          −
+                        </button>
+                        <span className="mah-pos-qty">{line.quantity}</span>
+                        <button
+                          type="button"
+                          className="mah-pos-qty-button"
+                          aria-label={`Увеличить ${line.itemNameSnapshot}`}
+                          disabled={busy || locked || voided}
+                          onClick={() =>
+                            onQuantity(line, Number(line.quantity ?? 1) + 1)
+                          }
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </section>
+            );
+          })
+        )}
+      </div>
+      {locked && (
+        <div className="mah-pos-precheck-banner">
+          <strong>ПРЕЧЕК СФОРМИРОВАН</strong>
+          <span>Заказ заблокирован. Следующий шаг — оплата.</span>
+        </div>
+      )}
+      <footer className="mah-pos-panel-footer">
+        <div className="mah-pos-kitchen-summary">
+          <span>
+            Новое <b>{unsentCount}</b>
+          </span>
+          <span>
+            На кухне <b>{sentCount}</b>
+          </span>
+        </div>
+        <div className="mah-pos-totals">
+          <div className="mah-pos-total-row">
+            <span>Итого</span>
+            <strong>{money(totalMicros)}</strong>
+          </div>
+          {prepaidMicros > 0 && (
+            <div className="mah-pos-total-row">
+              <span>Предоплата</span>
+              <strong>− {money(prepaidMicros)}</strong>
+            </div>
+          )}
+          {paidMicros > 0 && (
+            <div className="mah-pos-total-row">
+              <span>Оплачено</span>
+              <strong>− {money(paidMicros)}</strong>
+            </div>
+          )}
+          <div className="mah-pos-total-row total">
+            <span>К оплате</span>
+            <strong>{money(remainingMicros)}</strong>
+          </div>
+        </div>
+        {locked ? (
+          remainingMicros === 0 ? (
+            <button
+              type="button"
+              className="mah-pos-btn success"
+              style={{ width: '100%' }}
+              disabled={busy}
+              onClick={onCloseOrder}
+            >
+              ОПЛАЧЕНО · ЗАКРЫТЬ СТОЛ
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="mah-pos-btn primary"
+              style={{ width: '100%' }}
+              disabled={busy}
+              onClick={onPayment}
+            >
+              ОПЛАТИТЬ · {money(remainingMicros)}
+            </button>
+          )
+        ) : (
+          <div className="mah-pos-actions">
+            <button
+              type="button"
+              className="mah-pos-btn primary"
+              disabled={busy || unsentCount === 0}
+              onClick={onPrint}
+            >
+              ПЕЧАТЬ · {unsentCount}
+            </button>
+            <button
+              type="button"
+              className="mah-pos-btn"
+              disabled={busy || lines.every((line) => line.status !== 'ACTIVE')}
+              onClick={onPrecheck}
+            >
+              ПРЕЧЕК
+            </button>
+          </div>
+        )}
+      </footer>
+    </>
+  );
 };
 
 const PosFrontComponent = () => {
-  const [session, setSession] = useState<Session | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [session, setSession] = useState<PosSession | null>(null);
   const [pin, setPin] = useState('');
-  const [rows, setRows] = useState<Record<string, AnyRow[]>>({});
+  const [rows, setRows] = useState<Record<string, PosRow[]>>({});
   const [zoneId, setZoneId] = useState<string | null>(null);
   const [tableId, setTableId] = useState<string | null>(null);
   const [orderId, setOrderId] = useState<string | null>(null);
   const [guestId, setGuestId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('Все');
+  const [sheet, setSheet] = useState<SheetName>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentMethodId, setPaymentMethodId] = useState<string | null>(null);
+  const [reservationTableId, setReservationTableId] = useState<string | null>(
+    null,
+  );
   const [reservationName, setReservationName] = useState('');
   const [reservationPhone, setReservationPhone] = useState('');
   const [reservationAt, setReservationAt] = useState('');
+  const [reservationPrepayment, setReservationPrepayment] = useState('');
+  const [selectedLineIds, setSelectedLineIds] = useState<string[]>([]);
+  const [voidPreparedState, setVoidPreparedState] = useState<
+    'PREPARED' | 'NOT_PREPARED'
+  >('NOT_PREPARED');
+  const [voidReason, setVoidReason] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [busyCommand, setBusyCommand] = useState<string | null>(null);
   const [loginBusy, setLoginBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const [shiftCloseConfirm, setShiftCloseConfirm] = useState(false);
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(
+    null,
+  );
 
-  const load = useCallback(async () => {
-    const names = ['posZones', 'posTables', 'posOrders', 'posOrderGuests', 'posOrderLines', 'posMenuItems', 'posShifts', 'posReservations', 'posStopListEntries', 'posKitchenTickets', 'posKitchenTicketLines', 'posPrechecks', 'posPayments', 'posPaymentMethods', 'posPrepayments'];
-    const values = await Promise.all(names.map(async (name) => [name, listRows(await rest.get(`/rest/${name}`, { query: { limit: 200 } }), name)] as const));
-    setRows(Object.fromEntries(values));
+  useEffect(() => {
+    const fitViewport = () => {
+      const root = rootRef.current;
+      if (!root) return;
+      const top = Math.max(0, root.getBoundingClientRect().top);
+      root.style.height = `${Math.max(480, globalThis.innerHeight - top)}px`;
+    };
+    fitViewport();
+    globalThis.addEventListener('resize', fitViewport);
+    const timer = globalThis.setInterval(fitViewport, 1_000);
+    return () => {
+      globalThis.removeEventListener('resize', fitViewport);
+      globalThis.clearInterval(timer);
+    };
   }, []);
 
-  useEffect(() => { if (session) void load().catch((value) => setError(commandError(value))); }, [load, session]);
+  const load = useCallback(async () => {
+    setSyncing(true);
+    try {
+      const values = await Promise.all(
+        CORE_COLLECTIONS.map(async (name) => [
+          name,
+          listRows(
+            await rest.get(`/rest/${name}`, { query: { limit: 200 } }),
+            name,
+          ),
+        ] as const),
+      );
+      const nextRows = Object.fromEntries(values) as Record<string, PosRow[]>;
+      if (session?.staff.role === 'ADMIN') {
+        try {
+          nextRows.posStaffs = listRows(
+            await rest.get('/rest/posStaffs', { query: { limit: 200 } }),
+            'posStaffs',
+          );
+        } catch {
+          nextRows.posStaffs = [];
+        }
+      }
+      setRows(nextRows);
+    } finally {
+      setSyncing(false);
+    }
+  }, [session?.staff.role]);
 
-  const command = useCallback(async (name: string, payload: Record<string, unknown>) => {
-    const body: Record<string, unknown> = { command: name, payload };
-    if (session?.sessionToken) body.sessionToken = session.sessionToken;
-    return rest.post<ApiEnvelope>('/s/pos/command', body);
+  useEffect(() => {
+    if (!session) return;
+    void load().catch((value) => setError(commandError(value)));
+    const refreshTimer = globalThis.setInterval(() => {
+      void load().catch((value) => setError(commandError(value)));
+    }, 12_000);
+    return () => globalThis.clearInterval(refreshTimer);
+  }, [load, session]);
+
+  useEffect(() => {
+    if (!session) return;
+    const clockTimer = globalThis.setInterval(() => setNow(Date.now()), 30_000);
+    return () => globalThis.clearInterval(clockTimer);
   }, [session]);
 
-  const run = useCallback(async (name: string, payload: Record<string, unknown>, success?: string) => {
-    setBusy(true); setError(''); setNotice('');
-    try { await command(name, payload); await load(); if (success) setNotice(success); }
-    catch (value) { setError(commandError(value)); }
-    finally { setBusy(false); }
-  }, [command, load]);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = globalThis.setTimeout(() => setNotice(''), 2_800);
+    return () => globalThis.clearTimeout(timer);
+  }, [notice]);
+
+  const command = useCallback(
+    async (name: string, payload: Record<string, unknown>) => {
+      const body: Record<string, unknown> = { command: name, payload };
+      if (session?.sessionToken) body.sessionToken = session.sessionToken;
+      return rest.post<ApiEnvelope>('/s/pos/command', body);
+    },
+    [session],
+  );
+
+  const run = useCallback(
+    async (
+      name: string,
+      payload: Record<string, unknown>,
+      success?: string,
+    ): Promise<ApiEnvelope | null> => {
+      setBusyCommand(name);
+      setError('');
+      try {
+        const result = await command(name, payload);
+        await load();
+        if (success) setNotice(success);
+        return result;
+      } catch (value) {
+        setError(commandError(value));
+        return null;
+      } finally {
+        setBusyCommand(null);
+      }
+    },
+    [command, load],
+  );
 
   const login = async () => {
-    if (!/^\d{4,8}$/.test(pin)) { setError('Введите PIN из 4–8 цифр'); return; }
-    setLoginBusy(true); setError('');
+    if (!/^\d{4,8}$/.test(pin)) {
+      setError('Введите PIN из 4–8 цифр');
+      return;
+    }
+    setLoginBusy(true);
+    setError('');
     try {
-      const result = await rest.post<ApiEnvelope>('/s/pos/command', { command: 'authenticatePosStaff', payload: { pin, terminalId: 'touch-pos' } });
-      if (!result.sessionToken || !result.staff?.id) throw new Error(result.message || result.code || 'Вход отклонён');
-      setSession({ sessionToken: result.sessionToken, staff: { id: result.staff.id, displayName: result.staff.displayName, role: result.staff.role } });
-      setPin(''); setNotice('Сессия POS открыта');
-    } catch (value) { setError(commandError(value)); }
-    finally { setLoginBusy(false); }
+      const result = await rest.post<ApiEnvelope>('/s/pos/command', {
+        command: 'authenticatePosStaff',
+        payload: { pin, terminalId: 'touch-pos' },
+      });
+      if (!result.sessionToken || !result.staff?.id) {
+        throw new Error(result.message || result.code || 'Вход отклонён');
+      }
+      setSession({
+        sessionToken: result.sessionToken,
+        staff: {
+          id: result.staff.id,
+          displayName: result.staff.displayName,
+          role: result.staff.role,
+        },
+      });
+      setPin('');
+      setNotice('Добро пожаловать');
+    } catch (value) {
+      setError(commandError(value));
+    } finally {
+      setLoginBusy(false);
+    }
   };
 
-  const logout = async () => { if (session) { try { await command('logoutPosStaff', {}); } catch { /* local session is still cleared */ } } setSession(null); setRows({}); setOrderId(null); setTableId(null); };
+  const logout = async () => {
+    if (session) {
+      try {
+        await command('logoutPosStaff', {});
+      } catch {
+        // The local session is still cleared when the remote session expired.
+      }
+    }
+    setSession(null);
+    setRows({});
+    setOrderId(null);
+    setTableId(null);
+    setSheet(null);
+  };
+
   const zones = (rows.posZones ?? []).filter((row) => row.isActive !== false);
-  const tables = (rows.posTables ?? []).filter((row) => row.isActive !== false && (!zoneId || row.zoneId === zoneId));
+  const allTables = (rows.posTables ?? []).filter(
+    (row) => row.isActive !== false,
+  );
+  const tables = allTables.filter((row) => !zoneId || row.zoneId === zoneId);
   const orders = rows.posOrders ?? [];
+  const activeReservations = (rows.posReservations ?? []).filter(
+    (row) => row.status === 'ACTIVE',
+  );
   const selectedOrder = orders.find((row) => row.id === orderId);
-  const selectedTable = (rows.posTables ?? []).find((row) => row.id === tableId);
-  const guests = (rows.posOrderGuests ?? []).filter((row) => row.orderId === orderId).sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0));
-  const lines = (rows.posOrderLines ?? []).filter((row) => row.orderId === orderId);
-  const activeLines = lines.filter((line) => line.status === 'ACTIVE');
-  const menu = (rows.posMenuItems ?? []).filter((row) => row.isActive !== false);
-  const stopList = new Set((rows.posStopListEntries ?? []).filter((row) => row.isActive !== false).map((row) => row.menuItemId));
-  const categories = ['Все', ...Array.from(new Set(menu.map((item) => item.category).filter(Boolean)))];
-  const filteredMenu = menu.filter((item) => (category === 'Все' || item.category === category) && String(item.name ?? '').toLowerCase().includes(search.toLowerCase()));
-  const reservations = (rows.posReservations ?? []).filter((row) => row.status === 'ACTIVE');
-  const methods = (rows.posPaymentMethods ?? []).filter((row) => row.isActive !== false).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-  const activeShift = (rows.posShifts ?? []).find((row) => row.staffId === session?.staff.id && row.isOpen === true);
-  const orderPrecheck = (rows.posPrechecks ?? []).find((row) => row.orderId === orderId && row.status === 'ACTIVE');
-  const payments = (rows.posPayments ?? []).filter((row) => row.orderId === orderId && row.status === 'SUCCESS');
-  const prepaidMicros = (rows.posPrepayments ?? []).filter((row) => row.orderId === orderId && row.status === 'APPLIED').reduce((sum, row) => sum + micros(row.amount), 0);
-  const paidMicros = payments.reduce((sum, row) => sum + micros(row.amount), 0);
+  const selectedTable = allTables.find((row) => row.id === tableId);
+  const selectedReservation = activeReservations.find(
+    (row) => row.tableId === tableId,
+  );
+  const guests = (rows.posOrderGuests ?? [])
+    .filter((row) => row.orderId === orderId)
+    .sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0));
+  const lines = (rows.posOrderLines ?? []).filter(
+    (row) => row.orderId === orderId,
+  );
+  const menu = (rows.posMenuItems ?? []).filter(
+    (row) => row.isActive !== false,
+  );
+  const stopList = new Set(
+    (rows.posStopListEntries ?? [])
+      .filter((row) => row.isActive !== false)
+      .map((row) => row.menuItemId),
+  );
+  const methods = (rows.posPaymentMethods ?? [])
+    .filter((row) => row.isActive !== false)
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+  const activeShift = (rows.posShifts ?? []).find(
+    (row) => row.staffId === session?.staff.id && row.isOpen === true,
+  );
+  const orderPrecheck = (rows.posPrechecks ?? []).find(
+    (row) => row.orderId === orderId && row.status === 'ACTIVE',
+  );
+  const payments = (rows.posPayments ?? []).filter(
+    (row) => row.orderId === orderId && row.status === 'SUCCESS',
+  );
+  const orderPrepayments = (rows.posPrepayments ?? []).filter(
+    (row) => row.orderId === orderId && row.status === 'APPLIED',
+  );
   const totalMicros = micros(selectedOrder?.total);
-  const remainingMicros = Math.max(0, totalMicros - prepaidMicros - paidMicros);
-  const selectedGuest = guests.find((row) => row.id === (guestId ?? guests[0]?.id));
+  const paidMicros = Math.max(
+    micros(selectedOrder?.paidTotal),
+    payments.reduce((sum, row) => sum + micros(row.amount), 0),
+  );
+  const prepaidMicros = Math.max(
+    micros(selectedOrder?.prepaidTotal),
+    orderPrepayments.reduce((sum, row) => sum + micros(row.amount), 0),
+  );
+  const remainingMicros = Math.max(
+    0,
+    totalMicros - prepaidMicros - paidMicros,
+  );
+  const selectedGuest = guests.find(
+    (row) => row.id === (guestId ?? guests[0]?.id),
+  );
+  const unsentCount = lines
+    .filter((line) => line.status === 'ACTIVE')
+    .reduce(
+      (sum, line) =>
+        sum +
+        Math.max(
+          0,
+          Number(line.quantity ?? 0) - Number(line.kitchenSentQuantity ?? 0),
+        ),
+      0,
+    );
+  const sentCount = lines
+    .filter((line) => line.status === 'ACTIVE')
+    .reduce(
+      (sum, line) =>
+        sum +
+        Math.min(
+          Number(line.quantity ?? 0),
+          Number(line.kitchenSentQuantity ?? 0),
+        ),
+      0,
+    );
+  const staffNames = useMemo(
+    () =>
+      new Map(
+        (rows.posStaffs ?? []).map((staff) => [
+          staff.id,
+          String(staff.displayName ?? 'Сотрудник'),
+        ]),
+      ),
+    [rows.posStaffs],
+  );
+  const recentOrders = orders.filter(
+    (order) =>
+      isActiveOrder(order) && order.ownerStaffId === session?.staff.id,
+  );
+  const busy = Boolean(busyCommand);
+  const initialLoading = session !== null && !rows.posZones;
 
-  useEffect(() => { if (!zoneId && zones[0]) setZoneId(zones[0].id); }, [zoneId, zones]);
-  useEffect(() => { if (!guestId && guests[0]) setGuestId(guests[0].id); if (guestId && !guests.some((guest) => guest.id === guestId)) setGuestId(guests[0]?.id ?? null); }, [guestId, guests]);
-  useEffect(() => { if (!paymentMethodId && methods[0]) setPaymentMethodId(methods[0].id); }, [methods, paymentMethodId]);
+  useEffect(() => {
+    if (!zoneId && zones[0]) setZoneId(zones[0].id);
+  }, [zoneId, zones]);
 
-  const selectTable = async (table: AnyRow) => {
-    setTableId(table.id); setError('');
-    const existing = orders.find((row) => row.tableId === table.id && activeOrder(row));
-    if (existing) { setOrderId(existing.id); return; }
-    if (!activeShift) { setError('Сначала откройте смену'); return; }
-    setBusy(true);
-    try { const result = await command('openOrder', { tableId: table.id, idempotencyKey: uuid() }); if (result.orderId) setOrderId(result.orderId); await load(); setNotice(`Стол ${table.number} открыт`); }
-    catch (value) { setError(commandError(value)); }
-    finally { setBusy(false); }
+  useEffect(() => {
+    if (!guestId && guests[0]) setGuestId(guests[0].id);
+    if (guestId && !guests.some((guest) => guest.id === guestId)) {
+      setGuestId(guests[0]?.id ?? null);
+    }
+  }, [guestId, guests]);
+
+  useEffect(() => {
+    if (!paymentMethodId && methods[0]) setPaymentMethodId(methods[0].id);
+  }, [methods, paymentMethodId]);
+
+  const selectTable = (table: PosRow) => {
+    setTableId(table.id);
+    setReservationTableId(table.id);
+    setError('');
+    const existing = orders.find(
+      (row) => row.tableId === table.id && isActiveOrder(row),
+    );
+    setOrderId(existing?.id ?? null);
   };
-  const addGuest = () => { if (orderId) void run('addGuest', { orderId, idempotencyKey: uuid(), name: `Гость ${guests.length + 1}` }, 'Гость добавлен'); };
-  const addLine = (item: AnyRow) => { if (orderId && selectedGuest && !stopList.has(item.id) && !orderPrecheck) void run('addLine', { orderId, guestId: selectedGuest.id, menuItemId: item.id, quantity: 1, idempotencyKey: uuid() }, `${item.name} добавлен`); };
-  const changeQuantity = (line: AnyRow, quantity: number) => { if (!orderPrecheck && quantity > 0) void run('changeLineQuantity', { lineId: line.id, quantity }, 'Количество обновлено'); };
-  const print = () => { if (orderId) void run('printKitchenTicket', { orderId, idempotencyKey: uuid() }, 'Новые блюда отправлены на кухню'); };
-  const precheck = () => { if (orderId) void run('createPrecheck', { orderId, idempotencyKey: uuid() }, 'Пречек создан: заказ заблокирован'); };
-  const cancelPrecheck = () => { if (orderId) void run('cancelPrecheck', { orderId, idempotencyKey: uuid() }, 'Пречек отменён'); };
-  const pay = () => { const amount = Math.round(Number(paymentAmount.replace(',', '.')) * 1_000_000); if (orderId && paymentMethodId && Number.isSafeInteger(amount) && amount > 0) { void run('recordPayment', { orderId, paymentMethodId, amountMicros: amount, idempotencyKey: uuid() }, 'Оплата записана'); setPaymentAmount(''); } else setError('Введите корректную сумму оплаты'); };
-  const closeOrder = () => { if (orderId) void run('closeOrder', { orderId, idempotencyKey: uuid() }, 'Заказ закрыт, стол свободен'); };
-  const toggleStopList = (item: AnyRow) => { void run(stopList.has(item.id) ? 'clearStopListEntry' : 'addStopListEntry', { menuItemId: item.id, idempotencyKey: uuid() }, stopList.has(item.id) ? 'Позиция снята со стоп-листа' : 'Позиция добавлена в стоп-лист'); };
-  const createReservation = () => { if (tableId) void run('createReservation', { tableId, ...(reservationAt ? { scheduledAt: new Date(reservationAt).toISOString() } : {}), ...(reservationName ? { guestName: reservationName } : {}), ...(reservationPhone ? { phone: reservationPhone } : {}), idempotencyKey: uuid() }, 'Бронирование создано'); };
-  const voidLine = (line: AnyRow) => { if (session?.staff.role === 'ADMIN') void run('voidOrderLines', { lineIds: [line.id], preparedState: Number(line.kitchenSentQuantity ?? 0) > 0 ? 'PREPARED' : 'NOT_PREPARED', reason: 'Отмена в POS', idempotencyKey: uuid() }, 'Позиция отменена'); };
-  const transferTable = (targetTableId: string) => { if (orderId && targetTableId) void run('transferOrderToTable', { orderId, targetTableId, idempotencyKey: uuid() }, 'Заказ перенесён'); };
-  const transferWaiter = (targetStaffId: string) => { if (orderId && targetStaffId) void run('transferOrderToWaiter', { orderId, targetStaffId, idempotencyKey: uuid() }, 'Заказ передан официанту'); };
 
-  if (!session) return <div className="mah-pos"><style>{css}</style><div className="mah-pos-login"><div className="mah-pos-login-card"><div className="mah-pos-mark">M</div><h1 className="mah-pos-title">Mahabbat POS</h1><p className="mah-pos-sub">Операционная касса ресторана</p><input className="mah-pos-input" aria-label="PIN" inputMode="numeric" type="password" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 8))} onKeyDown={(event) => { if (event.key === 'Enter') void login(); }} placeholder="PIN сотрудника" autoFocus /><div className="mah-pos-pin">{['1','2','3','4','5','6','7','8','9'].map((digit) => <button type="button" key={digit} onClick={() => setPin((value) => `${value}${digit}`.slice(0, 8))}>{digit}</button>)}<button type="button" className="mah-pos-pin-clear" onClick={() => setPin('')}>Очистить</button><button type="button" onClick={() => setPin((value) => value.slice(0, -1))}>⌫</button></div><button type="button" className="mah-pos-btn primary" style={{ width: '100%', marginTop: 15 }} disabled={loginBusy} onClick={() => void login()}>{loginBusy ? 'Входим…' : 'Войти'}</button>{error && <div className="mah-pos-error">{error}</div>}</div></div></div>;
+  const openTable = async (
+    reservation?: PosRow,
+    explicitTable?: PosRow,
+  ) => {
+    const targetTable = explicitTable ?? selectedTable;
+    if (!targetTable || !activeShift) {
+      setError('Сначала откройте смену');
+      return;
+    }
+    setBusyCommand('openOrder');
+    setError('');
+    try {
+      const result = await command('openOrder', {
+        tableId: targetTable.id,
+        idempotencyKey: uuid(),
+      });
+      const nextOrderId = String(result.orderId ?? '');
+      if (!nextOrderId) throw new Error('Заказ создан без идентификатора');
+      if (reservation) {
+        await command('attachReservationToOrder', {
+          reservationId: reservation.id,
+          orderId: nextOrderId,
+          idempotencyKey: uuid(),
+        });
+      }
+      setTableId(targetTable.id);
+      setZoneId(targetTable.zoneId ?? zoneId);
+      setOrderId(nextOrderId);
+      await load();
+      setNotice(
+        reservation
+          ? `Бронь привязана к столу ${targetTable.number}`
+          : `Стол ${targetTable.number} открыт`,
+      );
+      setSheet(null);
+    } catch (value) {
+      setError(commandError(value));
+    } finally {
+      setBusyCommand(null);
+    }
+  };
 
-  return <div className="mah-pos"><style>{css}</style><header className="mah-pos-top"><div className="mah-pos-brand"><b>M</b><div>Mahabbat<small>операционная касса</small></div></div><div className="mah-pos-status"><i className="mah-pos-dot" />{activeShift ? 'Смена открыта' : 'Смена закрыта'}</div><div className="mah-pos-top-actions"><span className="mah-pos-muted">{session.staff.displayName} · {session.staff.role === 'ADMIN' ? 'Администратор' : 'Официант'}</span><button type="button" className="mah-pos-btn" onClick={() => void load()}>Обновить</button><button type="button" className="mah-pos-btn" onClick={() => void logout()}>Выйти</button></div></header><div className="mah-pos-shell"><aside className="mah-pos-sidebar"><div className="mah-pos-section-label">Зоны</div>{zones.map((zone) => <button type="button" className={`mah-pos-zone ${zone.id === zoneId ? 'active' : ''}`} key={zone.id} onClick={() => setZoneId(zone.id)}>{zone.name}</button>)}<div className="mah-pos-mini"><strong>{activeShift ? 'Текущая смена' : 'Смена не открыта'}</strong>{activeShift ? `Открыта ${dateTime(activeShift.openedAt)}` : 'Откройте смену для начала работы'}{!activeShift ? <button type="button" className="mah-pos-btn primary" style={{ width: '100%', marginTop: 9 }} disabled={busy} onClick={() => void run('openShift', { idempotencyKey: uuid() }, 'Смена открыта')}>Открыть смену</button> : <button type="button" className="mah-pos-btn" style={{ width: '100%', marginTop: 9 }} disabled={busy} onClick={() => void run('closeShift', { shiftId: activeShift.id }, 'Смена закрыта')}>Закрыть смену</button>}</div><div className="mah-pos-mini"><strong>Брони</strong>{reservations.length} активных{reservations.some(isOverdue) && <div className="mah-pos-overdue">Есть просроченные</div>}</div></aside><main className="mah-pos-main"><div className="mah-pos-toolbar"><h2>{zones.find((zone) => zone.id === zoneId)?.name ?? 'Зал'}</h2><span>Выберите свободный стол или продолжите заказ</span><span className="mah-pos-spacer" /><span>{tables.length} столов</span></div><div className="mah-pos-table-grid">{tables.map((table) => { const order = orders.find((row) => row.tableId === table.id && activeOrder(row)); const reservation = reservations.find((row) => row.tableId === table.id); return <button type="button" className={`mah-pos-table ${order ? 'occupied' : ''} ${reservation ? 'reserved' : ''}`} key={table.id} onClick={() => void selectTable(table)}><strong>Стол {table.number}</strong><small>{order ? `Заказ · ${order.ownerStaffId === session.staff.id ? 'мой' : 'занят'}` : reservation ? (isOverdue(reservation) ? 'Бронь просрочена' : 'Забронирован') : 'Свободен'}</small>{order && <div className="mah-pos-table-total">{money(order.total)}</div>}</button>; })}</div><div className="mah-pos-menu"><div className="mah-pos-menu-head"><h3>Меню</h3><span>{selectedGuest ? `для ${selectedGuest.displayNumber ?? 'гостя'}` : 'сначала выберите заказ'}</span><input className="mah-pos-input mah-pos-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Поиск блюда" /></div><div>{categories.map((item) => <button type="button" key={item} className={`mah-pos-category ${item === category ? 'active' : ''}`} onClick={() => setCategory(item)}>{item}</button>)}</div><div className="mah-pos-menu-grid">{filteredMenu.map((item) => { const stopped = stopList.has(item.id); return <button type="button" className={`mah-pos-dish ${stopped || !selectedOrder || Boolean(orderPrecheck) ? 'disabled' : ''}`} key={item.id} disabled={stopped || !selectedOrder || Boolean(orderPrecheck) || busy} onClick={() => addLine(item)}><b>{item.name}</b><small>{stopped ? 'Стоп-лист' : item.category ?? 'Меню'}</small><strong>{money(item.price)}</strong>{session.staff.role === 'ADMIN' && <span className="mah-pos-muted">{stopped ? 'Снять стоп-лист' : 'В стоп-лист'}: <span onClick={(event) => { event.stopPropagation(); toggleStopList(item); }}>×</span></span>}</button>; })}</div><div className="mah-pos-divider" /><div className="mah-pos-reservation"><h3 style={{ marginTop: 0 }}>Бронирование выбранного стола</h3><div className="mah-pos-form"><input className="mah-pos-input" value={reservationName} onChange={(event) => setReservationName(event.target.value)} placeholder="Имя гостя (необязательно)" /><input className="mah-pos-input" value={reservationPhone} onChange={(event) => setReservationPhone(event.target.value)} placeholder="Телефон (необязательно)" /><input className="mah-pos-input" type="datetime-local" value={reservationAt} onChange={(event) => setReservationAt(event.target.value)} /><button type="button" className="mah-pos-btn" disabled={!tableId || busy} onClick={createReservation}>Забронировать стол</button></div></div></div></main><aside className="mah-pos-panel">{selectedOrder ? <><div className="mah-pos-toolbar"><h2>Заказ · Стол {selectedTable?.number ?? '—'}</h2><span className="mah-pos-spacer" /><span className={`mah-pos-chip ${orderPrecheck ? 'unsent' : ''}`}>{orderPrecheck ? 'Заблокирован' : selectedOrder.status === 'CLOSED' ? 'Закрыт' : 'В работе'}</span></div><div className="mah-pos-guest-list">{guests.map((guest) => <button type="button" key={guest.id} className={`mah-pos-guest ${guest.id === selectedGuest?.id ? 'active' : ''}`} onClick={() => setGuestId(guest.id)}>{guest.displayNumber ?? `Гость ${guest.ordinal}`}<small>{money(guest.subtotal)}</small></button>)}<button type="button" className="mah-pos-guest" onClick={addGuest} disabled={busy || Boolean(orderPrecheck)}>+ Гость</button></div><div className="mah-pos-lines">{lines.length ? lines.map((line) => <div className="mah-pos-line" key={line.id}><div><b>{line.itemNameSnapshot ?? 'Позиция'}</b><small>{money(line.unitPrice)} · {line.status === 'VOIDED' ? <span className="mah-pos-chip voided">Отменена</span> : <span className={`mah-pos-chip ${Number(line.kitchenSentQuantity ?? 0) > 0 ? 'sent' : 'unsent'}`}>{Number(line.kitchenSentQuantity ?? 0) > 0 ? 'На кухне' : 'Не отправлена'}</span>}</small></div><div className="mah-pos-line-actions"><button type="button" disabled={Boolean(orderPrecheck) || line.status !== 'ACTIVE'} onClick={() => changeQuantity(line, Math.max(1, Number(line.quantity ?? 1) - 1))}>−</button><span>{line.quantity}</span><button type="button" disabled={Boolean(orderPrecheck) || line.status !== 'ACTIVE'} onClick={() => changeQuantity(line, Number(line.quantity ?? 1) + 1)}>+</button>{session.staff.role === 'ADMIN' && line.status === 'ACTIVE' && <button type="button" className="mah-pos-btn danger" style={{ minHeight: 32, padding: '0 6px' }} onClick={() => voidLine(line)}>×</button>}</div></div>) : <div className="mah-pos-muted">Добавьте блюда из меню</div>}</div><div className="mah-pos-totals"><div className="mah-pos-total-row"><span>Подытог</span><strong>{money(selectedOrder.subtotal)}</strong></div>{prepaidMicros > 0 && <div className="mah-pos-total-row"><span>Предоплата</span><strong>− {money(prepaidMicros)}</strong></div>}{paidMicros > 0 && <div className="mah-pos-total-row"><span>Оплачено</span><strong>− {money(paidMicros)}</strong></div>}<div className="mah-pos-total-row total"><span>К оплате</span><strong>{money(remainingMicros)}</strong></div></div><div className="mah-pos-actions"><button type="button" className="mah-pos-btn primary" disabled={busy || Boolean(orderPrecheck) || !activeLines.length} onClick={print}>Печать на кухню</button><button type="button" className="mah-pos-btn primary" disabled={busy || Boolean(orderPrecheck) || !activeLines.length} onClick={precheck}>Создать пречек</button>{orderPrecheck && session.staff.role === 'ADMIN' && <button type="button" className="mah-pos-btn danger" disabled={busy} onClick={cancelPrecheck}>Отменить пречек</button>}</div>{orderPrecheck && <div className="mah-pos-notice">Заказ заблокирован до отмены пречека администратором.</div>}<h3>Оплата</h3><div className="mah-pos-pay"><label>Метод<select className="mah-pos-select" value={paymentMethodId ?? ''} onChange={(event) => setPaymentMethodId(event.target.value)}>{methods.map((method) => <option key={method.id} value={method.id}>{method.name}</option>)}</select></label><label>Сумма, ₸<input className="mah-pos-input" inputMode="decimal" value={paymentAmount} onChange={(event) => setPaymentAmount(event.target.value)} placeholder="0" /></label></div><div className="mah-pos-actions"><button type="button" className="mah-pos-btn" disabled={busy || !orderPrecheck || remainingMicros <= 0} onClick={pay}>Принять оплату</button><button type="button" className="mah-pos-btn primary" disabled={busy || !orderPrecheck || remainingMicros !== 0} onClick={closeOrder}>Закрыть заказ</button></div>{session.staff.role === 'ADMIN' && <><h3>Администратор</h3><div className="mah-pos-form"><select className="mah-pos-select" defaultValue="" onChange={(event) => { if (event.target.value) transferTable(event.target.value); }}><option value="">Перенести на стол…</option>{(rows.posTables ?? []).filter((table) => table.id !== selectedOrder.tableId && table.isActive !== false).map((table) => <option key={table.id} value={table.id}>{table.number}</option>)}</select><select className="mah-pos-select" defaultValue="" onChange={(event) => { if (event.target.value) transferWaiter(event.target.value); }}><option value="">Передать официанту…</option>{(rows.posStaff ?? []).filter((staff) => staff.isActive !== false && staff.id !== selectedOrder.ownerStaffId).map((staff) => <option key={staff.id} value={staff.id}>{staff.displayName}</option>)}</select></div></>}</> : <div className="mah-pos-muted">Выберите стол, чтобы открыть заказ или продолжить работу.</div>}{notice && <div className="mah-pos-notice">{notice}</div>}{error && <div className="mah-pos-error">{error}</div>}</aside></div></div>;
+  const addGuest = async () => {
+    if (!orderId) return;
+    const result = await run(
+      'addGuest',
+      {
+        orderId,
+        idempotencyKey: uuid(),
+        name: `Гость ${guests.length + 1}`,
+      },
+      'Гость добавлен',
+    );
+    if (result?.guestId) setGuestId(String(result.guestId));
+  };
+
+  const addLine = (item: PosRow) => {
+    if (!orderId || !selectedGuest || stopList.has(item.id) || orderPrecheck)
+      return;
+    void run(
+      'addLine',
+      {
+        orderId,
+        guestId: selectedGuest.id,
+        menuItemId: item.id,
+        quantity: 1,
+        idempotencyKey: uuid(),
+      },
+      `${item.name} · добавлено`,
+    );
+  };
+
+  const changeQuantity = (line: PosRow, quantity: number) => {
+    if (orderPrecheck || quantity < 1) return;
+    void run(
+      'changeLineQuantity',
+      { lineId: line.id, quantity },
+      'Количество обновлено',
+    );
+  };
+
+  const createReservation = async () => {
+    if (!reservationTableId) {
+      setError('Выберите стол для бронирования');
+      return;
+    }
+    const prepayment = reservationPrepayment
+      ? parseMoneyInputToMicros(reservationPrepayment)
+      : null;
+    if (reservationPrepayment && prepayment === null) {
+      setError('Введите корректную сумму предоплаты');
+      return;
+    }
+    setBusyCommand('createReservation');
+    setError('');
+    try {
+      const result = await command('createReservation', {
+        tableId: reservationTableId,
+        ...(reservationAt
+          ? { scheduledAt: new Date(reservationAt).toISOString() }
+          : {}),
+        ...(reservationName.trim() ? { guestName: reservationName.trim() } : {}),
+        ...(reservationPhone.trim() ? { phone: reservationPhone.trim() } : {}),
+        idempotencyKey: uuid(),
+      });
+      if (prepayment && result.reservationId) {
+        await command('createPrepayment', {
+          reservationId: result.reservationId,
+          ...(paymentMethodId ? { paymentMethodId } : {}),
+          amountMicros: prepayment,
+          idempotencyKey: uuid(),
+        });
+      }
+      await load();
+      setReservationName('');
+      setReservationPhone('');
+      setReservationAt('');
+      setReservationPrepayment('');
+      setNotice(
+        prepayment
+          ? 'Бронирование и предоплата сохранены'
+          : 'Бронирование сохранено',
+      );
+    } catch (value) {
+      setError(commandError(value));
+    } finally {
+      setBusyCommand(null);
+    }
+  };
+
+  const recordPayment = async () => {
+    const amountMicros = parseMoneyInputToMicros(paymentAmount);
+    if (!orderId || !paymentMethodId || amountMicros === null) {
+      setError('Введите корректную сумму оплаты');
+      return;
+    }
+    const result = await run(
+      'recordPayment',
+      { orderId, paymentMethodId, amountMicros, idempotencyKey: uuid() },
+      'Оплата принята',
+    );
+    if (result) setPaymentAmount('');
+  };
+
+  const closeOrder = async () => {
+    if (!orderId) return;
+    const result = await run(
+      'closeOrder',
+      { orderId, idempotencyKey: uuid() },
+      'Заказ закрыт · стол свободен',
+    );
+    if (result) {
+      setOrderId(null);
+      setGuestId(null);
+      setSheet(null);
+    }
+  };
+
+  const voidSelectedLines = async () => {
+    if (!selectedLineIds.length) return;
+    const result = await run(
+      'voidOrderLines',
+      {
+        lineIds: selectedLineIds,
+        preparedState: voidPreparedState,
+        ...(voidReason.trim() ? { reason: voidReason.trim() } : {}),
+        idempotencyKey: uuid(),
+      },
+      'Позиции отменены',
+    );
+    if (result) {
+      setSelectedLineIds([]);
+      setVoidReason('');
+      setSheet('admin');
+    }
+  };
+
+  const confirmAction = async () => {
+    if (!pendingAction) return;
+    const action = pendingAction;
+    const result = await run(action.command, action.payload, action.success);
+    if (result) {
+      setPendingAction(null);
+      setSheet(action.returnTo);
+      if (action.command === 'transferOrderLinesToGuest') {
+        setSelectedLineIds([]);
+      }
+    }
+  };
+
+  if (!session) {
+    return (
+      <div className="mah-pos" ref={rootRef}>
+        <style>{POS_UI_CSS}</style>
+        <LoginView
+          pin={pin}
+          busy={loginBusy}
+          error={error}
+          onPinChange={(value) =>
+            setPin(value.replace(/\D/g, '').slice(0, 8))
+          }
+          onLogin={() => void login()}
+        />
+      </div>
+    );
+  }
+
+  const currentZoneName = zones.find((zone) => zone.id === zoneId)?.name ?? 'Зал';
+  const activeLines = lines.filter((line) => line.status === 'ACTIVE');
+  const selectedLines = activeLines.filter((line) =>
+    selectedLineIds.includes(line.id),
+  );
+  const selectedLinesWereSent = selectedLines.some(
+    (line) => Number(line.kitchenSentQuantity ?? 0) > 0,
+  );
+
+  return (
+    <div className="mah-pos" ref={rootRef}>
+      <style>{POS_UI_CSS}</style>
+      <PosHeader
+        session={session}
+        activeShift={activeShift}
+        reservationCount={activeReservations.length}
+        overdueCount={activeReservations.filter((item) => isOverdueReservation(item, now)).length}
+        now={now}
+        syncing={syncing}
+        onReservation={() => {
+          setReservationTableId(tableId ?? allTables[0]?.id ?? null);
+          setSheet('reservation');
+        }}
+        onSessionMenu={() => setSheet('session')}
+      />
+      <div className="mah-pos-shell">
+        <ZoneNavigation
+          zones={zones}
+          zoneId={zoneId}
+          reservations={activeReservations}
+          now={now}
+          onZone={(id) => {
+            setZoneId(id);
+            setTableId(null);
+            setOrderId(null);
+          }}
+          onReservations={() => setSheet('reservation')}
+        />
+        <main className="mah-pos-workspace">
+          <TableBoard
+            zoneName={currentZoneName}
+            tables={tables}
+            orders={orders}
+            reservations={activeReservations}
+            staffNames={staffNames}
+            currentStaffId={session.staff.id}
+            selectedTableId={tableId}
+            now={now}
+            loading={initialLoading}
+            onSelect={selectTable}
+          />
+          <MenuBrowser
+            menu={menu}
+            stopList={stopList}
+            search={search}
+            category={category}
+            selectedGuest={selectedGuest}
+            orderLocked={Boolean(orderPrecheck)}
+            busy={busy}
+            onSearch={setSearch}
+            onCategory={setCategory}
+            onItem={addLine}
+            onStopList={() => setSheet('stop-list')}
+          />
+        </main>
+        <aside className="mah-pos-panel">
+          {selectedOrder ? (
+            <OrderPanel
+              session={session}
+              order={selectedOrder}
+              table={selectedTable}
+              guests={guests}
+              lines={lines}
+              selectedGuest={selectedGuest}
+              precheck={orderPrecheck}
+              totalMicros={totalMicros}
+              prepaidMicros={prepaidMicros}
+              paidMicros={paidMicros}
+              remainingMicros={remainingMicros}
+              unsentCount={unsentCount}
+              sentCount={sentCount}
+              busy={busy}
+              onGuest={setGuestId}
+              onAddGuest={() => void addGuest()}
+              onQuantity={changeQuantity}
+              onPrint={() =>
+                void run(
+                  'printKitchenTicket',
+                  { orderId: selectedOrder.id, idempotencyKey: uuid() },
+                  'Новые блюда отправлены на кухню',
+                )
+              }
+              onPrecheck={() =>
+                void run(
+                  'createPrecheck',
+                  { orderId: selectedOrder.id, idempotencyKey: uuid() },
+                  'Пречек сформирован · заказ заблокирован',
+                )
+              }
+              onPayment={() => {
+                setPaymentAmount(formatMicrosForInput(remainingMicros));
+                setSheet('payment');
+              }}
+              onCloseOrder={() => void closeOrder()}
+              onAdmin={() => setSheet('admin')}
+            />
+          ) : selectedTable ? (
+            <TableContextPanel
+              table={selectedTable}
+              reservation={selectedReservation}
+              activeShift={activeShift}
+              busy={busy}
+              now={now}
+              onOpen={() => void openTable(selectedReservation)}
+              onReserve={() => {
+                setReservationTableId(selectedTable.id);
+                setSheet('reservation');
+              }}
+            />
+          ) : (
+            <EmptyOrderPanel
+              session={session}
+              activeShift={activeShift}
+              recentOrders={recentOrders}
+              tables={allTables}
+              onOrder={(order) => {
+                setOrderId(order.id);
+                setTableId(order.tableId ?? null);
+              }}
+              onOpenShift={() =>
+                void run(
+                  'openShift',
+                  { idempotencyKey: uuid() },
+                  'Смена открыта',
+                )
+              }
+            />
+          )}
+        </aside>
+      </div>
+
+      {sheet === 'payment' && selectedOrder && (
+        <Sheet
+          title="Оплата"
+          subtitle={`Стол ${selectedTable?.number ?? '—'}`}
+          onClose={() => setSheet(null)}
+          footer={
+            remainingMicros === 0 ? (
+              <button
+                type="button"
+                className="mah-pos-btn success"
+                style={{ width: '100%' }}
+                disabled={busy}
+                onClick={() => void closeOrder()}
+              >
+                ЗАКРЫТЬ СТОЛ
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="mah-pos-btn primary"
+                style={{ width: '100%' }}
+                disabled={busy || !paymentMethodId || !paymentAmount}
+                onClick={() => void recordPayment()}
+              >
+                ПРИНЯТЬ ОПЛАТУ
+              </button>
+            )
+          }
+        >
+          <div className="mah-pos-sheet-section">
+            <div className="mah-pos-payment-summary">
+              <div className="mah-pos-total-row">
+                <span>Итого</span>
+                <strong>{money(totalMicros)}</strong>
+              </div>
+              {prepaidMicros > 0 && (
+                <div className="mah-pos-total-row">
+                  <span>Предоплата</span>
+                  <strong>− {money(prepaidMicros)}</strong>
+                </div>
+              )}
+              {payments.map((payment) => (
+                <div className="mah-pos-total-row" key={payment.id}>
+                  <span>{payment.paymentMethodNameSnapshot ?? 'Оплата'}</span>
+                  <strong>− {money(payment.amount)}</strong>
+                </div>
+              ))}
+              <div className="mah-pos-total-row total">
+                <span>Осталось</span>
+                <strong>{money(remainingMicros)}</strong>
+              </div>
+            </div>
+          </div>
+          {remainingMicros === 0 ? (
+            <div className="mah-pos-payment-paid">
+              <strong>ОПЛАЧЕНО</strong>
+              Все платежи записаны. Стол можно закрыть.
+            </div>
+          ) : (
+            <>
+              <div className="mah-pos-sheet-section">
+                <h3>Способ оплаты</h3>
+                <div className="mah-pos-payment-methods">
+                  {methods.map((method) => (
+                    <button
+                      type="button"
+                      key={method.id}
+                      className={`mah-pos-payment-method ${paymentMethodId === method.id ? 'selected' : ''}`}
+                      onClick={() => setPaymentMethodId(method.id)}
+                    >
+                      {method.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="mah-pos-sheet-section">
+                <h3>Сумма</h3>
+                <label className="mah-pos-field">
+                  Сумма, ₸
+                  <input
+                    className="mah-pos-input"
+                    inputMode="decimal"
+                    value={paymentAmount}
+                    onChange={(event) => setPaymentAmount(event.target.value)}
+                    placeholder="0"
+                    autoFocus
+                  />
+                </label>
+                <div className="mah-pos-quick-amounts">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPaymentAmount(formatMicrosForInput(remainingMicros))
+                    }
+                  >
+                    Весь остаток
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPaymentAmount(
+                        formatMicrosForInput(Math.floor(remainingMicros / 2)),
+                      )
+                    }
+                  >
+                    Половина
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </Sheet>
+      )}
+
+      {sheet === 'reservation' && (
+        <Sheet
+          title="Бронирования"
+          subtitle="Стол обязателен, остальные поля можно пропустить"
+          onClose={() => setSheet(null)}
+          wide
+        >
+          <div className="mah-pos-sheet-section">
+            <h3>Новая бронь</h3>
+            <div className="mah-pos-form two">
+              <label className="mah-pos-field wide">
+                Стол
+                <select
+                  className="mah-pos-select"
+                  value={reservationTableId ?? ''}
+                  onChange={(event) => setReservationTableId(event.target.value)}
+                >
+                  <option value="">Выберите стол</option>
+                  {allTables.map((table) => (
+                    <option key={table.id} value={table.id}>
+                      {zones.find((zone) => zone.id === table.zoneId)?.name ?? 'Зал'} · Стол {table.number}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="mah-pos-field">
+                Имя гостя
+                <input
+                  className="mah-pos-input"
+                  value={reservationName}
+                  onChange={(event) => setReservationName(event.target.value)}
+                  placeholder="Необязательно"
+                />
+              </label>
+              <label className="mah-pos-field">
+                Телефон
+                <input
+                  className="mah-pos-input"
+                  value={reservationPhone}
+                  onChange={(event) => setReservationPhone(event.target.value)}
+                  placeholder="Необязательно"
+                />
+              </label>
+              <label className="mah-pos-field">
+                Дата и время
+                <input
+                  className="mah-pos-input"
+                  type="datetime-local"
+                  value={reservationAt}
+                  onChange={(event) => setReservationAt(event.target.value)}
+                />
+              </label>
+              <label className="mah-pos-field">
+                Предоплата, ₸
+                <input
+                  className="mah-pos-input"
+                  inputMode="decimal"
+                  value={reservationPrepayment}
+                  onChange={(event) =>
+                    setReservationPrepayment(event.target.value)
+                  }
+                  placeholder="Необязательно"
+                />
+              </label>
+              {reservationPrepayment && (
+                <label className="mah-pos-field wide">
+                  Способ предоплаты
+                  <select
+                    className="mah-pos-select"
+                    value={paymentMethodId ?? ''}
+                    onChange={(event) => setPaymentMethodId(event.target.value)}
+                  >
+                    {methods.map((method) => (
+                      <option key={method.id} value={method.id}>
+                        {method.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <button
+                type="button"
+                className="mah-pos-btn primary wide"
+                disabled={!reservationTableId || busy}
+                onClick={() => void createReservation()}
+              >
+                ЗАБРОНИРОВАТЬ
+              </button>
+            </div>
+          </div>
+          <div className="mah-pos-sheet-section">
+            <h3>Активные · {activeReservations.length}</h3>
+            <div className="mah-pos-reservation-list">
+              {activeReservations.length ? (
+                activeReservations.map((reservation) => {
+                  const table = allTables.find(
+                    (item) => item.id === reservation.tableId,
+                  );
+                  const overdue = isOverdueReservation(reservation, now);
+                  const prepayments = (rows.posPrepayments ?? []).filter(
+                    (item) => item.reservationId === reservation.id,
+                  );
+                  const prepaymentTotal = prepayments.reduce(
+                    (sum, item) => sum + micros(item.amount),
+                    0,
+                  );
+                  return (
+                    <article
+                      className={`mah-pos-reservation-item ${overdue ? 'overdue' : ''}`}
+                      key={reservation.id}
+                    >
+                      <div className="mah-pos-reservation-item-head">
+                        <strong>
+                          Стол {table?.number ?? '—'} ·{' '}
+                          {reservation.guestName || 'Без имени'}
+                        </strong>
+                        <time className={overdue ? 'mah-pos-negative-time' : ''}>
+                          {overdue
+                            ? formatNegativeTimer(reservation.scheduledAt, now)
+                            : timeOnly(reservation.scheduledAt)}
+                        </time>
+                      </div>
+                      <div className="mah-pos-reservation-item-meta">
+                        {reservation.phone && <span>{reservation.phone}</span>}
+                        {prepaymentTotal > 0 && (
+                          <span>Предоплата {money(prepaymentTotal)}</span>
+                        )}
+                        {!reservation.scheduledAt && <span>Без времени</span>}
+                      </div>
+                      <div className="mah-pos-reservation-item-actions">
+                        <button
+                          type="button"
+                          className="mah-pos-btn primary"
+                          disabled={!activeShift || busy || !table}
+                          onClick={() => {
+                            if (table) void openTable(reservation, table);
+                          }}
+                        >
+                          Открыть заказ
+                        </button>
+                        <button
+                          type="button"
+                          className="mah-pos-btn"
+                          disabled={busy}
+                          onClick={() => {
+                            setPendingAction({
+                              title: 'Отметить гостей как не пришедших?',
+                              description:
+                                'Бронирование останется в истории со статусом «Не пришли».',
+                              command: 'updateReservationStatus',
+                              payload: {
+                                reservationId: reservation.id,
+                                status: 'NO_SHOW',
+                                idempotencyKey: uuid(),
+                              },
+                              success: 'Отмечено: гости не пришли',
+                              returnTo: 'reservation',
+                              danger: true,
+                            });
+                            setSheet('confirm');
+                          }}
+                        >
+                          Не пришли
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })
+              ) : (
+                <div className="mah-pos-empty-lines">
+                  Активных бронирований нет
+                </div>
+              )}
+            </div>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === 'stop-list' && (
+        <Sheet
+          title="Стоп-лист"
+          subtitle="Изменения проверяются сервером при каждом добавлении блюда"
+          onClose={() => setSheet(null)}
+        >
+          <div className="mah-pos-stop-list">
+            {menu.map((item) => {
+              const stopped = stopList.has(item.id);
+              return (
+                <div
+                  className={`mah-pos-stop-row ${stopped ? 'stopped' : ''}`}
+                  key={item.id}
+                >
+                  <div>
+                    <strong>{item.name}</strong>
+                    <small>{money(item.price)}</small>
+                  </div>
+                  <button
+                    type="button"
+                    className={`mah-pos-btn ${stopped ? 'success' : 'danger'}`}
+                    disabled={busy}
+                    onClick={() =>
+                      void run(
+                        stopped
+                          ? 'clearStopListEntry'
+                          : 'addStopListEntry',
+                        { menuItemId: item.id, idempotencyKey: uuid() },
+                        stopped
+                          ? 'Блюдо снова доступно'
+                          : 'Блюдо добавлено в стоп-лист',
+                      )
+                    }
+                  >
+                    {stopped ? 'Вернуть' : 'Нет в наличии'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === 'admin' && selectedOrder && session.staff.role === 'ADMIN' && (
+        <Sheet
+          title="Действия администратора"
+          subtitle={`Стол ${selectedTable?.number ?? '—'} · изменения попадут в аудит`}
+          onClose={() => setSheet(null)}
+          wide
+        >
+          {orderPrecheck && (
+            <div className="mah-pos-admin-block danger">
+              <h3>Пречек</h3>
+              <button
+                type="button"
+                className="mah-pos-btn danger"
+                style={{ width: '100%' }}
+                disabled={busy}
+                onClick={() => {
+                  setPendingAction({
+                    title: 'Отменить пречек?',
+                    description:
+                      'Заказ снова станет доступен для изменений. Действие сохранится в аудите.',
+                    command: 'cancelPrecheck',
+                    payload: {
+                      orderId: selectedOrder.id,
+                      idempotencyKey: uuid(),
+                    },
+                    success: 'Пречек отменён · заказ снова доступен',
+                    returnTo: 'admin',
+                    danger: true,
+                  });
+                  setSheet('confirm');
+                }}
+              >
+                Отменить пречек
+              </button>
+            </div>
+          )}
+          <div className="mah-pos-admin-block">
+            <h3>Перенести заказ</h3>
+            <div className="mah-pos-form two">
+              <label className="mah-pos-field">
+                Другой стол
+                <select
+                  className="mah-pos-select"
+                  defaultValue=""
+                  onChange={(event) => {
+                    if (!event.target.value) return;
+                    const targetTable = allTables.find(
+                      (table) => table.id === event.target.value,
+                    );
+                    setPendingAction({
+                      title: `Перенести заказ на стол ${targetTable?.number ?? '—'}?`,
+                      description:
+                        'Текущий стол освободится, а заказ и его история сохранятся.',
+                      command: 'transferOrderToTable',
+                      payload: {
+                        orderId: selectedOrder.id,
+                        targetTableId: event.target.value,
+                        idempotencyKey: uuid(),
+                      },
+                      success: 'Заказ перенесён на другой стол',
+                      returnTo: 'admin',
+                    });
+                    setSheet('confirm');
+                  }}
+                >
+                  <option value="">Выберите стол…</option>
+                  {allTables
+                    .filter(
+                      (table) =>
+                        table.id !== selectedOrder.tableId &&
+                        !orders.some(
+                          (order) =>
+                            order.tableId === table.id && isActiveOrder(order),
+                        ),
+                    )
+                    .map((table) => (
+                      <option key={table.id} value={table.id}>
+                        Стол {table.number}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label className="mah-pos-field">
+                Другому официанту
+                <select
+                  className="mah-pos-select"
+                  defaultValue=""
+                  onChange={(event) => {
+                    if (!event.target.value) return;
+                    const targetStaff = (rows.posStaffs ?? []).find(
+                      (staff) => staff.id === event.target.value,
+                    );
+                    setPendingAction({
+                      title: `Передать заказ сотруднику ${targetStaff?.displayName ?? '—'}?`,
+                      description:
+                        'Новый сотрудник станет владельцем заказа. Изменение сохранится в аудите.',
+                      command: 'transferOrderToWaiter',
+                      payload: {
+                        orderId: selectedOrder.id,
+                        targetStaffId: event.target.value,
+                        idempotencyKey: uuid(),
+                      },
+                      success: 'Заказ передан другому официанту',
+                      returnTo: 'admin',
+                    });
+                    setSheet('confirm');
+                  }}
+                >
+                  <option value="">Выберите сотрудника…</option>
+                  {(rows.posStaffs ?? [])
+                    .filter(
+                      (staff) =>
+                        staff.isActive !== false &&
+                        staff.id !== selectedOrder.ownerStaffId,
+                    )
+                    .map((staff) => (
+                      <option key={staff.id} value={staff.id}>
+                        {staff.displayName}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            </div>
+          </div>
+          <div className="mah-pos-admin-block danger">
+            <h3>Позиции заказа</h3>
+            <div className="mah-pos-line-picker">
+              {activeLines.map((line) => (
+                <label className="mah-pos-check-line" key={line.id}>
+                  <input
+                    type="checkbox"
+                    checked={selectedLineIds.includes(line.id)}
+                    onChange={(event) =>
+                      setSelectedLineIds((current) =>
+                        event.target.checked
+                          ? [...current, line.id]
+                          : current.filter((id) => id !== line.id),
+                      )
+                    }
+                  />
+                  <span>
+                    {line.itemNameSnapshot} · {line.quantity} ×{' '}
+                    {money(line.unitPrice)}
+                  </span>
+                </label>
+              ))}
+            </div>
+            <div className="mah-pos-actions" style={{ marginTop: 10 }}>
+              <button
+                type="button"
+                className="mah-pos-btn danger"
+                disabled={!selectedLineIds.length}
+                onClick={() => setSheet('void')}
+              >
+                Отменить выбранное
+              </button>
+              <select
+                className="mah-pos-select"
+                defaultValue=""
+                disabled={!selectedLineIds.length}
+                onChange={(event) => {
+                  if (!event.target.value) return;
+                  const targetGuest = guests.find(
+                    (guest) => guest.id === event.target.value,
+                  );
+                  setPendingAction({
+                    title: `Перенести ${selectedLineIds.length} поз. гостю ${targetGuest?.displayNumber ?? targetGuest?.name ?? '—'}?`,
+                    description:
+                      'Позиции останутся в этом заказе, но изменят гостя. Действие сохранится в аудите.',
+                    command: 'transferOrderLinesToGuest',
+                    payload: {
+                      lineIds: selectedLineIds,
+                      targetGuestId: event.target.value,
+                      idempotencyKey: uuid(),
+                    },
+                    success: 'Позиции перенесены другому гостю',
+                    returnTo: 'admin',
+                  });
+                  setSheet('confirm');
+                }}
+              >
+                <option value="">Перенести гостю…</option>
+                {guests.map((guest) => (
+                  <option key={guest.id} value={guest.id}>
+                    {guest.displayNumber ?? guest.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === 'void' && session.staff.role === 'ADMIN' && (
+        <Sheet
+          title="Отмена блюда"
+          subtitle={`${selectedLines.length} позиций · запись останется в истории`}
+          onClose={() => setSheet('admin')}
+          footer={
+            <button
+              type="button"
+              className="mah-pos-btn danger"
+              style={{ width: '100%' }}
+              disabled={busy || !selectedLines.length}
+              onClick={() => void voidSelectedLines()}
+            >
+              ПОДТВЕРДИТЬ ОТМЕНУ
+            </button>
+          }
+        >
+          {selectedLinesWereSent && (
+            <div className="mah-pos-confirm">
+              <strong>Будет создана отмена для кухни</strong>
+              Отправленные позиции попадут в cancellation kitchen ticket.
+            </div>
+          )}
+          <div className="mah-pos-sheet-section" style={{ marginTop: 16 }}>
+            <h3>Состояние приготовления</h3>
+            <div className="mah-pos-radio-grid">
+              {(
+                [
+                  ['PREPARED', 'Было приготовлено'],
+                  ['NOT_PREPARED', 'Не было приготовлено'],
+                ] as const
+              ).map(([value, label]) => (
+                <label
+                  className={`mah-pos-radio ${voidPreparedState === value ? 'selected' : ''}`}
+                  key={value}
+                >
+                  <input
+                    type="radio"
+                    name="prepared-state"
+                    checked={voidPreparedState === value}
+                    onChange={() => setVoidPreparedState(value)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </div>
+          <label className="mah-pos-field">
+            Причина
+            <textarea
+              className="mah-pos-textarea"
+              value={voidReason}
+              onChange={(event) => setVoidReason(event.target.value)}
+              placeholder="Необязательно"
+            />
+          </label>
+        </Sheet>
+      )}
+
+      {sheet === 'confirm' && pendingAction && (
+        <Sheet
+          title={pendingAction.title}
+          subtitle="Проверьте действие перед подтверждением"
+          onClose={() => {
+            setSheet(pendingAction.returnTo);
+            setPendingAction(null);
+          }}
+          footer={
+            <div className="mah-pos-actions">
+              <button
+                type="button"
+                className="mah-pos-btn"
+                onClick={() => {
+                  setSheet(pendingAction.returnTo);
+                  setPendingAction(null);
+                }}
+              >
+                Назад
+              </button>
+              <button
+                type="button"
+                className={`mah-pos-btn ${pendingAction.danger ? 'danger' : 'primary'}`}
+                disabled={busy}
+                onClick={() => void confirmAction()}
+              >
+                ПОДТВЕРДИТЬ
+              </button>
+            </div>
+          }
+        >
+          <div className="mah-pos-confirm">
+            <strong>{pendingAction.title}</strong>
+            {pendingAction.description}
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === 'session' && (
+        <Sheet
+          title="Смена и сотрудник"
+          subtitle={`${session.staff.displayName} · ${session.staff.role === 'ADMIN' ? 'Администратор' : 'Официант'}`}
+          onClose={() => {
+            setShiftCloseConfirm(false);
+            setSheet(null);
+          }}
+        >
+          <div className="mah-pos-sheet-section">
+            <div className="mah-pos-payment-summary">
+              <div className="mah-pos-total-row">
+                <span>Статус</span>
+                <strong>{activeShift ? 'Открыта' : 'Закрыта'}</strong>
+              </div>
+              {activeShift && (
+                <>
+                  <div className="mah-pos-total-row">
+                    <span>Начало</span>
+                    <strong>{dateTime(activeShift.openedAt)}</strong>
+                  </div>
+                  <div className="mah-pos-total-row">
+                    <span>Длительность</span>
+                    <strong>
+                      {formatShiftDuration(activeShift.openedAt, now)}
+                    </strong>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+          <div className="mah-pos-form">
+            {!activeShift ? (
+              <button
+                type="button"
+                className="mah-pos-btn primary"
+                disabled={busy}
+                onClick={() =>
+                  void run(
+                    'openShift',
+                    { idempotencyKey: uuid() },
+                    'Смена открыта',
+                  )
+                }
+              >
+                Открыть смену
+              </button>
+            ) : shiftCloseConfirm ? (
+              <div className="mah-pos-confirm">
+                <strong>Закрыть текущую смену?</strong>
+                Открытые заказы и столы останутся активными.
+                <div className="mah-pos-actions" style={{ marginTop: 10 }}>
+                  <button
+                    type="button"
+                    className="mah-pos-btn"
+                    onClick={() => setShiftCloseConfirm(false)}
+                  >
+                    Назад
+                  </button>
+                  <button
+                    type="button"
+                    className="mah-pos-btn danger"
+                    disabled={busy}
+                    onClick={() =>
+                      void run(
+                        'closeShift',
+                        { shiftId: activeShift.id },
+                        'Смена закрыта · открытые столы сохранены',
+                      )
+                    }
+                  >
+                    Закрыть смену
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="mah-pos-btn danger"
+                onClick={() => setShiftCloseConfirm(true)}
+              >
+                Закрыть смену
+              </button>
+            )}
+            <button
+              type="button"
+              className="mah-pos-btn"
+              disabled={syncing}
+              onClick={() =>
+                void load().catch((value) => setError(commandError(value)))
+              }
+            >
+              {syncing ? 'Обновляем…' : 'Обновить данные'}
+            </button>
+            <button
+              type="button"
+              className="mah-pos-btn ghost"
+              onClick={() => void logout()}
+            >
+              Выйти из POS
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {(notice || error) && (
+        <div className="mah-pos-toast-stack" aria-live="polite">
+          {notice && <div className="mah-pos-toast">{notice}</div>}
+          {error && <div className="mah-pos-toast error">{error}</div>}
+        </div>
+      )}
+    </div>
+  );
 };
 
 export default defineFrontComponent({
   universalIdentifier: MAHABBAT_POS_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
   name: 'mahabbat-pos',
-  description: 'Touch-oriented operational POS for Mahabbat restaurant workflows',
+  description:
+    'Touch-oriented operational POS for Mahabbat restaurant workflows',
   component: PosFrontComponent,
 });

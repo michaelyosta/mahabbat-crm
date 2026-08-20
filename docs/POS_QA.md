@@ -83,6 +83,25 @@
   browser.
 - Local gates: `yarn lint`, `yarn typecheck`, `yarn test:unit` (230/230).
 
+## Product/UX refinement result — 2026-08-20
+
+- Browser (`:2020`): PIN login; compact shift header; free/own/other/overdue
+  table cards; order panel with guests, lines, sent/new kitchen states and
+  sticky total/actions; stop-list; reservation sheet; explicit `NO_SHOW`
+  confirmation; precheck lock; payment sheet; and ADMIN sheet all behaved as
+  expected. Selecting a payment method no longer closes its sheet: the Twenty
+  sandbox retargets pointer events, so sheets close only through their explicit
+  close control.
+- Browser (`:3000`): the same deployed `Касса` re-authenticated and loaded the
+  seeded zones, tables and menu from the real server. The component root fitted
+  the available canvas with no document scroll at both 1920×1080 and 1366×768;
+  menu/order panels retain their own scroll where needed.
+- Automated: `yarn lint`, `yarn typecheck`, `yarn test:unit` (236/236) and
+  `yarn seed:pos:dry` passed. `scripts/accept-pos.mjs` remained 78/78 on each
+  target, including money, command authorization, concurrency, idempotency and
+  CRM smoke. Linux SDK replan is clean on both targets. No physical printer,
+  fiscal or bank-terminal behavior was introduced.
+
 ## CJ (frontend-IST)
 - Не входит в runtime acceptance slice 1 (серверная граница). Пользовательский сценарий клиента через Vue компоненты — слайс UI (отдельно от slice 1).
 
