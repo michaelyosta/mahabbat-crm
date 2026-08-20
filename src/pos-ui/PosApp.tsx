@@ -1060,12 +1060,33 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
 
   useEffect(() => {
     if (!session) return;
-    void load().catch((value) => setError(commandError(value)));
+    void load().catch((value) => {
+      const body = (value as unknown as { body?: { code?: string } })?.body;
+      const code = String(body?.code ?? '');
+      if (['POS_SESSION_EXPIRED', 'POS_SESSION_INVALID', 'POS_SESSION_REQUIRED', 'POS_STAFF_LOCKED', 'POS_STAFF_INACTIVE'].includes(code)) {
+        setSession(null);
+        setError('Сессия истекла. Введите PIN снова.');
+        return;
+      }
+      const msg = commandError(value);
+      const isNetwork = msg.includes('Нет связи') || msg.includes('Failed to fetch') || msg.includes('NetworkError');
+      setError(isNetwork ? 'Нет связи с сервером. Проверьте сеть и попробуйте снова.' : msg);
+    });
     const refreshTimer = globalThis.setInterval(() => {
-      void load().catch((value) => setError(commandError(value)));
+      void load().catch((value) => {
+        const body = (value as unknown as { body?: { code?: string } })?.body;
+        const code = String(body?.code ?? '');
+        if (['POS_SESSION_EXPIRED', 'POS_SESSION_INVALID', 'POS_SESSION_REQUIRED'].includes(code)) {
+          setSession(null);
+          setError('Сессия истекла. Введите PIN снова.');
+          globalThis.clearInterval(refreshTimer);
+          return;
+        }
+        setError(commandError(value));
+      });
     }, 12_000);
     return () => globalThis.clearInterval(refreshTimer);
-  }, [load, session]);
+  }, [load, session, setSession]);
 
   useEffect(() => {
     if (!session) return;
@@ -1100,13 +1121,23 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
         if (success) setNotice(success);
         return result;
       } catch (value) {
-        setError(commandError(value));
+        const msg = commandError(value);
+        const raw = String((value as unknown as { message?: string })?.message ?? '');
+        const isFetch = raw.toLowerCase().includes('fetch') || raw.toLowerCase().includes('network') || msg.includes('Нет связи');
+        if (isFetch && msg === 'Не удалось выполнить операцию. Обновите данные и попробуйте снова') {
+          setError('Нет связи с сервером. Проверьте сеть и попробуйте снова.');
+        } else if (String((value as unknown as { body?: { code?: string } })?.body?.code ?? '') === 'POS_SESSION_EXPIRED' || String((value as unknown as { body?: { code?: string } })?.body?.code ?? '') === 'POS_SESSION_INVALID') {
+          setSession(null);
+          setError('Сессия истекла. Введите PIN снова.');
+        } else {
+          setError(msg);
+        }
         return null;
       } finally {
         setBusyCommand(null);
       }
     },
-    [command, load],
+    [command, load, setSession],
   );
 
   const login = async () => {

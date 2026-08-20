@@ -20,6 +20,7 @@ generated
 
 # dev
 /dist/
+/pos-standalone/dist-web/
 
 .twenty
 

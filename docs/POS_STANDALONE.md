@@ -57,7 +57,7 @@ Twenty Server
 
 10. **Reuse command handlers?** Yes — `pos-auth.ts` + `pos-command.dispatch.ts` + `pos-command-input.ts` are pure functions over `CoreApiClientLike`. They don't depend on Twenty page layout.
 
-11. **Will business logic duplicate?** Gateway must not copy domain rules. It will import the same dispatch/auth modules and call them with `asClient()` (service identity). REST reads in standalone will also go through gateway that re-validates PosSession and proxies GraphQL/REST with service cred — no second totals/locks implementation.
+11. **Will business logic duplicate?** Gateway must not copy domain rules. Standalone commands are signed and delegated to the existing app-only resolver, which already calls `pos-auth.ts` and `dispatchPosCommand` with `asClient()` (service identity). REST reads are a narrow gateway proxy that re-validates `PosSession` and uses server-only service auth; it contains no totals, locks, permissions, or state-machine implementation.
 
 12. **CORS/CSRF?** If standalone origin differs from gateway origin, CORS must be explicit. Prefer single origin deployment `pos.mahabbat.local` (or `LAN_IP:3100`) serving both static UI and `/api/*` via same reverse proxy/gateway — avoids CORS entirely. For dev, two origins (`vite :5173` ↔ `gateway :3100`) use `Access-Control-Allow-Origin` + `Vary: Origin` with no credentials.
 
@@ -109,7 +109,7 @@ interface PosApi {
   loginWithPin(pin: string, terminalId?: string): Promise<PosSession>;
   logout(): Promise<void>;
   list(collection: string): Promise<PosRow[]>;
-  run(command: string, payload: Record<string, unknown>): Promise<unknown>;
+  command(command: string, payload: Record<string, unknown>): Promise<unknown>;
 }
 ```
 
@@ -154,3 +154,59 @@ Gateway does not reimplement `recordPayment/closeOrder/...` rules. It forwards t
 - Log `requestId, command, status, staffId?, latency` server-side; omit raw PIN & raw token.
 - PIN brute-force: keep process-local 5/60s guard (pilot) + document that production LAN/WAF should add distributed limit.
 - CORS: single-origin deployment avoids it; dev CORS is allowlist-based, no credentials.
+
+## Deployment
+
+### Dev
+```bash
+# 1. set server credentials (same as seed):
+export TWENTY_API_URL=http://localhost:3000  # or :2020 for disposable
+export MAHABBAT_API_KEY=<service-api-key>    # or TWENTY_API_KEY / TWENTY_APP_ACCESS_TOKEN
+export MAHABBAT_INTERNAL_ROUTE_SECRET=<private-secret>
+export POS_GATEWAY_PORT=3100
+
+# 2. run gateway + standalone web dev together (Vite :5174 proxies /api to gateway :3100)
+yarn pos:dev
+# then open http://localhost:5174  > PIN screen (no Twenty login)
+# or after pos:web:build open http://localhost:3100  (gateway + static)
+```
+
+### Self-host (Windows server PC + LAN)
+```bash
+# Build branded Twenty + POS gateway image
+docker build -f mahabbat-app/pos-standalone/Dockerfile -t mahabbat-pos-gateway:local .
+
+# Up: Twenty stack (3000) + POS gateway (3100)
+docker compose -f packages/twenty-docker/docker-compose.yml -f docker-compose.pos-standalone.yml up -d
+# or with existing logic-functions override:
+docker compose -f packages/twenty-docker/docker-compose.yml -f docker-compose.logic-functions.override.yml -f docker-compose.pos-standalone.yml up -d
+```
+
+- CRM stays at `http://<server>:3000` (or `http://mahabbat.local:3000`)
+- POS standalone at `http://<server-lan-ip>:3100` or `http://pos.mahabbat.local:3100`
+  (add hosts file on terminals or use LAN IP — never `localhost` on terminals)
+- Gateway env `TWENTY_API_URL=http://server:3000` when running in Docker
+- Kiosk: Windows login > Edge/Chrome auto-start `--kiosk http://pos.mahabbat.local:3100 --fullscreen` (fullscreen is aesthetic only — POS works in normal window too)
+- Responsive: verified 1920×1080, 1366×768. Standalone uses full viewport; no body scroll; no Twenty sidebar/header reserved.
+
+## Browser secret audit
+
+```bash
+yarn pos:web:build
+rg -n TWENTY_APP_ACCESS_TOKEN pos-standalone/dist-web/assets/ # must be 0
+rg -n MAHABBAT_INTERNAL_ROUTE_SECRET pos-standalone/dist-web/assets/ # 0
+rg -n TWENTY_API_KEY pos-standalone/dist-web/assets/ # 0
+# allowed browser keys: mahabbat:pos:session (short-lived token), PosApp logic
+```
+
+Network tab for `/api/pos/auth` and `/api/pos/command` must show only `pin` in request
+and `sessionToken` in response (once) plus `Authorization: Bearer <token>` — never service credentials.
+
+## Threat model (LAN)
+
+Standalone terminals are in trusted LAN (restaurant). Session token is stored in
+`sessionStorage` (cleared on logout) — acceptable for LAN kiosk; not hardened for
+open internet. Brute-force protection remains authoritative in `authenticatePosStaff`
+with a process-local 5 failures / 60 seconds guard; replace with distributed WAF
+before internet exposure. Tokens are SHA256-hashed server-side, time-bound 15m,
+revocable. Role/staffId are never accepted from client JSON.

@@ -97,16 +97,16 @@ export const createStandalonePosApi = (options: {
       );
       const envelope = await parseJson(response);
       if (!response.ok) {
+        // Normalize gateway Russian error for UI (already Russian, but map technical)
+        if (response.status === 401) {
+          (envelope as Record<string, unknown>).code = (envelope.code ?? 'POS_SESSION_EXPIRED') as string;
+        }
         throw toError(envelope, 'Ошибка загрузки данных');
       }
-      const raw = (envelope.data ?? envelope) as Record<string, unknown>;
-      const rows = (raw[collection] as PosRow[] | undefined) ?? (raw.data as Record<string, unknown> | undefined)?.[collection] as PosRow[] | undefined;
-      if (Array.isArray(rows)) return rows as PosRow[];
-      // Gateway proxies raw Twenty REST shape { data: { posZones: [...] } }
-      if (Array.isArray((envelope as unknown as { posZones?: unknown }).posZones)) {
-        return [] as PosRow[];
-      }
-      return (Array.isArray(rows) ? rows : []) as PosRow[];
+      // Gateway proxies Twenty REST shape: { data: { [collection]: [...] } }
+      const data = (envelope as unknown as { data?: Record<string, unknown> }).data;
+      const rows = (data?.[collection] as PosRow[] | undefined) ?? ((envelope as unknown as Record<string, unknown>)[collection] as PosRow[] | undefined);
+      return Array.isArray(rows) ? (rows as PosRow[]) : [];
     },
     command: async (name, payload) => {
       const session = options.getSession();

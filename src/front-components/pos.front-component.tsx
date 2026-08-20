@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { defineFrontComponent } from 'twenty-sdk/define';
 
 import { MAHABBAT_POS_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
@@ -9,7 +9,10 @@ import { createTwentyPosApi } from 'src/pos-ui/TwentyPosApi';
 const PosFrontComponent = () => {
   const [session, setSession] = useState<PosSession | null>(null);
   const getSession = useCallback(() => session, [session]);
-  const api = createTwentyPosApi(getSession, setSession);
+  const api = useMemo(
+    () => createTwentyPosApi(getSession, setSession),
+    [getSession],
+  );
 
   return <PosApp api={api} mode="embedded" initialSession={session} onSessionChange={setSession} />;
 };

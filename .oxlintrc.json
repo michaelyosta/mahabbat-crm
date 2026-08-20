@@ -4,7 +4,7 @@
   "categories": {
     "correctness": "off"
   },
-  "ignorePatterns": ["node_modules", "dist"],
+  "ignorePatterns": ["node_modules", "dist", "pos-standalone/dist-web"],
   "rules": {
     "no-unused-vars": "off",
 
