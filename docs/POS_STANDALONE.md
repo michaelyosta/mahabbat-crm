@@ -1,5 +1,47 @@
 # MAHABBAT POS — STANDALONE RUNTIME
 
+## Live data acceptance checkpoint — 2026-08-21
+
+The standalone runtime was exercised against the local self-hosted stack, not
+mock data: Twenty CRM remained on `http://127.0.0.1:3000`, the standalone
+gateway served `http://127.0.0.1:3100/`, and the browser entered directly on the
+PIN screen with no Twenty cookie or CRM shell.
+
+Evidence recorded for this checkpoint:
+
+- gateway PIN authentication returned server-derived WAITER and ADMIN
+  `PosSession` identities; real zones, tables and menu rows loaded;
+- the waiter browser flow persisted guests, lines, kitchen tickets, precheck,
+  partial card payment, cash tender/change and closed order state;
+- authoritative cash result was tendered 5,000 KZT, applied 1,900 KZT, change
+  3,100 KZT, remaining 0;
+- a second synthetic WAITER identity was used only as a disposable local
+  fixture to prove foreign-order mutation denial and shared table visibility;
+  the fixture's staff, shift and session rows were removed after the check;
+- stop-list rejection/recovery, overdue reservation persistence, no-session and
+  malformed-session denial, actor spoof denial, and gateway idempotency were
+  exercised through `/api/pos/*`;
+- the direct authoritative acceptance script completed `78/78`, including
+  reservation/prepayment, admin void/transfer, payment/cash, concurrent
+  terminal races and CRM create/read smoke;
+- an order written through the embedded `/s/pos/command` path was read back
+  through standalone gateway REST, proving one order state and one domain;
+- after stateless gateway restart the active order survived; a new browser
+  context requested PIN again, while a same-tab reload restores the
+  `sessionStorage` session when it is still valid;
+- disconnecting the gateway produced the operational Russian error
+  `Не удалось выполнить операцию. Обновите данные и попробуйте снова`; after
+  recovery the browser returned to `Данные актуальны` with the live order
+  intact;
+- populated state passed at 1920×1080 and 1366×768 with no document/body
+  scroll and no Twenty sidebar/header.
+
+For this local checkpoint `TWENTY_API_URL`, `TWENTY_API_KEY`, and
+`MAHABBAT_INTERNAL_ROUTE_SECRET` were provisioned only in private server-side
+runtime environment. Their values are intentionally absent from this document,
+the repository, and the browser bundle. The API key used for acceptance is a
+disposable development credential; this is not an internet-grade threat model.
+
 ## CURRENT — Twenty embedded host
 
 ```
