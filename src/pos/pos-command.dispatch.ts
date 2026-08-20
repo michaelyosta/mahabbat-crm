@@ -26,6 +26,19 @@ import {
 } from 'src/pos/kitchen-print-adapter';
 import { precheckPrintAdapter } from 'src/pos/precheck-print-adapter';
 
+const ensureInventoryConsumptionRequest = async (client: CoreApiClientLike, orderId: string): Promise<void> => {
+  try {
+    await client.mutation({
+      createInventoryConsumptionRequest: {
+        __args: { data: { orderId, status: 'PENDING', idempotencyKey: orderId, attemptCount: 0 } },
+        id: true,
+      },
+    });
+  } catch {
+    // recovery cron will handle
+  }
+};
+
 type ExistingRecord = {
   id: string;
 };
@@ -2736,6 +2749,7 @@ export const executeCloseOrder = async (
     if (replay.id !== payload.orderId || replay.closedByStaffId !== actor.staffId) {
       return idempotencyConflict('The idempotency key belongs to another close-order context.');
     }
+    await ensureInventoryConsumptionRequest(client, payload.orderId);
     return closeOrderResponse(replay, 200);
   }
 
@@ -2784,14 +2798,23 @@ export const executeCloseOrder = async (
     });
     if (mutationUpdatedRows(result, 'updatePosOrders') === 0) {
       const raced = await findOrderByCloseIdempotencyKey(client, payload.idempotencyKey);
-      if (raced) return closeOrderResponse(raced, 200);
+      if (raced) {
+        await ensureInventoryConsumptionRequest(client, payload.orderId);
+        return closeOrderResponse(raced, 200);
+      }
       return errorResult('CONFLICT', 'Order close lost a concurrent state transition.');
     }
   } catch {
     const raced = await findOrderByCloseIdempotencyKey(client, payload.idempotencyKey);
-    if (raced) return closeOrderResponse(raced, 200);
+    if (raced) {
+      await ensureInventoryConsumptionRequest(client, payload.orderId);
+      return closeOrderResponse(raced, 200);
+    }
     const refreshed = await findOrderById(client, order.id);
-    if (refreshed?.status === 'CLOSED') return closeOrderResponse(refreshed, 200);
+    if (refreshed?.status === 'CLOSED') {
+      await ensureInventoryConsumptionRequest(client, payload.orderId);
+      return closeOrderResponse(refreshed, 200);
+    }
     return errorResult('CONFLICT', 'Order could not be closed.');
   }
 
@@ -2803,6 +2826,7 @@ export const executeCloseOrder = async (
     closeIdempotencyKey: payload.idempotencyKey,
     claimToken: null,
   };
+  await ensureInventoryConsumptionRequest(client, order.id);
   return closeOrderResponse(closed, 201);
 };
 
