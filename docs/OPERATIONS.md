@@ -105,11 +105,11 @@ secrets review and recovery point.
   worker `SERVER_URL=http://server:3000`, Redis and the pending-request
   reconciliation path.
 - **A newly applied App object is missing inside a local logic function:** the
-  generated SDK archive can be current while a non-persistent LOCAL driver
-  SDK layer remains stale. After verifying the App plan is clean, remove only
-  the exact `/tmp/logic-function-executor-tmpdir/sdk/<workspace>-<app>` cache
-  directory in the affected server/worker containers and retry. Do not delete
-  PostgreSQL data or broad application storage.
+  generated SDK archive can be current while a non-persistent LOCAL executor
+  layer remains stale. After verifying the App plan is clean, recreate only
+  the affected stateless server/logic executor, then run
+  `yarn verify-runtime-api-parity`. Do not delete PostgreSQL data, Redis
+  persistent data, workspace metadata or broad application storage.
 - **Browser redirects to localhost:** check external-origin/base-URL settings;
   do not expose internal URLs.
 - **Duplicate import risk:** stop the import, inspect provider/externalId or
@@ -149,3 +149,30 @@ outside the application codebase:
 
 This is a v2.29.0 platform limitation (see `docs/TWENTY_GAPS.md`), not a
 Mahabbat core change; re-evaluate on a future Twenty upgrade.
+
+## Inventory pilot deployment invariant
+
+After any Mahabbat App metadata/object change, use this exact bounded sequence:
+
+1. Apply metadata and generate the SDK: `yarn twenty apply -r
+   selfhost-container`.
+2. Recreate only the stateless server/logic-function executor if the generated
+   runtime layer is not refreshed. The supported recovery target is the
+   executor process/container, not the database.
+3. Run `yarn verify-runtime-api-parity`. It must report
+   `inventoryStockLocations=present` before acceptance starts.
+4. Check `GET /healthz`; if the domain changed, run one minimal Inventory write
+   on synthetic data.
+5. Run `scripts/accept-inventory.mjs`, then
+   `scripts/reconcile-inventory.mjs` and require zero mismatches.
+
+Stateful boundary: PostgreSQL volumes, Twenty local storage, Redis persistent
+data when configured, customer/CRM/POS records and production metadata. Never
+delete or recreate these as a runtime refresh. Stateless boundary: server,
+worker and logic-function executor processes, generated SDK layers under `/tmp`,
+and disposable CLI/build output. These may be restarted or recreated after the
+guarded diagnosis.
+
+For a person-facing demo, use the additive namespace seed documented in
+`docs/INVENTORY_HUMAN_REVIEW.md`. It does not provide a generic reset and does
+not delete acceptance or customer data. Keep the admin PIN and API key private.

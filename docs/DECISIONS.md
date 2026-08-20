@@ -493,3 +493,23 @@ GraphQL schema were current. Recreating only the stateless server rebuilt the
 runtime layer. `yarn verify-runtime-api-parity` is now the cheap post-deploy
 guard. Twenty core modifications remain `0`; the final `:3000` acceptance is
 48/48 and reconciliation is zero mismatches.
+
+## 2026-08-21 — Freeze Inventory pilot for human product review
+
+Решение: остановить расширение Inventory domain после доказанного runtime
+recovery. Baseline интегрирован fast-forward в Mahabbat `main`, а
+`inventory-pilot-ready-v1` является annotated checkpoint перед реальной
+проверкой сотрудником. Ledger, balances, quantities, MWA, recipes, revisions,
+transfers, POS close consumption, idempotency и reconciliation не меняются без
+реального P0/P1 feedback или подтверждённого business requirement.
+
+Для deployment зафиксирована последовательность metadata apply → SDK
+regeneration → stateless executor refresh → `verify-runtime-api-parity` →
+minimal write → acceptance → reconciliation. PostgreSQL, Redis, CRM/POS data
+и production metadata находятся за stateful boundary и не очищаются.
+
+Human review получает additive synthetic namespace через
+`scripts/seed-inventory-human-review.mjs`; generic destructive reset намеренно
+не добавляется. Следующий product gate — наблюдаемый сотрудником путь
+Приход → Производство → Перемещение → Расход → Ревизия, а не новый automated
+domain scope.

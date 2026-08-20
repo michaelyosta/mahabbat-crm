@@ -151,3 +151,16 @@ had the Inventory schema, while the loaded `CoreApiClient` artifact did not.
 Recreating only that stateless server runtime rebuilt the SDK from the current
 App-generated ZIP. `scripts/verify-runtime-api-parity.mjs` guards the exact
 runtime artifact; persistent data is not part of the recovery sequence.
+
+## Current product boundary — pilot freeze
+
+Mahabbat CRM / Backoffice contains Customers, Orders, Loyalty, Reservations
+and Inventory. Operational POS contains Tables, Orders, Kitchen, Precheck and
+Payments. The only critical Inventory integration is:
+
+`CLOSED Order → InventoryConsumptionRequest → stock consumption`
+
+Standalone POS remains a separate runtime concern for the operational cashier;
+Inventory remains the backoffice warehouse surface inside CRM. The pilot is
+frozen at `inventory-pilot-ready-v1`; human review may change presentation
+copy or workflow only when a real P0/P1 finding justifies it.

@@ -28,7 +28,7 @@
   `scripts/accept-inventory.mjs` at **48/48 PASS**. The run included the
   production POS close → inventory consumption path and duplicate processor
   retry.
-- The final read-only probe reported `balances=48 movements=154
+- The latest post-integration read-only probe reported `balances=53 movements=173
   mismatches=0` on `:3000` after the browser smoke. No PostgreSQL or Redis
   volume was deleted or recreated.
 - Browser evidence on `:3000` now includes a real write: `Склад` → `Приход`
@@ -130,6 +130,40 @@ Same receipt idempotency, two receipts, two productions, production+sale, transf
 
 ## Security
 - Inventory writes `ADMIN` only via `getAuthenticatedPosContext()`, WAITER cannot receipt/produce/transfer. Audit via `actorStaffId` in every movement.
+
+## Inventory Pilot Freeze — 2026-08-21
+
+The integrated pilot baseline is commit `3bdeafb` plus the bounded freeze and
+human-review preparation commit on `codex/inventory-live-pilot`. The annotated
+checkpoint is `inventory-pilot-ready-v1`. It is a tested software checkpoint,
+not a production release.
+
+The following domain contracts are frozen until a real bug, staff feedback, or
+confirmed business requirement: append-only `StockMovement`, projected
+`StockBalance`, fixed-point quantities, MWA costing, locations/items and
+material types, recipes and effective versions, production, CLOSED Order
+consumption, PREPARED void versus NOT_PREPARED skip, transfers, write-offs,
+revision lifecycle, NULL-versus-zero actual semantics,
+`UNRECORDED_PRODUCTION`, idempotency, concurrency safeguards and
+reconciliation. Do not add suppliers, procurement, FIFO/LIFO, batches,
+expiry, barcode, forecasting, reporting, printers, fiscalization, terminals or
+ERP scope during the pilot freeze.
+
+The standard post-metadata deployment invariant is:
+
+1. `yarn twenty apply -r selfhost-container` (metadata apply and SDK generation).
+2. Recreate only the stateless server/logic executor when its generated layer
+   must be refreshed; never delete PostgreSQL or Redis volumes.
+3. Run `yarn verify-runtime-api-parity` and require
+   `inventoryStockLocations=present`.
+4. Check health; if domain metadata changed, run one minimal write smoke.
+5. Run full acceptance and `scripts/reconcile-inventory.mjs` where relevant.
+
+The guard is read-only and fails fast against the generated client artifact
+actually loaded by the executor. Stateful data is never part of this refresh.
+The human-review fixture is additive and namespace-scoped; use
+`scripts/seed-inventory-human-review.mjs` with a private PIN/API key and a new
+namespace per review. There is deliberately no generic destructive reset.
 
 ## Known limitations (§82)
 - Windows SDK paths — use Linux/WSL for plan/apply.

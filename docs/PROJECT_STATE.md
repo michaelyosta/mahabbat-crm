@@ -499,3 +499,23 @@ hardware/printer/fiscal-payment discovery; do not start it automatically.
 - Local gates: lint/typecheck pass; unit tests are 236/236. The unchanged
   78-check live API harness passed on both `:2020` and `:3000`; both Linux SDK
   replans are clean. Twenty core modifications remain 0.
+
+## Inventory pilot freeze and human-review readiness — 2026-08-21
+
+- `codex/inventory-live-pilot` was fast-forward integrated into the Mahabbat
+  `main` baseline at `3bdeafb`; the linked Standalone POS worktree remained
+  untouched with its owner changes preserved.
+- Current integrated proof: typecheck, lint, unit 262/262, POS API 78/78,
+  Inventory `:3000` 48/48, reconciliation `balances=53 movements=173
+  mismatches=0`, CRM smoke, and runtime parity guard all pass. Twenty core
+  modifications remain 0.
+- `inventory-pilot-ready-v1` is the annotated frozen software checkpoint.
+  Inventory domain semantics and the CLOSED Order consumption contract are
+  frozen until real staff feedback or a confirmed bug/requirement.
+- Deployment invariant is documented: metadata apply → SDK regeneration →
+  stateless executor refresh → runtime parity guard → minimal write → full
+  acceptance → reconciliation. Stateful PostgreSQL/Redis/customer/POS data is
+  never part of a runtime refresh.
+- `docs/INVENTORY_HUMAN_REVIEW.md` and the additive namespace seed prepare the
+  next step: a human product review of Остатки, Приход, Производство,
+  Перемещение, Расход, Ревизия, История and Калькуляции.
