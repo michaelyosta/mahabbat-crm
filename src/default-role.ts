@@ -30,6 +30,17 @@ import { POS_ZONE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-zone.object';
 import { POS_RESERVATION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-reservation.object';
 import { POS_PREPAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-prepayment.object';
 import { POS_OPERATIONAL_EVENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-operational-event.object';
+import { INVENTORY_STOCK_LOCATION_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-stock-location.object';
+import { INVENTORY_STOCK_ITEM_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-stock-item.object';
+import { INVENTORY_STOCK_BALANCE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-stock-balance.object';
+import { INVENTORY_STOCK_MOVEMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-stock-movement.object';
+import { INVENTORY_RECIPE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-recipe.object';
+import { INVENTORY_RECIPE_VERSION_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-recipe-version.object';
+import { INVENTORY_RECIPE_LINE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-recipe-line.object';
+import { INVENTORY_CONSUMPTION_REQUEST_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-consumption-request.object';
+import { INVENTORY_CONSUMPTION_ISSUE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-consumption-issue.object';
+import { INVENTORY_COUNT_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-count.object';
+import { INVENTORY_COUNT_LINE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-count-line.object';
 
 export default defineApplicationRole({
   universalIdentifier: DEFAULT_ROLE_UNIVERSAL_IDENTIFIER,
@@ -114,6 +125,25 @@ export default defineApplicationRole({
       POS_RESERVATION_UNIVERSAL_IDENTIFIER,
       POS_PREPAYMENT_UNIVERSAL_IDENTIFIER,
       POS_OPERATIONAL_EVENT_UNIVERSAL_IDENTIFIER,
+    ].map((objectUniversalIdentifier) => ({
+      objectUniversalIdentifier,
+      canReadObjectRecords: true,
+      canUpdateObjectRecords: true,
+      canSoftDeleteObjectRecords: false,
+      canDestroyObjectRecords: false,
+    })),
+    ...[
+      INVENTORY_STOCK_LOCATION_UNIVERSAL_IDENTIFIER,
+      INVENTORY_STOCK_ITEM_UNIVERSAL_IDENTIFIER,
+      INVENTORY_STOCK_BALANCE_UNIVERSAL_IDENTIFIER,
+      INVENTORY_STOCK_MOVEMENT_UNIVERSAL_IDENTIFIER,
+      INVENTORY_RECIPE_UNIVERSAL_IDENTIFIER,
+      INVENTORY_RECIPE_VERSION_UNIVERSAL_IDENTIFIER,
+      INVENTORY_RECIPE_LINE_UNIVERSAL_IDENTIFIER,
+      INVENTORY_CONSUMPTION_REQUEST_UNIVERSAL_IDENTIFIER,
+      INVENTORY_CONSUMPTION_ISSUE_UNIVERSAL_IDENTIFIER,
+      INVENTORY_COUNT_UNIVERSAL_IDENTIFIER,
+      INVENTORY_COUNT_LINE_UNIVERSAL_IDENTIFIER,
     ].map((objectUniversalIdentifier) => ({
       objectUniversalIdentifier,
       canReadObjectRecords: true,

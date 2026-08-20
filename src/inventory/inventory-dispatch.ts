@@ -1,6 +1,7 @@
 import type { CoreApiClientLike } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
 import { divideRoundHalfUp, scaledQuantityMicros } from 'src/inventory/inventory-units';
 import { computeNewWeightedAverage, computeProductionUnitCost, quantityCostTotal } from 'src/inventory/inventory-costing';
+import type { InventoryCommand } from 'src/inventory/inventory-command-input';
 
 // simplified error
 export type InventoryResult = { status: number; body: unknown };
@@ -20,6 +21,7 @@ type RecipeRecord = Existing & { label?: string | null; targetKind?: string | nu
 type RecipeVersionRecord = Existing & { recipeId?: string | null; versionNumber?: number | null; yieldQuantityMicros?: number | null; effectiveFrom?: string | null; status?: string | null; createdByStaffId?: string | null; idempotencyKey?: string | null };
 type RecipeLineRecord = Existing & { recipeVersionId?: string | null; stockItemId?: string | null; quantityMicros?: number | null; sortOrder?: number | null };
 type ConsumptionRequestRecord = Existing & { orderId?: string | null; status?: string | null; idempotencyKey?: string | null; attemptCount?: number | null; lastError?: string | null; processedAt?: string | null };
+type ConsumptionIssueRecord = Existing & { orderId?: string | null; orderLineId?: string | null; menuItemId?: string | null; issueType?: string | null; status?: string | null };
 type CountRecord = Existing & { label?: string | null; locationId?: string | null; status?: string | null; ledgerWatermark?: string | null; createdByStaffId?: string | null; idempotencyKey?: string | null; startedAt?: string | null };
 type CountLineRecord = Existing & { countId?: string | null; stockItemId?: string | null; expectedQuantityMicros?: number | null; actualQuantityMicros?: number | null; varianceMicros?: number | null; unitCostMicrosSnapshot?: number | null; resolution?: string | null; producedRecipeVersionId?: string | null };
 
@@ -41,6 +43,7 @@ const RECIPE_FIELDS = { id: true, label: true, targetKind: true, targetId: true,
 const RECIPE_VER_FIELDS = { id: true, recipeId: true, versionNumber: true, yieldQuantityMicros: true, effectiveFrom: true, status: true, createdByStaffId: true, idempotencyKey: true };
 const RECIPE_LINE_FIELDS = { id: true, recipeVersionId: true, stockItemId: true, quantityMicros: true, sortOrder: true };
 const CONSUMPTION_REQ_FIELDS = { id: true, orderId: true, status: true, idempotencyKey: true, attemptCount: true, lastError: true, processedAt: true };
+const CONSUMPTION_ISSUE_FIELDS = { id: true, orderId: true, orderLineId: true, menuItemId: true, issueType: true, status: true };
 const COUNT_FIELDS = { id: true, label: true, locationId: true, status: true, ledgerWatermark: true, createdByStaffId: true, idempotencyKey: true, startedAt: true };
 const COUNT_LINE_FIELDS = { id: true, countId: true, stockItemId: true, expectedQuantityMicros: true, actualQuantityMicros: true, varianceMicros: true, unitCostMicrosSnapshot: true, resolution: true, producedRecipeVersionId: true };
 
@@ -56,10 +59,21 @@ const findRecipeVersions = async (c: CoreApiClientLike, recipeId: string) => que
 const findRecipeVersionById = async (c: CoreApiClientLike, id: string) => (await queryConnection<RecipeVersionRecord>(c, 'inventoryRecipeVersions', { filter: { id: { eq: id } }, first: 1 }, RECIPE_VER_FIELDS))[0] ?? null;
 const findRecipeLines = async (c: CoreApiClientLike, versionId: string) => queryConnection<RecipeLineRecord>(c, 'inventoryRecipeLines', { filter: { recipeVersionId: { eq: versionId } }, first: 100 }, RECIPE_LINE_FIELDS);
 const findConsumptionByOrder = async (c: CoreApiClientLike, orderId: string) => (await queryConnection<ConsumptionRequestRecord>(c, 'inventoryConsumptionRequests', { filter: { orderId: { eq: orderId } }, first: 1 }, CONSUMPTION_REQ_FIELDS))[0] ?? null;
+const findConsumptionIssue = async (c: CoreApiClientLike, orderId: string, orderLineId: string, issueType: string) => (await queryConnection<ConsumptionIssueRecord>(c, 'inventoryConsumptionIssues', { filter: { orderId: { eq: orderId }, orderLineId: { eq: orderLineId }, issueType: { eq: issueType } }, first: 1 }, CONSUMPTION_ISSUE_FIELDS))[0] ?? null;
 const findCountById = async (c: CoreApiClientLike, id: string) => (await queryConnection<CountRecord>(c, 'inventoryCounts', { filter: { id: { eq: id } }, first: 1 }, COUNT_FIELDS))[0] ?? null;
 const findCountLines = async (c: CoreApiClientLike, countId: string) => queryConnection<CountLineRecord>(c, 'inventoryCountLines', { filter: { countId: { eq: countId } }, first: 200 }, COUNT_LINE_FIELDS);
 
 // === balance helpers ===
+const mutationUpdatedRows = (result: unknown, root: string): number => {
+  const value = (result as Record<string, unknown> | null)?.[root];
+  if (Array.isArray(value)) return value.length;
+  return value && typeof value === 'object' && 'id' in value ? 1 : 0;
+};
+
+const waitForBalanceRetry = async (attempt: number): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, Math.min(25, 2 ** attempt)));
+};
+
 const ensureBalance = async (c: CoreApiClientLike, itemId: string, locId: string): Promise<BalanceRecord> => {
   const existing = await findBalance(c, itemId, locId);
   if (existing) return existing;
@@ -71,42 +85,116 @@ const ensureBalance = async (c: CoreApiClientLike, itemId: string, locId: string
 };
 
 const updateBalance = async (c: CoreApiClientLike, bal: BalanceRecord, deltaMicros: number, unitCostMicros?: number | null, sourceType?: string) => {
-  const oldQty = bal.quantityMicros ?? 0;
-  const oldAvg = bal.averageCostMicros ?? 0;
-  const newQty = oldQty + deltaMicros;
-  let newAvg = oldAvg;
-  let newTotal = bal.totalValueMicros ?? 0;
-  if (sourceType === 'RECEIPT' && deltaMicros > 0 && unitCostMicros != null) {
-    newAvg = computeNewWeightedAverage(oldQty, oldAvg, deltaMicros, unitCostMicros);
-    newTotal = quantityCostTotal(newQty, newAvg); // not used for balance total directly but for display
-  } else if (sourceType === 'PRODUCTION' && (bal as unknown as Record<string, unknown>)['__isOutput'] ) {
-    // output cost handled outside
-    newTotal = quantityCostTotal(newQty, newAvg);
-  } else {
-    // keep avg same for non-receipt, total = qty * avg
-    newTotal = newQty === 0 ? 0 : quantityCostTotal(newQty, oldAvg);
+  const itemId = bal.stockItemId;
+  const locationId = bal.locationId;
+  if (!itemId || !locationId) throw new Error('BALANCE_CONTEXT_MISSING');
+
+  // Ledger inserts are append-only and commute, but the materialised projection
+  // still needs a guarded update. A retry re-reads the latest version, so two
+  // different commands cannot overwrite each other's quantity/cost calculation.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const current = (await findBalance(c, itemId, locationId)) ?? bal;
+    const oldQty = current.quantityMicros ?? 0;
+    const oldAvg = current.averageCostMicros ?? 0;
+    const newQty = oldQty + deltaMicros;
+    let newAvg = oldAvg;
+    if (sourceType === 'RECEIPT' && deltaMicros > 0 && unitCostMicros != null) {
+      newAvg = oldQty > 0 && newQty !== 0
+        ? computeNewWeightedAverage(oldQty, oldAvg, deltaMicros, unitCostMicros)
+        : unitCostMicros;
+    } else if (sourceType === 'PRODUCTION' && deltaMicros > 0 && unitCostMicros != null) {
+      newAvg = oldQty <= 0 || newQty <= 0
+        ? unitCostMicros
+        : divideRoundHalfUp(oldQty * oldAvg + deltaMicros * unitCostMicros, newQty);
+    } else if (sourceType === 'RECONCILIATION' && unitCostMicros != null) {
+      newAvg = unitCostMicros;
+    }
+    const newTotal = newQty === 0 ? 0 : quantityCostTotal(newQty, newAvg);
+    const expectedVersion = current.version ?? 0;
+    try {
+      const result = await c.mutation({
+        updateInventoryStockBalances: {
+          __args: {
+            filter: { id: { eq: current.id }, version: { eq: expectedVersion } },
+            data: {
+              quantityMicros: newQty,
+              averageCostMicros: newAvg,
+              totalValueMicros: newTotal,
+              version: expectedVersion + 1,
+            },
+          },
+          id: true,
+        },
+      });
+      if (mutationUpdatedRows(result, 'updateInventoryStockBalances') > 0) return;
+    } catch {
+      // A concurrent write can surface as a unique/optimistic conflict. Re-read
+      // and retry; the bounded failure is reported to the command caller.
+    }
+    if (attempt < 7) await waitForBalanceRetry(attempt);
   }
-  // If this is production output, avg may have been recomputed to newAvg already passed in unitCost
-  if (sourceType === 'PRODUCTION' && deltaMicros > 0 && unitCostMicros != null) {
-    newAvg = unitCostMicros;
-    newTotal = quantityCostTotal(newQty, newAvg);
-  }
-  await c.mutation({ updateInventoryStockBalance: { __args: { id: bal.id, data: { quantityMicros: newQty, averageCostMicros: newAvg, totalValueMicros: newTotal, version: (bal.version ?? 0) + 1 } }, id: true } });
-  // return updated snapshot for chaining (in FakeDb we read back)
+  throw new Error('BALANCE_CONFLICT');
 };
 
 // === ledger append ===
+type AppendedMovement = MovementRecord & { created: boolean };
+
 const appendMovement = async (
   c: CoreApiClientLike,
   input: Omit<MovementRecord, 'id'> & { idempotencyKey: string },
-): Promise<MovementRecord | null> => {
+): Promise<AppendedMovement | null> => {
   const existing = await findMovementByIdempotency(c, input.idempotencyKey);
-  if (existing) return existing;
+  if (existing) return { ...existing, created: false };
   try {
     const res = (await c.mutation({ createInventoryStockMovement: { __args: { data: input }, ...MOV_FIELDS } })) as { createInventoryStockMovement?: MovementRecord };
-    if (res.createInventoryStockMovement?.id) return res.createInventoryStockMovement;
+    if (res.createInventoryStockMovement?.id) return { ...res.createInventoryStockMovement, created: true };
   } catch {}
-  return findMovementByIdempotency(c, input.idempotencyKey);
+  const raced = await findMovementByIdempotency(c, input.idempotencyKey);
+  return raced ? { ...raced, created: false } : null;
+};
+
+const reconcileBalanceProjection = async (c: CoreApiClientLike, itemId: string, locationId: string): Promise<void> => {
+  const movements = await queryConnection<MovementRecord>(c, 'inventoryStockMovements', { filter: { stockItemId: { eq: itemId }, locationId: { eq: locationId } }, first: 500 }, MOV_FIELDS);
+  movements.sort((a, b) => `${a.occurredAt ?? ''}:${a.id}`.localeCompare(`${b.occurredAt ?? ''}:${b.id}`));
+  let quantityMicros = 0;
+  let averageCostMicros = 0;
+  for (const movement of movements) {
+    const delta = movement.quantityDeltaMicros ?? 0;
+    if (delta > 0 && movement.unitCostMicros != null) {
+      averageCostMicros = quantityMicros > 0
+        ? computeNewWeightedAverage(quantityMicros, averageCostMicros, delta, movement.unitCostMicros)
+        : movement.unitCostMicros;
+    }
+    quantityMicros += delta;
+    if (quantityMicros === 0) averageCostMicros = 0;
+  }
+  const balance = await ensureBalance(c, itemId, locationId);
+  await updateBalance(c, balance, quantityMicros - (balance.quantityMicros ?? 0), averageCostMicros, 'RECONCILIATION');
+};
+
+const applyMovementToProjection = async (
+  c: CoreApiClientLike,
+  movement: AppendedMovement,
+  itemId: string,
+  locationId: string,
+  fallbackBalance: BalanceRecord,
+  deltaMicros: number,
+  unitCostMicros: number,
+  sourceType: string,
+): Promise<void> => {
+  if (movement.created) {
+    await updateBalance(c, await findBalance(c, itemId, locationId) ?? fallbackBalance, deltaMicros, unitCostMicros, sourceType);
+  } else {
+    await reconcileBalanceProjection(c, itemId, locationId);
+  }
+};
+
+const ensureConsumptionIssue = async (
+  c: CoreApiClientLike,
+  data: { orderId: string; orderLineId: string; menuItemId: string; issueType: string },
+): Promise<void> => {
+  if (await findConsumptionIssue(c, data.orderId, data.orderLineId, data.issueType)) return;
+  await c.mutation({ createInventoryConsumptionIssue: { __args: { data: { ...data, status: 'OPEN' } }, id: true } }).catch(() => null);
 };
 
 // === helpers : actor check ===
@@ -185,10 +273,7 @@ export const executeReceiveStock = async (
       sourceType: 'RECEIPT', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: movKey, reason: payload.comment ?? null,
     });
     if (!mov) return error('CONFLICT', 'Приход не проведён.');
-    // update balance with MWA
-    // need fresh balance
-    const freshBal = await findBalance(c, line.stockItemId, payload.locationId) ?? bal;
-    await updateBalance(c, freshBal, line.quantityMicros, line.unitCostMicros, 'RECEIPT');
+    await applyMovementToProjection(c, mov, line.stockItemId, payload.locationId, bal, line.quantityMicros, line.unitCostMicros, 'RECEIPT');
     created += 1;
   }
   return ok(201, { receiptId: payload.idempotencyKey, lineCount: created });
@@ -218,8 +303,7 @@ export const executeWriteOffStock = async (
     sourceType: 'MANUAL', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: payload.idempotencyKey, reason: payload.reason ?? payload.comment ?? null,
   });
   if (!mov) return error('CONFLICT', 'Списание не проведено.');
-  const freshBal = await findBalance(c, payload.stockItemId, payload.locationId) ?? bal;
-  await updateBalance(c, freshBal, -payload.quantityMicros, snapCost, 'WRITE_OFF');
+  await applyMovementToProjection(c, mov, payload.stockItemId, payload.locationId, bal, -payload.quantityMicros, snapCost, 'WRITE_OFF');
   return ok(201, { movementId: mov.id });
 };
 
@@ -257,14 +341,9 @@ export const executeTransferStock = async (
     sourceType: 'TRANSFER', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: inKey,
   });
   if (!dstMov) return error('CONFLICT', 'Перемещение IN не проведено.');
-  // update balances
-  const freshSrc = await findBalance(c, payload.stockItemId, payload.sourceLocationId) ?? srcBal;
-  await updateBalance(c, freshSrc, -payload.quantityMicros, snapCost, 'TRANSFER_OUT');
-  // dest: MWA should preserve cost: newAvg = (oldQty*oldAvg + qty*snapCost)/ (oldQty+qty)
   const dstBal = await ensureBalance(c, payload.stockItemId, payload.destLocationId);
-  const freshDst = await findBalance(c, payload.stockItemId, payload.destLocationId) ?? dstBal;
-  // For dest we treat as receipt-like with snapCost
-  await updateBalance(c, freshDst, payload.quantityMicros, snapCost, 'RECEIPT');
+  await applyMovementToProjection(c, outMov, payload.stockItemId, payload.sourceLocationId, srcBal, -payload.quantityMicros, snapCost, 'TRANSFER_OUT');
+  await applyMovementToProjection(c, dstMov, payload.stockItemId, payload.destLocationId, dstBal, payload.quantityMicros, snapCost, 'RECEIPT');
   return ok(201, { transferId: payload.idempotencyKey });
 };
 
@@ -425,28 +504,25 @@ export const executeProduceSemi = async (
   for (const inp of inputs) {
     const total = quantityCostTotal(inp.requiredMicros, inp.avgCost);
     const key = `${payload.idempotencyKey}:IN:${inp.stockItemId}`;
-    await appendMovement(c, {
+    const inputMovement = await appendMovement(c, {
       movementType: 'PRODUCTION_INPUT', stockItemId: inp.stockItemId, locationId: payload.locationId,
       quantityDeltaMicros: -inp.requiredMicros, unitCostMicros: inp.avgCost, totalCostMicros: -total,
       sourceType: 'PRODUCTION', sourceId: payload.idempotencyKey, recipeVersionId: ver.id, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
     });
-    const bal = await findBalance(c, inp.stockItemId, payload.locationId) ?? await ensureBalance(c, inp.stockItemId, payload.locationId);
-    await updateBalance(c, bal, -inp.requiredMicros, inp.avgCost, 'PRODUCTION_INPUT');
+    if (!inputMovement) return error('CONFLICT', 'Производство не проведено.');
+    const bal = await ensureBalance(c, inp.stockItemId, payload.locationId);
+    await applyMovementToProjection(c, inputMovement, inp.stockItemId, payload.locationId, bal, -inp.requiredMicros, inp.avgCost, 'PRODUCTION_INPUT');
   }
   // OUTPUT
   const outTotal = quantityCostTotal(payload.quantityMicros, unitCost);
-  await appendMovement(c, {
+  const outputMovement = await appendMovement(c, {
     movementType: 'PRODUCTION_OUTPUT', stockItemId: payload.stockItemId, locationId: payload.locationId,
     quantityDeltaMicros: payload.quantityMicros, unitCostMicros: unitCost, totalCostMicros: outTotal,
     sourceType: 'PRODUCTION', sourceId: payload.idempotencyKey, recipeVersionId: ver.id, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: `${payload.idempotencyKey}:OUT:${payload.stockItemId}`,
   });
+  if (!outputMovement) return error('CONFLICT', 'Производство не проведено.');
   const outBal = await ensureBalance(c, payload.stockItemId, payload.locationId);
-  const freshOut = await findBalance(c, payload.stockItemId, payload.locationId) ?? outBal;
-  // for output, recompute avg as weighted: oldQty*oldAvg + qty*unitCost / total
-  const oldQty = freshOut.quantityMicros ?? 0;
-  const oldAvg = freshOut.averageCostMicros ?? 0;
-  const newAvg = oldQty === 0 ? unitCost : divideRoundHalfUp(oldQty * oldAvg + payload.quantityMicros * unitCost, oldQty + payload.quantityMicros);
-  await c.mutation({ updateInventoryStockBalance: { __args: { id: freshOut.id, data: { quantityMicros: oldQty + payload.quantityMicros, averageCostMicros: newAvg, totalValueMicros: quantityCostTotal(oldQty + payload.quantityMicros, newAvg), version: (freshOut.version ?? 0) + 1 } }, id: true } });
+  await applyMovementToProjection(c, outputMovement, payload.stockItemId, payload.locationId, outBal, payload.quantityMicros, unitCost, 'PRODUCTION');
   return ok(201, { productionId: payload.idempotencyKey, unitCostMicros: unitCost });
 };
 
@@ -485,46 +561,54 @@ export const processConsumptionRequest = async (c: CoreApiClientLike, orderId: s
       if (line.voidPreparedState === 'NOT_PREPARED') continue; // no consumption
       // PREPARED void -> treat as waste consumption (same recipe, different movement type)
       const ver = await findEffectiveRecipeVersion(c, line.menuItemId, line.createdAt ?? now);
-      if (!ver) { issues += 1; await c.mutation({ createInventoryConsumptionIssue: { __args: { data: { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_RECIPE', status: 'OPEN' } }, id: true } }).catch(()=>null); continue; }
+      if (!ver) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_RECIPE' }); continue; }
       const recipeLines = await findRecipeLines(c, ver.id);
       const recHeader = await queryConnection<RecipeRecord>(c, 'inventoryRecipes', { filter: { targetId: { eq: line.menuItemId } }, first: 1 }, RECIPE_FIELDS);
       const locId = recHeader[0]?.defaultLocationId ?? null;
-      if (!locId) { await c.mutation({ createInventoryConsumptionIssue: { __args: { data: { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_LOCATION', status: 'OPEN' } }, id: true } }).catch(()=>null); continue; }
+      if (!locId) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_LOCATION' }); continue; }
       for (const rl of recipeLines) {
         const required = scaledQuantityMicros(rl.quantityMicros as number, (line.quantity * 1000), ver.yieldQuantityMicros as number);
         const bal = await ensureBalance(c, rl.stockItemId as string, locId);
         const snap = bal.averageCostMicros ?? 0;
         const key = `${orderId}:${line.id}:${rl.stockItemId}`;
-        await appendMovement(c, {
+        if ((bal.quantityMicros ?? 0) < required) {
+          issues += 1;
+          await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'INSUFFICIENT_STOCK' });
+        }
+        const movement = await appendMovement(c, {
           movementType: 'PREPARED_VOID_CONSUMPTION', stockItemId: rl.stockItemId as string, locationId: locId,
           quantityDeltaMicros: -required, unitCostMicros: snap, totalCostMicros: -quantityCostTotal(required, snap),
           sourceType: 'VOID', sourceId: orderId, recipeVersionId: ver.id, orderId, orderLineId: line.id, actorStaffId: 'system', occurredAt: now, idempotencyKey: key,
         });
-        const fresh = await findBalance(c, rl.stockItemId as string, locId) ?? bal;
-        await updateBalance(c, fresh, -required, snap, 'WRITE_OFF');
+        if (!movement) return error('CONFLICT', 'Списание продажи не проведено.');
+        await applyMovementToProjection(c, movement, rl.stockItemId as string, locId, bal, -required, snap, 'WRITE_OFF');
         appliedLines += 1;
       }
       continue;
     }
     if (line.status !== 'ACTIVE') continue;
     const ver = await findEffectiveRecipeVersion(c, line.menuItemId, line.createdAt ?? now);
-    if (!ver) { issues += 1; await c.mutation({ createInventoryConsumptionIssue: { __args: { data: { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_RECIPE', status: 'OPEN' } }, id: true } }).catch(()=>null); continue; }
+    if (!ver) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_RECIPE' }); continue; }
     const recipeLines = await findRecipeLines(c, ver.id);
     const recHeader = (await queryConnection<RecipeRecord>(c, 'inventoryRecipes', { filter: { targetKind: { eq: 'MENU_ITEM' }, targetId: { eq: line.menuItemId } }, first: 1 }, RECIPE_FIELDS))[0];
     const locId = recHeader?.defaultLocationId ?? null;
-    if (!locId) { await c.mutation({ createInventoryConsumptionIssue: { __args: { data: { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_LOCATION', status: 'OPEN' } }, id: true } }).catch(()=>null); continue; }
+    if (!locId) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_LOCATION' }); continue; }
     for (const rl of recipeLines) {
       const required = scaledQuantityMicros(rl.quantityMicros as number, (line.quantity * 1000), ver.yieldQuantityMicros as number);
       const bal = await ensureBalance(c, rl.stockItemId as string, locId);
       const snap = bal.averageCostMicros ?? 0;
       const key = `${orderId}:${line.id}:${rl.stockItemId}`;
-      await appendMovement(c, {
+      if ((bal.quantityMicros ?? 0) < required) {
+        issues += 1;
+        await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'INSUFFICIENT_STOCK' });
+      }
+      const movement = await appendMovement(c, {
         movementType: 'SALE_CONSUMPTION', stockItemId: rl.stockItemId as string, locationId: locId,
         quantityDeltaMicros: -required, unitCostMicros: snap, totalCostMicros: -quantityCostTotal(required, snap),
         sourceType: 'SALE', sourceId: orderId, recipeVersionId: ver.id, orderId, orderLineId: line.id, actorStaffId: 'system', occurredAt: now, idempotencyKey: key,
       });
-      const fresh = await findBalance(c, rl.stockItemId as string, locId) ?? bal;
-      await updateBalance(c, fresh, -required, snap, 'WRITE_OFF');
+      if (!movement) return error('CONFLICT', 'Списание продажи не проведено.');
+      await applyMovementToProjection(c, movement, rl.stockItemId as string, locId, bal, -required, snap, 'WRITE_OFF');
       appliedLines += 1;
     }
   }
@@ -616,25 +700,25 @@ export const executeFinalizeCount = async (
           const bal = await ensureBalance(c, extra.stockItemId, count.locationId as string);
           const snap = bal.averageCostMicros ?? 0;
           const key = `${payload.idempotencyKey}:${extra.stockItemId}`;
-          await appendMovement(c, {
+          const adjustment = await appendMovement(c, {
             movementType: 'INVENTORY_ADJUSTMENT', stockItemId: extra.stockItemId, locationId: count.locationId as string,
             quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
             sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
           });
-          const fresh = await findBalance(c, extra.stockItemId, count.locationId as string) ?? bal;
-          await updateBalance(c, fresh, variance, snap, 'WRITE_OFF');
+          if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
+          await applyMovementToProjection(c, adjustment, extra.stockItemId, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
         }
       } else {
         const bal = await ensureBalance(c, extra.stockItemId, count.locationId as string);
         const snap = bal.averageCostMicros ?? 0;
         const key = `${payload.idempotencyKey}:${extra.stockItemId}`;
-        await appendMovement(c, {
+        const adjustment = await appendMovement(c, {
           movementType: 'INVENTORY_ADJUSTMENT', stockItemId: extra.stockItemId, locationId: count.locationId as string,
           quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
           sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
         });
-        const fresh2 = await findBalance(c, extra.stockItemId, count.locationId as string) ?? bal;
-        await updateBalance(c, fresh2, variance, snap, 'WRITE_OFF');
+        if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
+        await applyMovementToProjection(c, adjustment, extra.stockItemId, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
       }
     }
     // also create a count line for audit
@@ -652,13 +736,14 @@ export const executeFinalizeCount = async (
       // shortage adjustment
       const snap = line.unitCostMicrosSnapshot ?? 0;
       const key = `${payload.idempotencyKey}:${line.stockItemId}`;
-      await appendMovement(c, {
+      const adjustment = await appendMovement(c, {
         movementType: 'INVENTORY_ADJUSTMENT', stockItemId: line.stockItemId as string, locationId: count.locationId as string,
         quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
         sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
       });
-      const bal = await findBalance(c, line.stockItemId as string, count.locationId as string) ?? await ensureBalance(c, line.stockItemId as string, count.locationId as string);
-      await updateBalance(c, bal, variance, snap, 'WRITE_OFF');
+      const bal = await ensureBalance(c, line.stockItemId as string, count.locationId as string);
+      if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
+      await applyMovementToProjection(c, adjustment, line.stockItemId as string, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
     } else {
       // positive variance
       if (item?.itemType === 'SEMI_FINISHED' && actualInput?.resolution === 'UNRECORDED_PRODUCTION') {
@@ -668,27 +753,59 @@ export const executeFinalizeCount = async (
           // fallback to direct adjustment
           const snap = line.unitCostMicrosSnapshot ?? 0;
           const key = `${payload.idempotencyKey}:${line.stockItemId}`;
-          await appendMovement(c, {
+          const adjustment = await appendMovement(c, {
             movementType: 'INVENTORY_ADJUSTMENT', stockItemId: line.stockItemId as string, locationId: count.locationId as string,
             quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
             sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
           });
-          const bal = await findBalance(c, line.stockItemId as string, count.locationId as string) ?? await ensureBalance(c, line.stockItemId as string, count.locationId as string);
-          await updateBalance(c, bal, variance, snap, 'WRITE_OFF');
+          const bal = await ensureBalance(c, line.stockItemId as string, count.locationId as string);
+          if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
+          await applyMovementToProjection(c, adjustment, line.stockItemId as string, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
         }
       } else {
         const snap = line.unitCostMicrosSnapshot ?? 0;
         const key = `${payload.idempotencyKey}:${line.stockItemId}`;
-        await appendMovement(c, {
+        const adjustment = await appendMovement(c, {
           movementType: 'INVENTORY_ADJUSTMENT', stockItemId: line.stockItemId as string, locationId: count.locationId as string,
           quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
           sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
         });
-        const bal = await findBalance(c, line.stockItemId as string, count.locationId as string) ?? await ensureBalance(c, line.stockItemId as string, count.locationId as string);
-        await updateBalance(c, bal, variance, snap, 'WRITE_OFF');
+        const bal = await ensureBalance(c, line.stockItemId as string, count.locationId as string);
+        if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
+        await applyMovementToProjection(c, adjustment, line.stockItemId as string, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
       }
     }
   }
   await c.mutation({ updateInventoryCount: { __args: { id: count.id, data: { status: 'POSTED' } }, id: true } });
   return ok(201, { countId: count.id });
+};
+
+export const dispatchInventoryCommand = async (
+  c: CoreApiClientLike,
+  command: InventoryCommand,
+  payload: Record<string, unknown>,
+  actor: { staffId: string; role: string },
+): Promise<InventoryResult> => {
+  switch (command) {
+    case 'createStockLocation':
+      return executeCreateStockLocation(c, payload as never, actor);
+    case 'createStockItem':
+      return executeCreateStockItem(c, payload as never, actor);
+    case 'receiveStock':
+      return executeReceiveStock(c, payload as never, actor);
+    case 'writeOffStock':
+      return executeWriteOffStock(c, payload as never, actor);
+    case 'transferStock':
+      return executeTransferStock(c, payload as never, actor);
+    case 'upsertRecipe':
+      return executeUpsertRecipe(c, payload as never, actor);
+    case 'produceSemiFinished':
+      return executeProduceSemi(c, payload as never, actor);
+    case 'createInventoryCount':
+      return executeCreateCount(c, payload as never, actor);
+    case 'startInventoryCount':
+      return executeStartCount(c, payload as never, actor);
+    case 'finalizeInventoryCount':
+      return executeFinalizeCount(c, payload as never, actor);
+  }
 };

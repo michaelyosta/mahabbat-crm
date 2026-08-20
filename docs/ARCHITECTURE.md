@@ -123,3 +123,30 @@ the page document does not become the POS scroll surface. This is a bounded
 presentation adaptation: no server/domain rules, permissions or command
 payloads changed. A 12-second read polling interval is the bounded shared-state
 refresh mechanism; the server remains authoritative.
+
+## Inventory ledger and backoffice boundary
+
+Inventory writes are not generic CRUD mutations. The `Склад` front component
+authenticates a short-lived POS staff session by PIN, reads balances,
+movements, items and locations through the REST data plane, and sends
+mutations to the signed `/inventory/command` gateway. The server resolver
+derives the staff actor from the session; client-provided actor, role and
+audit fields are rejected. `WAITER` is read-only for Inventory commands;
+master-data and stock-changing commands require `ADMIN`.
+
+`inventoryStockMovements` is the append-only ledger. `inventoryStockBalances`
+is a materialised projection guarded by a version predicate and bounded retry,
+then checked by `scripts/reconcile-inventory.mjs`. Movement idempotency keys
+and the guarded balance update make retries and same-key races converge;
+receipt costing uses fixed-point micro-units and a moving weighted average.
+Recipe versions are effective-dated, and POS close creates a non-blocking
+consumption request whose processor records sale movements or an auditable
+issue (`MISSING_RECIPE`, `INSUFFICIENT_STOCK`, or location/recipe failure).
+
+The domain and metadata are App-only; Twenty core source modifications remain
+`0`. The disposable `:2020` command/runtime proof is 48/48 PASS. On the
+self-hosted `:3000` target, metadata and the read-only reconciliation probe
+are healthy, but the production logic-function sandbox currently rejects the
+Inventory root query through its `CoreApiClient` while raw GraphQL sees the
+schema. Therefore `:3000` is explicitly a runtime blocker until the sandbox
+client path is repaired.

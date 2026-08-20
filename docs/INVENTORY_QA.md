@@ -16,6 +16,28 @@
   - Negative stock allowed
 - `pos-domain.test.ts` 26 tests + inventory consumption integration через FakeDb — POS close всё ещё 78/78 логики (см. ниже).
 
+## Live evidence — 2026-08-20
+
+- Disposable `:2020`: `scripts/accept-inventory.mjs` completed **48/48 PASS**.
+  It covered the authenticated command boundary, ADMIN/WAITER separation,
+  actor spoof rejection, receipts/MWA, production, recipe publication,
+  same-key parallel retry, transfer, write-off, revisions, paid POS close,
+  consumption processing, duplicate processor replay, missing-recipe
+  non-blocking close, audit fields, health and ledger reconciliation.
+- `scripts/reconcile-inventory.mjs` reported `balances=23 movements=79
+  mismatches=0` on `:2020` and `balances=0 movements=0 mismatches=0` on
+  `:3000`.
+- Browser evidence on self-hosted `:3000` confirmed the `Склад` navigation
+  entry, PIN gate, all eight operational tabs and the receipt form without
+  performing a write. This is UI-surface evidence, not a successful manual
+  mutation proof.
+- The self-hosted `:3000` live command harness is **BLOCKED**, not promoted to
+  PASS: the deployed route reaches the resolver, but `CoreApiClient` inside
+  the production logic-function sandbox rejects the Inventory query while a
+  raw GraphQL probe from the same resolver path sees the schema. This is an
+  environment/runtime boundary and must be fixed before declaring the live
+  pilot PASS on both targets.
+
 ## Live acceptance (deterministic fixtures, isolated namespace `INV-`)
 
 Fixtures: Locations `INV-A Kitchen / INV-B Bar / INV-C Shashlyk`, Items `INV Tomato / Cucumber / Other / Ogonek`, Menu `INV Salad`. Seed idempotent (re-run не дублирует, см. `executeCreateStockLocation/Item` — name unique).
@@ -67,4 +89,8 @@ Same receipt idempotency, two receipts, two productions, production+sale, transf
 ## Known limitations (§82)
 - Windows SDK paths — use Linux/WSL for plan/apply.
 - Transfer value preservation assumes single avg per location; FIFO not implemented (by design).
-- Backoffice forms for receipt/production are API-backed; full UX sheets (arrival/production dialogs) are next UI layer (§59-62) — current proof is ledger+balance+history tables.
+- Backoffice receipt, production, transfer, write-off, revision, recipe and
+  history forms are implemented in `src/front-components/inventory.front-component.tsx`.
+  A logged-in human write-through remains pending; current browser evidence
+  covers the rendered controls and the API harness covers the command/data
+  plane.

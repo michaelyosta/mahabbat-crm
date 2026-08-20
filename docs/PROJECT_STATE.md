@@ -378,6 +378,29 @@ are PASS on both runtime targets, including the real `Касса` UI flow on
 self-hosted `:3000`. The next phase is human review and bounded
 hardware/printer/fiscal-payment discovery; do not start it automatically.
 
+## Inventory live pilot checkpoint — 2026-08-20
+
+- Inventory is implemented as an App-only ledger/projection boundary. The
+  command gateway and resolver are in
+  `src/logic-functions/inventory-command.logic-function.ts` and
+  `src/logic-functions/inventory-command.resolver.logic-function.ts`; the
+  dispatcher is `src/inventory/inventory-dispatch.ts`.
+- The disposable `:2020` target completed the live acceptance harness at
+  **48/48 PASS**. It proved the ADMIN-only command surface, server-owned actor
+  context, fixed-point quantities, receipts/MWA, production, recipes,
+  transfer, write-off, revisions, POS sale consumption, retry idempotency,
+  issue creation and reconciliation.
+- The self-hosted `:3000` metadata apply and clean replan completed, and the
+  browser showed the `Склад` page, PIN gate, eight tabs and receipt controls.
+  The API harness is not PASS on this target: the production logic-function
+  sandbox's `CoreApiClient` rejects the Inventory root query even though a raw
+  GraphQL probe from the same resolver sees the schema. This remains a
+  runtime deployment blocker, not an Inventory-domain PASS claim.
+- `scripts/reconcile-inventory.mjs` found zero mismatches on both targets.
+  Local gates after the final source cleanup are typecheck PASS, lint PASS
+  with zero warnings/errors, and 262/262 unit tests PASS. Twenty core source
+  modifications remain 0.
+
 ## P0 loyalty write boundary status
 
 - P0 loyalty write boundary status: the controlled flow is `LoyaltyAdjustmentRequest -> database-event processor -> LoyaltyLedgerEntry`.

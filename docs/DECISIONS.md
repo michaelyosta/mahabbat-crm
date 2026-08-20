@@ -471,3 +471,23 @@ Twenty core или POS domain. Внутри доступного canvas закр
 overlay. Поэтому закрытие sheets не привязано к клику по фону, а выполняется
 только явной кнопкой `×`; это сохраняет надёжный payment/touch workflow. Эта
 UI-деталь не меняет server authorization, financial rules или command API.
+
+## 2026-08-20 — Inventory pilot: ledger-first App boundary
+
+Решение: складские остатки строятся вокруг append-only
+`inventoryStockMovements` и проверяемой `inventoryStockBalances`, а не вокруг
+generic Twenty CRUD или frontend-local state. Every write passes through the
+signed Inventory command gateway; the resolver derives the actor from the
+authenticated POS session, rejects client audit overrides, and limits
+stock-changing commands to ADMIN. CAS balance updates and idempotency keys are
+required because receipts, production, POS consumption and retries can arrive
+concurrently.
+
+The live disposable proof is 48/48 on `:2020`; the browser surface on `:3000`
+shows the real `Склад` page, PIN gate and eight forms/tabs. We do not call the
+self-hosted pilot PASS yet: the `:3000` production logic-function sandbox
+rejects the Inventory query through `CoreApiClient` while a raw GraphQL probe
+from the same path sees the schema. This is recorded as a deployment/runtime
+blocker rather than weakening the command contract or hiding the failure.
+Twenty core modifications remain `0`; reconciliation reports zero mismatches
+on both targets.

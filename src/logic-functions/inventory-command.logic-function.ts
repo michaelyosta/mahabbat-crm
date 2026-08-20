@@ -2,12 +2,12 @@ import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 import { Response } from 'twenty-sdk/logic-function';
 
 import {
+  INVENTORY_COMMAND_RESOLVER_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER,
   MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME,
-  POS_COMMAND_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER,
-  POS_COMMAND_RESOLVER_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER,
+  INVENTORY_COMMAND_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER,
 } from 'src/constants/universal-identifiers';
 import { signInternalRouteBody } from 'src/logic-functions/utils/mahabbat-internal-route-signature.util';
-import { parsePosCommandEnvelope } from 'src/pos/pos-command-input';
+import { parseInventoryCommandEnvelope } from 'src/inventory/inventory-command-input';
 
 const response = (body: unknown, status: number) =>
   new Response(JSON.stringify(body), {
@@ -16,23 +16,18 @@ const response = (body: unknown, status: number) =>
   });
 
 export const handler = async (event: RoutePayload): Promise<Response> => {
-  const parsed = parsePosCommandEnvelope(event.body);
-
+  const parsed = parseInventoryCommandEnvelope(event.body);
   if (!parsed.ok) return response(parsed.error, 400);
 
   const secret = process.env[MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME];
   const apiUrl = process.env.TWENTY_API_URL?.replace(/\/+$/, '');
-
   if (!secret || !apiUrl) {
-    return response(
-      { code: 'ROUTE_NOT_CONFIGURED', message: 'POS command route is not configured.' },
-      500,
-    );
+    return response({ code: 'ROUTE_NOT_CONFIGURED', message: 'Inventory command route is not configured.' }, 500);
   }
 
   try {
     const delegated = await fetch(
-      `${apiUrl}/webhooks/server/${POS_COMMAND_RESOLVER_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER}`,
+      `${apiUrl}/webhooks/server/${INVENTORY_COMMAND_RESOLVER_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER}`,
       {
         method: 'POST',
         headers: {
@@ -43,30 +38,21 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
         body: JSON.stringify(parsed.data),
       },
     );
-
     const text = await delegated.text();
-
-    return new Response(text, {
-      status: delegated.status,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return new Response(text, { status: delegated.status, headers: { 'Content-Type': 'application/json' } });
   } catch {
-    return response(
-      { code: 'ROUTE_UNAVAILABLE', message: 'POS command writer is unavailable.' },
-      503,
-    );
+    return response({ code: 'ROUTE_UNAVAILABLE', message: 'Inventory command writer is unavailable.' }, 503);
   }
 };
 
 export default defineLogicFunction({
-  universalIdentifier: POS_COMMAND_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER,
-  name: 'pos-command',
-  description:
-    'Authenticated POS command gateway: validates and signs commands for the app-only server resolver',
-  timeoutSeconds: 10,
+  universalIdentifier: INVENTORY_COMMAND_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER,
+  name: 'inventory-command',
+  description: 'Authenticated inventory backoffice command gateway',
+  timeoutSeconds: 15,
   handler,
   httpRouteTriggerSettings: {
-    path: '/pos/command',
+    path: '/inventory/command',
     httpMethod: 'POST',
     isAuthRequired: true,
     forwardedRequestHeaders: ['authorization'],

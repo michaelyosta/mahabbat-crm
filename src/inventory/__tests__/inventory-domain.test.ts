@@ -13,7 +13,7 @@ import {
   executeStartCount,
   executeFinalizeCount,
 } from 'src/inventory/inventory-dispatch';
-import { gramsToMicros, kgToMicros } from 'src/inventory/inventory-units';
+import { divideRoundHalfUp, gramsToMicros, kgToMicros, scaledQuantityMicros } from 'src/inventory/inventory-units';
 
 // simplified fake client mirroring FakePosDb logic for inventory
 type Row = Record<string, unknown> & { id: string };
@@ -74,6 +74,7 @@ class FakeDb {
     const args = op.__args as Record<string, unknown>;
     const data = args?.data as Row;
     const id = args?.id as string | undefined;
+    const filter = (args?.filter ?? {}) as Record<string, unknown>;
     // map root to kind
     const createMap: Record<string, Kind> = {
       createInventoryStockLocation: 'inventoryStockLocations',
@@ -90,6 +91,7 @@ class FakeDb {
     };
     const updateMap: Record<string, Kind> = {
       updateInventoryStockBalance: 'inventoryStockBalances',
+      updateInventoryStockBalances: 'inventoryStockBalances',
       updateInventoryRecipeVersion: 'inventoryRecipeVersions',
       updateInventoryConsumptionRequest: 'inventoryConsumptionRequests',
       updateInventoryCount: 'inventoryCounts',
@@ -110,10 +112,16 @@ class FakeDb {
     }
     if (updateMap[root]) {
       const kind = updateMap[root];
-      const idx = this.rows[kind].findIndex(r => r.id === id);
-      if (idx === -1) return { [root]: null };
-      this.rows[kind][idx] = { ...this.rows[kind][idx], ...data };
-      return { [root]: { ...this.rows[kind][idx] } };
+      const matches = id
+        ? this.rows[kind].filter(r => r.id === id)
+        : this.find(kind, filter);
+      if (matches.length === 0) return { [root]: root.endsWith('Balances') ? [] : null };
+      const updated = matches.map(match => {
+        const idx = this.rows[kind].findIndex(r => r.id === match.id);
+        this.rows[kind][idx] = { ...this.rows[kind][idx], ...data };
+        return { ...this.rows[kind][idx] };
+      });
+      return { [root]: root.endsWith('Balances') ? updated : updated[0] };
     }
     // generic id-based mutation fallback
     if (root.startsWith('update')) throw new Error(`Unsupported update ${root}`);
