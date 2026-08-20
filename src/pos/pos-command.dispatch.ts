@@ -2027,9 +2027,13 @@ export const executeVoidOrderLines = async (
     : null;
   const totals = await updateLinesTotals(client, order);
   if (totals.activeLineCount === 0) {
+    // Release the (tableId, claimToken) claim so the table can be re-opened.
     await client.mutation({
       updatePosOrder: {
-        __args: { id: order.id, data: { status: 'CANCELLED' } },
+        __args: {
+          id: order.id,
+          data: { status: 'CANCELLED', claimToken: null, openToken: null },
+        },
         id: true,
       },
     });

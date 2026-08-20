@@ -27,7 +27,8 @@ type TableKind =
   | 'posKitchenTicketLines'
   | 'posPrechecks'
   | 'posPaymentMethods'
-  | 'posPayments';
+  | 'posPayments'
+  | 'posOperationalEvents';
 
 class UniqueViolationError extends Error {
   constructor(message: string) {
@@ -50,6 +51,7 @@ class FakePosDb {
     posPrechecks: [],
     posPaymentMethods: [],
     posPayments: [],
+    posOperationalEvents: [],
   };
 
   seed(kind: TableKind, row: Row): Row {
@@ -110,6 +112,11 @@ class FakePosDb {
         (row) => row.ticketId === data.ticketId && row.orderLineId === data.orderLineId,
       );
       if (conflict) throw new UniqueViolationError('duplicate ticket line');
+      return;
+    }
+
+    if (kind === 'posOperationalEvents') {
+      this.assertIdempotencyUnique(this.rows.posOperationalEvents, data);
       return;
     }
 
@@ -267,6 +274,8 @@ class FakePosDb {
       updatePosPaymentMethod: 'posPaymentMethods',
       createPosPayment: 'posPayments',
       updatePosPayment: 'posPayments',
+      createPosOperationalEvent: 'posOperationalEvents',
+      updatePosOperationalEvent: 'posOperationalEvents',
     };
 
     const kind = map[root];
@@ -295,6 +304,7 @@ class FakePosDb {
       posPrechecks: 'posPrechecks',
       posPaymentMethods: 'posPaymentMethods',
       posPayments: 'posPayments',
+      posOperationalEvents: 'posOperationalEvents',
     };
 
     return map[root] ?? 'posOrders';
@@ -821,6 +831,39 @@ describe('pos domain happy path', () => {
     const closeRetry = await executeCloseOrder(db, { orderId, idempotencyKey: key(111) }, waiter);
     expect(closeRetry.status).toBe(200);
     expect(db.rows.posPayments.filter((row) => row.status === 'SUCCESS')).toHaveLength(2);
+  });
+
+  it('releases the (tableId, claimToken) claim when voiding the last line cancels the order', async () => {
+    const db = dbWithBaseline();
+    const admin = { staffId: OTHER_STAFF, role: 'ADMIN' as const };
+    await executeOpenShift(db, { idempotencyKey: key(120) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(121) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(122) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    const line = await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 1, idempotencyKey: key(123) },
+      waiter,
+    );
+    const lineId = (line.body as { lineId: string }).lineId;
+
+    const voided = await dispatchPosCommand(
+      db,
+      'voidOrderLines',
+      { lineIds: [lineId], preparedState: 'NOT_PREPARED', idempotencyKey: key(124) },
+      admin,
+    );
+    const cancelled = db.rows.posOrders.find((row) => row.id === orderId);
+    expect(voided.status).toBe(201);
+    // The claim must be dropped or the unique (tableId, claimToken) index would block re-opening.
+    expect(cancelled?.status).toBe('CANCELLED');
+    expect(cancelled?.claimToken).toBeNull();
+
+    const reopened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(125) }, waiter);
+    expect(reopened.status).toBe(201);
+    expect((reopened.body as { orderId: string }).orderId).not.toBe(orderId);
   });
 });
 
