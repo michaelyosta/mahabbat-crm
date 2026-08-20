@@ -16,7 +16,7 @@
   - Negative stock allowed
 - `pos-domain.test.ts` 26 tests + inventory consumption integration через FakeDb — POS close всё ещё 78/78 логики (см. ниже).
 
-## Live evidence — 2026-08-20
+## Live evidence — 2026-08-20 (recovery checkpoint)
 
 - Disposable `:2020`: `scripts/accept-inventory.mjs` completed **48/48 PASS**.
   It covered the authenticated command boundary, ADMIN/WAITER separation,
@@ -24,19 +24,64 @@
   same-key parallel retry, transfer, write-off, revisions, paid POS close,
   consumption processing, duplicate processor replay, missing-recipe
   non-blocking close, audit fields, health and ledger reconciliation.
-- `scripts/reconcile-inventory.mjs` reported `balances=23 movements=79
-  mismatches=0` on `:2020` and `balances=0 movements=0 mismatches=0` on
-  `:3000`.
-- Browser evidence on self-hosted `:3000` confirmed the `Склад` navigation
-  entry, PIN gate, all eight operational tabs and the receipt form without
-  performing a write. This is UI-surface evidence, not a successful manual
-  mutation proof.
-- The self-hosted `:3000` live command harness is **BLOCKED**, not promoted to
-  PASS: the deployed route reaches the resolver, but `CoreApiClient` inside
-  the production logic-function sandbox rejects the Inventory query while a
-  raw GraphQL probe from the same resolver path sees the schema. This is an
-  environment/runtime boundary and must be fixed before declaring the live
-  pilot PASS on both targets.
+- After the bounded runtime recovery, self-hosted `:3000` completed
+  `scripts/accept-inventory.mjs` at **48/48 PASS**. The run included the
+  production POS close → inventory consumption path and duplicate processor
+  retry.
+- The final read-only probe reported `balances=48 movements=154
+  mismatches=0` on `:3000` after the browser smoke. No PostgreSQL or Redis
+  volume was deleted or recreated.
+- Browser evidence on `:3000` now includes a real write: `Склад` → `Приход`
+  created a movement and the refreshed balance showed `1 000 г` at the new
+  weighted cost. A browser revision with a blank actual left the balance
+  unchanged; a second revision with actual `0` created the adjustment to zero.
+- The prior `:3000` failure is retained below as forensic evidence. It was a
+  generated runtime artifact mismatch, not a GraphQL schema defect.
+
+## :3000 CoreApiClient forensic recovery
+
+**ROOT CAUSE:** the self-hosted server's LOCAL logic-function executor had a
+stale generated SDK layer at
+`/tmp/logic-function-executor-tmpdir/sdk/...-21bf1410-15f6-452d-bfd7-8d0d1601710b`.
+Its generated `core/generated/index.mjs` was created on 2026-08-19 and did not
+contain the `inventoryStockLocations` member. The persisted generated SDK ZIP
+for the current Mahabbat App and the worker/`:2020` layers were regenerated on
+2026-08-20 and did contain it. The HTTP route executes in the server runtime,
+so restarting or inspecting only the worker could not repair this path.
+
+**CONTROLLED EVIDENCE:** raw GraphQL introspection and a direct raw query on
+`:3000` returned Inventory root fields and data. The stale runtime SDK had
+`inventoryStockLocations=0`; after the bounded server recreation its rebuilt
+SDK had `inventoryStockLocations=2`. This proves `SERVER GRAPHQL SCHEMA =
+CORRECT` and isolates the first divergence to the generated SDK layer loaded by
+the production executor.
+
+**WHY `:2020` WORKED:** its disposable executor layer had the current generated
+App SDK. `:3000` was running the same App metadata and image version but its
+server-side ephemeral SDK cache was older than its persisted generated client.
+
+**FIX:** recreated only the stateless `server` container with
+`--force-recreate --no-deps`, allowing the executor to rebuild from the current
+generated SDK. No PostgreSQL/Redis volume, workspace, metadata object or
+customer/POS data was wiped. The command/resolver path also uses the supported
+`asClient()` App access-token path and no longer forwards a public API key into
+the nested resolver. No raw GraphQL fallback and no Twenty core modification
+were introduced.
+
+**REPEATABLE DEPLOYMENT SEQUENCE:**
+
+1. Apply metadata and generate the App SDK with `yarn twenty apply -r
+   selfhost-container`.
+2. Recreate/restart the stateless server/logic executor (or clear only the
+   identified generated SDK runtime cache); never delete persistent volumes.
+3. Run `yarn verify-runtime-api-parity`. It checks the generated
+   `CoreApiClient` artifact actually loaded by the production executor for
+   `inventoryStockLocations`.
+4. Check health, run one minimal Inventory write, then the full acceptance and
+   reconciliation probes.
+
+The cheap guard is available as `scripts/verify-runtime-api-parity.mjs` and
+does not call raw GraphQL or mutate data.
 
 ## Live acceptance (deterministic fixtures, isolated namespace `INV-`)
 
@@ -91,6 +136,6 @@ Same receipt idempotency, two receipts, two productions, production+sale, transf
 - Transfer value preservation assumes single avg per location; FIFO not implemented (by design).
 - Backoffice receipt, production, transfer, write-off, revision, recipe and
   history forms are implemented in `src/front-components/inventory.front-component.tsx`.
-  A logged-in human write-through remains pending; current browser evidence
-  covers the rendered controls and the API harness covers the command/data
-  plane.
+  The `:3000` browser smoke now proves a logged-in human write-through and
+  NULL-versus-zero revision semantics; full day-to-day operator playtesting
+  remains outside this automated acceptance.

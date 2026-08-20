@@ -390,15 +390,17 @@ hardware/printer/fiscal-payment discovery; do not start it automatically.
   context, fixed-point quantities, receipts/MWA, production, recipes,
   transfer, write-off, revisions, POS sale consumption, retry idempotency,
   issue creation and reconciliation.
-- The self-hosted `:3000` metadata apply and clean replan completed, and the
-  browser showed the `Склад` page, PIN gate, eight tabs and receipt controls.
-  The API harness is not PASS on this target: the production logic-function
-  sandbox's `CoreApiClient` rejects the Inventory root query even though a raw
-  GraphQL probe from the same resolver sees the schema. This remains a
-  runtime deployment blocker, not an Inventory-domain PASS claim.
-- `scripts/reconcile-inventory.mjs` found zero mismatches on both targets.
-  Local gates after the final source cleanup are typecheck PASS, lint PASS
-  with zero warnings/errors, and 262/262 unit tests PASS. Twenty core source
+- The self-hosted `:3000` metadata apply and clean replan completed. Forensic
+  inspection found that the server LOCAL logic-function executor held a stale
+  generated SDK layer whose `CoreApiClient` lacked `inventoryStockLocations`,
+  while raw GraphQL and the persisted current App SDK had it. Recreating only
+  the stateless server rebuilt the layer; `yarn verify-runtime-api-parity`
+  checks this artifact after deployment.
+- The recovered `:3000` API harness is **48/48 PASS**. Browser smoke performed
+  a real receipt write and verified blank revision actual = no movement and
+  zero revision actual = adjustment to zero. Final reconciliation reported
+  zero mismatches. Local gates are typecheck PASS, lint PASS with zero
+  warnings/errors, and 262/262 unit tests PASS. Twenty core source
   modifications remain 0.
 
 ## P0 loyalty write boundary status

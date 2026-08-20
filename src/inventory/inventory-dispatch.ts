@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { CoreApiClientLike } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
 import { divideRoundHalfUp, scaledQuantityMicros } from 'src/inventory/inventory-units';
 import { computeNewWeightedAverage, computeProductionUnitCost, quantityCostTotal } from 'src/inventory/inventory-costing';
@@ -139,6 +141,15 @@ const updateBalance = async (c: CoreApiClientLike, bal: BalanceRecord, deltaMicr
 // === ledger append ===
 type AppendedMovement = MovementRecord & { created: boolean };
 
+const deterministicMovementId = (input: { movementType?: string | null; stockItemId?: string | null; locationId?: string | null; idempotencyKey: string }): string => {
+  const hex = createHash('sha256')
+    .update(`${input.movementType ?? ''}|${input.stockItemId ?? ''}|${input.locationId ?? ''}|${input.idempotencyKey}`)
+    .digest('hex')
+    .slice(0, 32);
+  const normalized = `${hex.slice(0, 12)}5${hex.slice(13, 16)}8${hex.slice(17)}`;
+  return `${normalized.slice(0, 8)}-${normalized.slice(8, 12)}-${normalized.slice(12, 16)}-${normalized.slice(16, 20)}-${normalized.slice(20)}`;
+};
+
 const appendMovement = async (
   c: CoreApiClientLike,
   input: Omit<MovementRecord, 'id'> & { idempotencyKey: string },
@@ -146,7 +157,14 @@ const appendMovement = async (
   const existing = await findMovementByIdempotency(c, input.idempotencyKey);
   if (existing) return { ...existing, created: false };
   try {
-    const res = (await c.mutation({ createInventoryStockMovement: { __args: { data: input }, ...MOV_FIELDS } })) as { createInventoryStockMovement?: MovementRecord };
+    const res = (await c.mutation({
+      createInventoryStockMovement: {
+        __args: {
+          data: { ...input, id: deterministicMovementId(input) },
+        },
+        ...MOV_FIELDS,
+      },
+    })) as { createInventoryStockMovement?: MovementRecord };
     if (res.createInventoryStockMovement?.id) return { ...res.createInventoryStockMovement, created: true };
   } catch {}
   const raced = await findMovementByIdempotency(c, input.idempotencyKey);
@@ -174,19 +192,18 @@ const reconcileBalanceProjection = async (c: CoreApiClientLike, itemId: string, 
 
 const applyMovementToProjection = async (
   c: CoreApiClientLike,
-  movement: AppendedMovement,
+  _movement: AppendedMovement,
   itemId: string,
   locationId: string,
-  fallbackBalance: BalanceRecord,
-  deltaMicros: number,
-  unitCostMicros: number,
-  sourceType: string,
+  _fallbackBalance: BalanceRecord,
+  _deltaMicros: number,
+  _unitCostMicros: number,
+  _sourceType: string,
 ): Promise<void> => {
-  if (movement.created) {
-    await updateBalance(c, await findBalance(c, itemId, locationId) ?? fallbackBalance, deltaMicros, unitCostMicros, sourceType);
-  } else {
-    await reconcileBalanceProjection(c, itemId, locationId);
-  }
+  // Rebuild the materialised projection from the append-only ledger after
+  // every movement. This also closes the race where an idempotent concurrent
+  // retry reconciles before the original writer applies its increment.
+  await reconcileBalanceProjection(c, itemId, locationId);
 };
 
 const ensureConsumptionIssue = async (

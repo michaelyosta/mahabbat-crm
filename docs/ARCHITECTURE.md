@@ -144,9 +144,10 @@ consumption request whose processor records sale movements or an auditable
 issue (`MISSING_RECIPE`, `INSUFFICIENT_STOCK`, or location/recipe failure).
 
 The domain and metadata are App-only; Twenty core source modifications remain
-`0`. The disposable `:2020` command/runtime proof is 48/48 PASS. On the
-self-hosted `:3000` target, metadata and the read-only reconciliation probe
-are healthy, but the production logic-function sandbox currently rejects the
-Inventory root query through its `CoreApiClient` while raw GraphQL sees the
-schema. Therefore `:3000` is explicitly a runtime blocker until the sandbox
-client path is repaired.
+`0`. Both the disposable `:2020` and self-hosted `:3000` command/runtime
+proofs are 48/48 PASS. The previous `:3000` failure was isolated to a stale
+generated SDK layer in the server's LOCAL logic-function executor: raw GraphQL
+had the Inventory schema, while the loaded `CoreApiClient` artifact did not.
+Recreating only that stateless server runtime rebuilt the SDK from the current
+App-generated ZIP. `scripts/verify-runtime-api-parity.mjs` guards the exact
+runtime artifact; persistent data is not part of the recovery sequence.

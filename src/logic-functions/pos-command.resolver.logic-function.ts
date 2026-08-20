@@ -1,7 +1,5 @@
 import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 import { Response } from 'twenty-sdk/logic-function';
-import { CoreApiClient } from 'twenty-client-sdk/core';
-
 import {
   MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME,
   POS_COMMAND_RESOLVER_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER,
@@ -25,10 +23,6 @@ const response = (body: unknown, status: number) =>
     status,
     headers: { 'Content-Type': 'application/json' },
   });
-
-type RuntimeCoreClientOptions = { url?: string; headers: Record<string, string> };
-const createRuntimeCoreClient = (options: RuntimeCoreClientOptions) =>
-  new (CoreApiClient as unknown as new (options: RuntimeCoreClientOptions) => CoreApiClient)(options);
 
 export const handler = async (event: RoutePayload): Promise<Response> => {
   const secret = process.env[MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME];
@@ -57,14 +51,7 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
 
   if (!parsedPayload.ok) return response(parsedPayload.error, 400);
 
-  const authorization = event.headers.authorization
-    ?? (process.env.TWENTY_API_KEY ? `Bearer ${process.env.TWENTY_API_KEY}` : undefined);
-  const apiUrl = (process.env.TWENTY_API_URL ?? process.env.SERVER_URL)
-    ?.replace(/localhost|127\.0\.0\.1/g, 'host.docker.internal')
-    .replace(/\/+$/, '');
-  const client = authorization
-    ? createRuntimeCoreClient({ url: apiUrl ? `${apiUrl}/graphql` : undefined, headers: { Authorization: authorization } })
-    : asClient();
+  const client = asClient();
 
   if (command === 'authenticatePosStaff') {
     const result = await authenticatePosStaff(
@@ -100,6 +87,6 @@ export default defineLogicFunction({
   timeoutSeconds: 10,
   handler,
   serverRouteTriggerSettings: {
-    forwardedRequestHeaders: ['x-mahabbat-signature', 'authorization'],
+    forwardedRequestHeaders: ['x-mahabbat-signature'],
   },
 });

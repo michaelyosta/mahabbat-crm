@@ -484,10 +484,12 @@ required because receipts, production, POS consumption and retries can arrive
 concurrently.
 
 The live disposable proof is 48/48 on `:2020`; the browser surface on `:3000`
-shows the real `Склад` page, PIN gate and eight forms/tabs. We do not call the
-self-hosted pilot PASS yet: the `:3000` production logic-function sandbox
-rejects the Inventory query through `CoreApiClient` while a raw GraphQL probe
-from the same path sees the schema. This is recorded as a deployment/runtime
-blocker rather than weakening the command contract or hiding the failure.
-Twenty core modifications remain `0`; reconciliation reports zero mismatches
-on both targets.
+shows the real `Склад` page, PIN gate and eight forms/tabs. The initial
+self-hosted failure was recorded as a deployment/runtime blocker rather than
+weakening the command contract or hiding the failure. For the recovery, the
+server executor's stale generated SDK was identified by its timestamp, hash
+and missing `inventoryStockLocations` member; the persisted App SDK and raw
+GraphQL schema were current. Recreating only the stateless server rebuilt the
+runtime layer. `yarn verify-runtime-api-parity` is now the cheap post-deploy
+guard. Twenty core modifications remain `0`; the final `:3000` acceptance is
+48/48 and reconciliation is zero mismatches.

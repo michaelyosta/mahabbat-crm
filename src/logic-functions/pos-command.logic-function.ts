@@ -38,7 +38,6 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
         headers: {
           'content-type': 'application/json',
           'x-mahabbat-signature': signInternalRouteBody(parsed.data, secret),
-          ...(event.headers.authorization ? { authorization: event.headers.authorization } : {}),
         },
         body: JSON.stringify(parsed.data),
       },
@@ -69,6 +68,5 @@ export default defineLogicFunction({
     path: '/pos/command',
     httpMethod: 'POST',
     isAuthRequired: true,
-    forwardedRequestHeaders: ['authorization'],
   },
 });

@@ -1,7 +1,5 @@
 import { defineLogicFunction, type RoutePayload } from 'twenty-sdk/define';
 import { Response } from 'twenty-sdk/logic-function';
-import { CoreApiClient } from 'twenty-client-sdk/core';
-
 import {
   INVENTORY_COMMAND_RESOLVER_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER,
   MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME,
@@ -17,10 +15,6 @@ const response = (body: unknown, status: number) =>
     status,
     headers: { 'Content-Type': 'application/json' },
   });
-
-type RuntimeCoreClientOptions = { url?: string; headers: Record<string, string> };
-const createRuntimeCoreClient = (options: RuntimeCoreClientOptions) =>
-  new (CoreApiClient as unknown as new (options: RuntimeCoreClientOptions) => CoreApiClient)(options);
 
 export const handler = async (event: RoutePayload): Promise<Response> => {
   const secret = process.env[MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME];
@@ -39,14 +33,7 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
   if (!envelope.ok) return response(envelope.error, 400);
   if (!envelope.data.sessionToken) return response({ code: 'POS_SESSION_REQUIRED', message: 'Войдите в склад по PIN администратора.' }, 401);
 
-  const authorization = event.headers.authorization
-    ?? (process.env.TWENTY_API_KEY ? `Bearer ${process.env.TWENTY_API_KEY}` : undefined);
-  const apiUrl = (process.env.TWENTY_API_URL ?? process.env.SERVER_URL)
-    ?.replace(/localhost|127\.0\.0\.1/g, 'host.docker.internal')
-    .replace(/\/+$/, '');
-  const client = authorization
-    ? createRuntimeCoreClient({ url: apiUrl ? `${apiUrl}/graphql` : undefined, headers: { Authorization: authorization } })
-    : asClient();
+  const client = asClient();
   const authenticated = await getAuthenticatedPosContext(client, envelope.data.sessionToken);
   if (!authenticated.ok) return response(authenticated.result.body, authenticated.result.status);
 
@@ -70,6 +57,6 @@ export default defineLogicFunction({
   timeoutSeconds: 15,
   handler,
   serverRouteTriggerSettings: {
-    forwardedRequestHeaders: ['x-mahabbat-signature', 'authorization'],
+    forwardedRequestHeaders: ['x-mahabbat-signature'],
   },
 });
