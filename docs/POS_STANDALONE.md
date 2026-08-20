@@ -1,0 +1,156 @@
+# MAHABBAT POS — STANDALONE RUNTIME
+
+## CURRENT — Twenty embedded host
+
+```
+Browser (Twenty session)
+  │
+  │  cookie / JWT workspace auth
+  │  (Twenty login required)
+  ▼
+Twenty Front (React SPA, :3000/:2020)
+  │  sidebar + header + CRM chrome + mail banner
+  │  page layout "Касса" → front-component
+  │  RestApiClient → /rest/*  (workspace-scoped)
+  ▼
+Twenty Server
+  ├─ /rest/pos* (Twenty REST data plane, requires workspace auth)
+  └─ /s/pos/command (authenticated httpRoute, isAuthRequired=true)
+       │
+       │  body: { command, payload, sessionToken? }
+       │  headers: workspace auth
+       ▼
+     pos-command.logic-function (gateway)
+       │  validates envelope, signs body with MAHABBAT_INTERNAL_ROUTE_SECRET
+       │  POST → /webhooks/server/<resolver-id>
+       │  header x-mahabbat-signature
+       ▼
+     pos-command-resolver.logic-function (app-only, serverRoute)
+       │  verify signature, parse payload
+       │  if authenticatePosStaff → pos-auth.ts (scrypt PIN → PosSession tokenHash)
+       │  else → getAuthenticatedPosContext(tokenHash) → dispatchPosCommand
+       │  actor/role is server-derived from PosSession, client-supplied role rejected
+       ▼
+     Twenty data plane via CoreApiClient (TWENTY_APP_ACCESS_TOKEN, service identity)
+       pos* custom objects, idempotent mutations, server-owned totals/locks
+```
+
+**What binds POS UI to Twenty canvas (adversarial answers):**
+
+1. **Where is privileged credential?** `TWENTY_APP_ACCESS_TOKEN` (CoreApiClient) and `MAHABBAT_INTERNAL_ROUTE_SECRET` (hmac signer) live only in logic-function env (server/worker). They never reach browser today — browser only holds short-lived `PosSession.sessionToken` (in React memory, not localStorage).
+
+2. **Would it leak to standalone browser?** Only if standalone leaked service env or bundled server code. Design must keep gateway server-side; browser gets only `PosSession` token via PIN.
+
+3. **Who creates PosSession?** `authenticatePosStaff` in `src/pos/pos-auth.ts` — scrypt PIN verification against `PosStaff.pinHash`, then random 32-byte `sessionToken` → SHA256 `tokenHash` stored in `PosSession`.
+
+4. **Can role be spoofed?** No. `parsePosCommandEnvelope` rejects any body `role/staffId/actor` field (INVALID_ACTOR). Resolver derives `staffId/role` from `PosSession` lookup by `tokenHash`; mismatch or inactive staff → 401.
+
+5. **What without Twenty login?** Today every request fails: `/s/pos/command` has `isAuthRequired:true` and `/rest/*` requires workspace auth. Browser with only PosSession token gets 401 at outer route before POS auth runs. Standalone must not require that hop.
+
+6. **What does canvas actually give POS?** Three things: (a) static hosting & routing for the front-component bundle, (b) workspace auth transport to reach `/s/pos/command` + `/rest/*`, (c) ambient CRM chrome (sidebar/header, notifications). (a) and (b) are replaceable; (c) is unwanted in kiosk.
+
+7. **Which assumptions disappear standalone?** No Twenty workspace session, no `RestApiClient` workspace cookie, no automatic `/rest` auth, no front-component definition/page-layout/mounting. Also no Twenty `SERVER_URL` browser resolution.
+
+8. **Refresh / restart?** Today token lives only in React memory → F5 loses session (re-PIN). Desired: pragmatic LAN storage (e.g. sessionStorage with purge on logout) documented as bounded threat model — not internet-grade, but isolates terminal. Server restart without DB wipe keeps `PosSession` rows → session survives until `expiresAt` (15m) or `revokedAt`.
+
+9. **Multi-terminal?** Already safe: `PosOrder.claimToken=tableId` unique race, `idempotencyKey` per command, kitchen `kitchenSentQuantity` cursor, payment `lockKey`. Different `PosSession` tokens → different `staffId` contexts; state converges via 12s polling.
+
+10. **Reuse command handlers?** Yes — `pos-auth.ts` + `pos-command.dispatch.ts` + `pos-command-input.ts` are pure functions over `CoreApiClientLike`. They don't depend on Twenty page layout.
+
+11. **Will business logic duplicate?** Gateway must not copy domain rules. It will import the same dispatch/auth modules and call them with `asClient()` (service identity). REST reads in standalone will also go through gateway that re-validates PosSession and proxies GraphQL/REST with service cred — no second totals/locks implementation.
+
+12. **CORS/CSRF?** If standalone origin differs from gateway origin, CORS must be explicit. Prefer single origin deployment `pos.mahabbat.local` (or `LAN_IP:3100`) serving both static UI and `/api/*` via same reverse proxy/gateway — avoids CORS entirely. For dev, two origins (`vite :5173` ↔ `gateway :3100`) use `Access-Control-Allow-Origin` + `Vary: Origin` with no credentials.
+
+13. **Can embedded + standalone coexist?** Yes. Both reach same authoritative `pos*` objects and same dispatch. Existing `defineFrontComponent`/`definePageLayout` stay untouched; standalone mounts the same `<PosApp />` via shared module. Verified by concurrent acceptance (one order seen from other host after poll).
+
+---
+
+## TARGET — Standalone host (single origin preferred)
+
+```
+LAN terminals (192.168.x.x / pos.mahabbat.local / :3100)
+  │
+  │  PosSession Bearer token (PIN-derived, short-lived)
+  │  no TWENTY_APP_ACCESS_TOKEN, no workspace API key
+  ▼
+Mahabbat POS Gateway  (Node, :3100, also serves static UI)
+  ├─ GET  /              → static PosApp (no CRM chrome)
+  ├─ GET  /health        → 200
+  ├─ POST /api/pos/auth           (no bearer required)  → authenticatePosStaff → token
+  ├─ POST /api/pos/command        (Bearer token)         → getAuthenticatedPosContext → dispatchPosCommand → same handlers
+  ├─ GET  /api/pos/rest/:coll     (Bearer token)         → validate PosSession → proxy to Twenty REST via CoreApiClient/service
+  └─ uses server env: TWENTY_API_URL, TWENTY_APP_ACCESS_TOKEN (or MAHABBAT_API_KEY),
+                      MAHABBAT_INTERNAL_ROUTE_SECRET (if keeping signed delegation),
+                      POS_GATEWAY_* secrets — never sent to browser
+             │
+             │ service identity (server-side only)
+             ▼
+       Twenty data plane (same as today: pos* objects, PosSession/PosStaff)
+```
+
+**Trust boundaries:**
+
+- **Browser → Gateway:** trusts PIN + short-lived Bearer token. Gateway rate-limits PIN, validates token hash/expiry/revocation/inactive staff, rejects any client-supplied role/staffId.
+- **Gateway → Twenty:** trusts `TWENTY_APP_ACCESS_TOKEN` / `MAHABBAT_INTERNAL_ROUTE_SECRET` + internal HMAC if delegating through resolver. These never cross to browser. Gateway logs command/status/request-id without raw PIN or raw token.
+- **Twenty canvas:** continues to exist as secondary host; its `isAuthRequired:true` route stays but is not used by standalone clients.
+
+**Session flow:**
+
+1. `POST /api/pos/auth { pin, terminalId }` → `authenticatePosStaff` → `{ sessionToken, expiresAt, staff }`. Gateway returns raw token once; browser holds it in memory + optional `sessionStorage` (cleared on logout/expiry, key `mahabbat:pos:session`).
+2. Subsequent `Authorization: Bearer <token>` → `getAuthenticatedPosContext` → `dispatchPosCommand`.
+3. Refresh → restore from `sessionStorage` if present and not expired → re-fetch `PosSession` validity via cheap `/api/pos/command` ping or `GET /api/pos/rest/posSessions`; on 401 show PIN again.
+4. Logout → `POST /api/pos/command { command:'logoutPosStaff' }` → `revokePosSession` (sets `revokedAt`) → clear storage.
+5. 15m TTL (SESSION_TTL_MS) → 401 `POS_SESSION_EXPIRED` → re-PIN. Revoked/inactive/malformed → 401. Role spoof → `INVALID_ACTOR` / context mismatch → 400/401.
+
+**API adapter:**
+
+```ts
+interface PosApi {
+  loginWithPin(pin: string, terminalId?: string): Promise<PosSession>;
+  logout(): Promise<void>;
+  list(collection: string): Promise<PosRow[]>;
+  run(command: string, payload: Record<string, unknown>): Promise<unknown>;
+}
+```
+
+- **Embedded adapter** (`TwentyPosApi`): `RestApiClient` + `{ sessionToken }` in body, as today.
+- **Standalone adapter** (`StandalonePosApi`): `fetch('/api/pos/...', { headers:{ Authorization:`Bearer ${token}`}})`, token from caller, not env.
+
+UI (`PosApp`) imports only `PosApi`; it never knows host.
+
+**Shared UI extraction:**
+
+```
+src/pos-ui/
+  PosApp.tsx         ← shared app (extracted from pos.front-component.tsx, props: { api: PosApi, onLogout? })
+  PosShell.tsx       ← optional split of layout pieces (reuse if not explosion)
+  pos-ui.helpers.ts  ← already isolated (money/state/error)
+  pos-ui.styles.ts   ← isolated dark/touch language
+src/front-components/pos.front-component.tsx  ← thin: new StandaloneOrTwenty adapter → <PosApp api={twentyApi} />
+pos-standalone/
+  web/               ← Vite app: import { PosApp } from '../../src/pos-ui/PosApp' + StandalonePosApi
+  server/            ← gateway: Node http server already described, reuses src/pos/*, no TWENTY mods
+```
+
+Invariant: ONE implementation. No component explosion, no duplicated money/state logic.
+
+**Deployment:**
+
+- **Dev:** `yarn pos:dev` → gateway :3100 + Vite :5173 (proxy `/api` → :3100) OR single vite with middleware.
+- **Pilot LAN:** Windows server PC runs `docker compose up` (existing `twenty` stack) + new `pos-gateway` service (build from `pos-standalone/Dockerfile`, exposes `3100:3100`, `depends_on: [server]`, health `/health`, env `TWENTY_API_URL=http://server:3000`, `POS_GATEWAY_PORT=3100`). Terminals open `http://<server-lan-ip>:3100/` or `http://pos.mahabbat.local:3100/` (hosts file). No `localhost` on terminals.
+- **Self-host equivalent:** `http://localhost:3100/` for local acceptance; `http://localhost:3000/` CRM stays unchanged.
+- **Ports are configurable** via `POS_GATEWAY_PORT` / `POS_WEB_PORT`; no hardcode is part of domain.
+
+**Embedded fallback:**
+
+`definePageLayout({ name:'Mahabbat POS', type:'STANDALONE_PAGE', ... })` and `defineFrontComponent` remain — `CRM → Касса` still renders `<PosApp api={twentyApi}/>`. No divergence: both hosts share polling semantics (12s), money, locks, payments.
+
+**No duplicate domain:**
+
+Gateway does not reimplement `recordPayment/closeOrder/...` rules. It forwards to existing dispatch; only auth/read proxy is added.
+
+**Observability / hardening:**
+
+- Log `requestId, command, status, staffId?, latency` server-side; omit raw PIN & raw token.
+- PIN brute-force: keep process-local 5/60s guard (pilot) + document that production LAN/WAF should add distributed limit.
+- CORS: single-origin deployment avoids it; dev CORS is allowlist-based, no credentials.

@@ -13,7 +13,12 @@ import {
   executeStartCount,
   executeFinalizeCount,
 } from 'src/inventory/inventory-dispatch';
-import { gramsToMicros, kgToMicros } from 'src/inventory/inventory-units';
+import {
+  divideRoundHalfUp,
+  gramsToMicros,
+  kgToMicros,
+  scaledQuantityMicros,
+} from 'src/inventory/inventory-units';
 
 // simplified fake client mirroring FakePosDb logic for inventory
 type Row = Record<string, unknown> & { id: string };
