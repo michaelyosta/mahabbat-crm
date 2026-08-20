@@ -28,9 +28,10 @@
   `scripts/accept-inventory.mjs` at **48/48 PASS**. The run included the
   production POS close → inventory consumption path and duplicate processor
   retry.
-- The latest post-integration read-only probe reported `balances=53 movements=173
-  mismatches=0` on `:3000` after the browser smoke. No PostgreSQL or Redis
-  volume was deleted or recreated.
+- The earlier post-integration read-only probe reported `balances=53
+  movements=173 mismatches=0` on `:3000` after the browser smoke. The final
+  freeze pre-review probe reported `balances=96 movements=297 mismatches=0`.
+  No PostgreSQL or Redis volume was deleted or recreated.
 - Browser evidence on `:3000` now includes a real write: `Склад` → `Приход`
   created a movement and the refreshed balance showed `1 000 г` at the new
   weighted cost. A browser revision with a blank actual left the balance
@@ -164,6 +165,16 @@ actually loaded by the executor. Stateful data is never part of this refresh.
 The human-review fixture is additive and namespace-scoped; use
 `scripts/seed-inventory-human-review.mjs` with a private PIN/API key and a new
 namespace per review. There is deliberately no generic destructive reset.
+
+Final freeze evidence on 2026-08-21: self-hosted `:3000` acceptance completed
+**48/48 PASS** after the bounded synthetic fixture repair and the optional
+acceptance pacing control; the server was then recreated back to its normal
+configuration, warmed through a read-only existing-order function call, and
+`yarn verify-runtime-api-parity` returned
+`runtime-sdk-files=1 inventoryStockLocations=present`. The final read-only
+reconciliation was `balances=96 movements=297 mismatches=0`. The temporary
+throttler override used to diagnose the local high-volume harness was removed;
+it is not part of the deployment sequence.
 
 ## Known limitations (§82)
 - Windows SDK paths — use Linux/WSL for plan/apply.

@@ -25,6 +25,8 @@ const accepted = (status) => status === 200 || status === 201;
 const id = () => randomUUID();
 const kg = (value) => Math.round(value * MICROS_PER_KG);
 const grams = (value) => Math.round(value * MICROS_PER_GRAM);
+const commandDelayMs = Math.max(0, Number.parseInt(process.env.MAHABBAT_INVENTORY_COMMAND_DELAY_MS ?? '0', 10) || 0);
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const parseBody = async (response) => {
   const text = await response.text();
   try { return JSON.parse(text); } catch { return { raw: text }; }
@@ -100,6 +102,7 @@ const posCommand = async (apiUrl, apiKey, command, session, payload, extra = {})
 };
 
 const inventoryCommand = async (apiUrl, apiKey, command, session, payload, extra = {}) => {
+  if (commandDelayMs > 0) await delay(commandDelayMs);
   const response = await fetch(`${apiUrl}/s/inventory/command`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },

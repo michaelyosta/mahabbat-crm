@@ -506,7 +506,7 @@ hardware/printer/fiscal-payment discovery; do not start it automatically.
   `main` baseline at `3bdeafb`; the linked Standalone POS worktree remained
   untouched with its owner changes preserved.
 - Current integrated proof: typecheck, lint, unit 262/262, POS API 78/78,
-  Inventory `:3000` 48/48, reconciliation `balances=53 movements=173
+  Inventory `:3000` 48/48, final reconciliation `balances=96 movements=297
   mismatches=0`, CRM smoke, and runtime parity guard all pass. Twenty core
   modifications remain 0.
 - `inventory-pilot-ready-v1` is the annotated frozen software checkpoint.

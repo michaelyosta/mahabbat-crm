@@ -158,13 +158,22 @@ After any Mahabbat App metadata/object change, use this exact bounded sequence:
    selfhost-container`.
 2. Recreate only the stateless server/logic-function executor if the generated
    runtime layer is not refreshed. The supported recovery target is the
-   executor process/container, not the database.
+   executor process/container, not the database. A read-only function warm-up
+   may be used before the guard when the executor's generated directory is
+   empty after recreation.
 3. Run `yarn verify-runtime-api-parity`. It must report
    `inventoryStockLocations=present` before acceptance starts.
 4. Check `GET /healthz`; if the domain changed, run one minimal Inventory write
    on synthetic data.
 5. Run `scripts/accept-inventory.mjs`, then
    `scripts/reconcile-inventory.mjs` and require zero mismatches.
+
+The acceptance harness is intentionally high-volume and can meet Twenty's
+application API throttler in a workspace containing many old synthetic
+fixtures. `MAHABBAT_INVENTORY_COMMAND_DELAY_MS=500` is an optional harness
+pacing control for a slower run. Do not raise the normal server throttle or
+use a temporary compose override as a deployment fix; wait for the bounded
+throttle window and rerun the harness if the platform limit is reached.
 
 Stateful boundary: PostgreSQL volumes, Twenty local storage, Redis persistent
 data when configured, customer/CRM/POS records and production metadata. Never
