@@ -158,6 +158,8 @@ type PaymentRecord = ExistingRecord & {
   paymentMethodTypeSnapshot?: string | null;
   orderPaidTotalBefore?: unknown;
   appliedToOrder?: boolean | null;
+  tenderedAmount?: unknown;
+  changeAmount?: unknown;
 };
 
 type ReservationRecord = ExistingRecord & {
@@ -420,6 +422,8 @@ const PAYMENT_FIELDS: NodeSelection = {
   paymentMethodTypeSnapshot: true,
   orderPaidTotalBefore: { amountMicros: true, currencyCode: true },
   appliedToOrder: true,
+  tenderedAmount: { amountMicros: true, currencyCode: true },
+  changeAmount: { amountMicros: true, currencyCode: true },
 };
 
 const RESERVATION_FIELDS: NodeSelection = {
@@ -2431,6 +2435,11 @@ const paymentResponse = (
     orderId: order.id,
     status: payment.status ?? 'PENDING',
     amount: payment.amount ?? null,
+    tenderedAmount: payment.tenderedAmount ?? null,
+    changeAmount: payment.changeAmount ?? null,
+    tenderedMicros: normalizeCurrency(payment.tenderedAmount).amountMicros || normalizeCurrency(payment.amount).amountMicros,
+    changeMicros: normalizeCurrency(payment.changeAmount).amountMicros,
+    appliedMicros: normalizeCurrency(payment.amount).amountMicros,
     remainingMicros: totals.remainingMicros,
     prepaidMicros: totals.prepaidMicros,
     orderStatus: order.status ?? null,
@@ -2501,6 +2510,7 @@ export const executeRecordPayment = async (
     orderId: string;
     paymentMethodId: string;
     amountMicros: number;
+    tenderedAmountMicros?: number;
     idempotencyKey: string;
   },
   actor: PosActor,
@@ -2508,16 +2518,40 @@ export const executeRecordPayment = async (
   if (!Number.isSafeInteger(payload.amountMicros) || payload.amountMicros <= 0) {
     return errorResult('PAYMENT_AMOUNT_INVALID', 'Payment amount must be a positive safe integer.');
   }
+  if (
+    payload.tenderedAmountMicros !== undefined &&
+    (!Number.isSafeInteger(payload.tenderedAmountMicros) || payload.tenderedAmountMicros <= 0)
+  ) {
+    return errorResult('PAYMENT_AMOUNT_INVALID', 'Payment amount must be a positive safe integer.');
+  }
 
   const order = await findOrderById(client, payload.orderId);
   if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
 
+  const method = await findPaymentMethodById(client, payload.paymentMethodId);
+  if (!method) return errorResult('PAYMENT_METHOD_NOT_FOUND', 'Payment method does not exist.');
+  if (method.isActive === false) {
+    return errorResult('PAYMENT_METHOD_INACTIVE', 'Payment method is inactive.');
+  }
+
+  const isCash = method.methodType === 'CASH';
+  const tenderedProvided = payload.tenderedAmountMicros !== undefined && isCash;
+
   const existing = await findPaymentByIdempotencyKey(client, payload.idempotencyKey);
   if (existing) {
+    const existingTendered = existing.tenderedAmount
+      ? normalizeCurrency(existing.tenderedAmount).amountMicros
+      : normalizeCurrency(existing.amount).amountMicros;
+    const existingApplied = normalizeCurrency(existing.amount).amountMicros;
+    const expectedTendered = tenderedProvided ? payload.tenderedAmountMicros : payload.amountMicros;
+    // For idempotency, compare tendered when cash, otherwise compare amount directly.
+    const tenderedMatches = tenderedProvided
+      ? existingTendered === expectedTendered
+      : existingApplied === payload.amountMicros;
     if (
       existing.orderId !== payload.orderId ||
       existing.paymentMethodId !== payload.paymentMethodId ||
-      normalizeCurrency(existing.amount).amountMicros !== payload.amountMicros ||
+      !tenderedMatches ||
       existing.acceptedByStaffId !== actor.staffId
     ) {
       return idempotencyConflict('The idempotency key belongs to another payment context.');
@@ -2528,27 +2562,44 @@ export const executeRecordPayment = async (
     }
   }
 
-  const method = await findPaymentMethodById(client, payload.paymentMethodId);
-  if (!method) return errorResult('PAYMENT_METHOD_NOT_FOUND', 'Payment method does not exist.');
-  if (method.isActive === false) {
-    return errorResult('PAYMENT_METHOD_INACTIVE', 'Payment method is inactive.');
-  }
-
   if (order.status !== 'PRECHECK_PRINTED') {
     return errorResult('PAYMENT_ORDER_STATE', 'Payments require a printed precheck.');
   }
 
+  // Derive applied/change for creation: need current remaining.
+  const deriveForRemaining = (remaining: number) => {
+    if (isCash && tenderedProvided) {
+      const tendered = payload.tenderedAmountMicros as number;
+      const applied = Math.min(tendered, remaining);
+      const change = tendered - applied;
+      return { applied, tendered, change };
+    }
+    return { applied: payload.amountMicros, tendered: payload.amountMicros, change: 0 };
+  };
+
   let payment = existing;
   if (!payment) {
     const totals = paymentTotals(order);
-    if (payload.amountMicros > totals.remainingMicros) {
+    if (totals.remainingMicros <= 0) {
       return errorResult('OVERPAYMENT', 'Payment exceeds the remaining amount.');
     }
+    const { applied } = deriveForRemaining(totals.remainingMicros);
+    if (applied <= 0) {
+      return errorResult('OVERPAYMENT', 'Payment exceeds the remaining amount.');
+    }
+    if (!isCash && applied > totals.remainingMicros) {
+      return errorResult('OVERPAYMENT', 'Payment exceeds the remaining amount.');
+    }
+    if (isCash && !tenderedProvided && applied > totals.remainingMicros) {
+      return errorResult('OVERPAYMENT', 'Payment exceeds the remaining amount.');
+    }
+    // For cash with tendered, overpayment is capped as change, not rejected.
     const lockOwner = await findPendingPaymentByOrder(client, payload.orderId);
     if (lockOwner) {
       return errorResult('PAYMENT_IN_PROGRESS', 'Another payment is currently being processed for this order.');
     }
 
+    const derived = deriveForRemaining(totals.remainingMicros);
     try {
       const result = (await client.mutation({
         createPosPayment: {
@@ -2556,7 +2607,7 @@ export const executeRecordPayment = async (
             data: {
               orderId: payload.orderId,
               paymentMethodId: payload.paymentMethodId,
-              amount: microsToCurrency(payload.amountMicros),
+              amount: microsToCurrency(derived.applied),
               status: 'PENDING',
               acceptedByStaffId: actor.staffId,
               idempotencyKey: payload.idempotencyKey,
@@ -2565,6 +2616,12 @@ export const executeRecordPayment = async (
               paymentMethodTypeSnapshot: method.methodType ?? 'OTHER',
               orderPaidTotalBefore: normalizeCurrency(order.paidTotal),
               appliedToOrder: false,
+              ...(isCash
+                ? {
+                    tenderedAmount: microsToCurrency(derived.tendered),
+                    changeAmount: microsToCurrency(derived.change),
+                  }
+                : {}),
             },
           },
           id: true,
@@ -2579,6 +2636,8 @@ export const executeRecordPayment = async (
           paymentMethodTypeSnapshot: true,
           orderPaidTotalBefore: { amountMicros: true, currencyCode: true },
           appliedToOrder: true,
+          tenderedAmount: { amountMicros: true, currencyCode: true },
+          changeAmount: { amountMicros: true, currencyCode: true },
         },
       })) as { createPosPayment?: PaymentRecord };
       payment = result.createPosPayment ?? null;
@@ -2594,6 +2653,10 @@ export const executeRecordPayment = async (
 
   if (!payment?.id) return errorResult('PAYMENT_NOT_FOUND', 'Payment could not be read back.');
 
+  // The applied amount is authoritative server-side; for cash with tendered it is derived from
+  // the remaining at the moment of finalization, not a client-supplied amount.
+  const storedApplied = normalizeCurrency(payment.amount).amountMicros;
+
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const currentOrder = await findOrderById(client, payload.orderId);
     if (!currentOrder) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
@@ -2603,7 +2666,7 @@ export const executeRecordPayment = async (
 
     const currentTotals = paymentTotals(currentOrder);
     const beforeMicros = normalizeCurrency(payment.orderPaidTotalBefore).amountMicros;
-    const expectedAfterOwnPayment = beforeMicros + payload.amountMicros;
+    const expectedAfterOwnPayment = beforeMicros + storedApplied;
 
     // If the order aggregate was advanced and the only pending lock belongs to
     // this payment, a retry can safely finalize the payment after a crash.
@@ -2621,7 +2684,16 @@ export const executeRecordPayment = async (
       return paymentResponse(finalized, refreshed, existing ? 200 : 201);
     }
 
-    if (payload.amountMicros > currentTotals.remainingMicros) {
+    // Non-cash overpayment check uses storedApplied (server-derived for cash).
+    if (!isCash && storedApplied > currentTotals.remainingMicros) {
+      await updatePayment(client, payment.id, {
+        status: 'REJECTED',
+        lockKey: null,
+        appliedToOrder: false,
+      });
+      return errorResult('OVERPAYMENT', 'Payment exceeds the remaining amount.');
+    }
+    if (isCash && !tenderedProvided && storedApplied > currentTotals.remainingMicros) {
       await updatePayment(client, payment.id, {
         status: 'REJECTED',
         lockKey: null,
@@ -2634,7 +2706,7 @@ export const executeRecordPayment = async (
       client,
       currentOrder,
       currentTotals.paidMicros,
-      currentTotals.paidMicros + payload.amountMicros,
+      currentTotals.paidMicros + storedApplied,
     );
     if (!updated) continue;
 
@@ -3103,6 +3175,9 @@ export const dispatchPosCommand = async (
           orderId: payload.orderId as string,
           paymentMethodId: payload.paymentMethodId as string,
           amountMicros: payload.amountMicros as number,
+          ...(payload.tenderedAmountMicros !== undefined
+            ? { tenderedAmountMicros: payload.tenderedAmountMicros as number }
+            : {}),
           idempotencyKey: payload.idempotencyKey as string,
         },
         actor,

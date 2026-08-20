@@ -1170,6 +1170,13 @@ const PosFrontComponent = () => {
     0,
     totalMicros - prepaidMicros - paidMicros,
   );
+  const selectedPaymentMethod = methods.find((row) => row.id === paymentMethodId);
+  const isCashSelected = selectedPaymentMethod?.methodType === 'CASH';
+  const tenderedMicrosPreview = parseMoneyInputToMicros(paymentAmount);
+  const changePreviewMicros =
+    isCashSelected && tenderedMicrosPreview !== null
+      ? Math.max(0, tenderedMicrosPreview - remainingMicros)
+      : 0;
   const selectedGuest = guests.find(
     (row) => row.id === (guestId ?? guests[0]?.id),
   );
@@ -1373,12 +1380,24 @@ const PosFrontComponent = () => {
       setError('Введите корректную сумму оплаты');
       return;
     }
-    const result = await run(
-      'recordPayment',
-      { orderId, paymentMethodId, amountMicros, idempotencyKey: uuid() },
-      'Оплата принята',
-    );
-    if (result) setPaymentAmount('');
+    const selectedMethod = (rows.posPaymentMethods ?? []).find((row) => row.id === paymentMethodId);
+    const isCash = selectedMethod?.methodType === 'CASH';
+    const payload: Record<string, unknown> = {
+      orderId,
+      paymentMethodId,
+      amountMicros,
+      idempotencyKey: uuid(),
+    };
+    if (isCash) payload.tenderedAmountMicros = amountMicros;
+    const result = await run('recordPayment', payload, 'Оплата принята');
+    if (result) {
+      // Show change toast for cash when server returns changeMicros
+      const changeMicros = Number((result as any)?.changeMicros ?? 0);
+      if (isCash && changeMicros > 0) {
+        setNotice(`Сдача ${money(changeMicros)}`);
+      }
+      setPaymentAmount('');
+    }
   };
 
   const closeOrder = async () => {
@@ -1660,40 +1679,112 @@ const PosFrontComponent = () => {
                   ))}
                 </div>
               </div>
-              <div className="mah-pos-sheet-section">
-                <h3>Сумма</h3>
-                <label className="mah-pos-field">
-                  Сумма, ₸
-                  <input
-                    className="mah-pos-input"
-                    inputMode="decimal"
-                    value={paymentAmount}
-                    onChange={(event) => setPaymentAmount(event.target.value)}
-                    placeholder="0"
-                    autoFocus
-                  />
-                </label>
-                <div className="mah-pos-quick-amounts">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setPaymentAmount(formatMicrosForInput(remainingMicros))
-                    }
+              {isCashSelected ? (
+                <div className="mah-pos-sheet-section">
+                  <div className="mah-pos-payment-summary" style={{ marginBottom: 12 }}>
+                    <div className="mah-pos-total-row">
+                      <span>К оплате</span>
+                      <strong>{money(remainingMicros)}</strong>
+                    </div>
+                  </div>
+                  <label className="mah-pos-field">
+                    Получено, ₸
+                    <input
+                      className="mah-pos-input"
+                      inputMode="decimal"
+                      value={paymentAmount}
+                      onChange={(event) => setPaymentAmount(event.target.value)}
+                      placeholder="0"
+                      autoFocus
+                    />
+                  </label>
+                  <div
+                    className="mah-pos-total-row total"
+                    style={{
+                      marginTop: 12,
+                      padding: '10px 12px',
+                      background: changePreviewMicros > 0 ? '#0a6b2a' : '#f3f4f6',
+                      color: changePreviewMicros > 0 ? '#fff' : '#111',
+                      borderRadius: 10,
+                      fontSize: changePreviewMicros > 0 ? '18px' : '16px',
+                      fontWeight: 800,
+                    }}
                   >
-                    Весь остаток
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setPaymentAmount(
-                        formatMicrosForInput(Math.floor(remainingMicros / 2)),
-                      )
-                    }
-                  >
-                    Половина
-                  </button>
+                    <span>Сдача</span>
+                    <strong>{money(changePreviewMicros)}</strong>
+                  </div>
+                  <div className="mah-pos-quick-amounts" style={{ marginTop: 12 }}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPaymentAmount(formatMicrosForInput(remainingMicros))
+                      }
+                    >
+                      Весь остаток
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPaymentAmount(
+                          formatMicrosForInput(remainingMicros + 3000000000),
+                        )
+                      }
+                    >
+                      +3 000
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPaymentAmount(
+                          formatMicrosForInput(remainingMicros + 5000000000),
+                        )
+                      }
+                    >
+                      +5 000
+                    </button>
+                  </div>
+                  {tenderedMicrosPreview !== null && tenderedMicrosPreview < remainingMicros && (
+                    <div style={{ marginTop: 10, fontSize: 13, color: '#6b7280' }}>
+                      Частичная оплата · останется {money(remainingMicros - tenderedMicrosPreview)}
+                    </div>
+                  )}
                 </div>
-              </div>
+              ) : (
+                <div className="mah-pos-sheet-section">
+                  <h3>Сумма</h3>
+                  <label className="mah-pos-field">
+                    Сумма, ₸
+                    <input
+                      className="mah-pos-input"
+                      inputMode="decimal"
+                      value={paymentAmount}
+                      onChange={(event) => setPaymentAmount(event.target.value)}
+                      placeholder="0"
+                      autoFocus
+                    />
+                  </label>
+                  <div className="mah-pos-quick-amounts">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPaymentAmount(formatMicrosForInput(remainingMicros))
+                      }
+                    >
+                      Весь остаток
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPaymentAmount(
+                          formatMicrosForInput(Math.floor(remainingMicros / 2)),
+                        )
+                      }
+                    >
+                      Половина
+                    </button>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </Sheet>

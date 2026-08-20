@@ -30,6 +30,10 @@ export const POS_PAYMENT_ORDER_PAID_TOTAL_BEFORE_FIELD_UNIVERSAL_IDENTIFIER =
   '8a4d7f10-2b3c-4d5e-8f60-1234567890d6';
 export const POS_PAYMENT_APPLIED_TO_ORDER_FIELD_UNIVERSAL_IDENTIFIER =
   '8a4d7f10-2b3c-4d5e-8f60-1234567890d7';
+export const POS_PAYMENT_TENDERED_AMOUNT_FIELD_UNIVERSAL_IDENTIFIER =
+  '8a4d7f10-2b3c-4d5e-8f60-1234567890d9';
+export const POS_PAYMENT_CHANGE_AMOUNT_FIELD_UNIVERSAL_IDENTIFIER =
+  '8a4d7f10-2b3c-4d5e-8f60-1234567890da';
 export const POS_PAYMENT_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
   '8a4d7f10-2b3c-4d5e-8f60-1234567890cc';
 export const POS_PAYMENT_UNIQUE_LOCK_KEY_INDEX_UNIVERSAL_IDENTIFIER =
@@ -214,6 +218,28 @@ export default defineObject({
       icon: 'IconCheck',
       isNullable: false,
       defaultValue: false,
+      isUIEditable: false,
+    },
+    {
+      universalIdentifier: POS_PAYMENT_TENDERED_AMOUNT_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.CURRENCY,
+      name: 'tenderedAmount',
+      label: 'Передано',
+      description: 'Cash tendered micros; null for non-cash or legacy payments',
+      icon: 'IconCashBanknote',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
+    },
+    {
+      universalIdentifier: POS_PAYMENT_CHANGE_AMOUNT_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.CURRENCY,
+      name: 'changeAmount',
+      label: 'Сдача',
+      description: 'Change micros computed server-side for cash; 0 otherwise',
+      icon: 'IconCoins',
+      isNullable: true,
+      defaultValue: null,
       isUIEditable: false,
     },
   ],

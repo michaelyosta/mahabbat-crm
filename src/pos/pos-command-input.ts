@@ -92,6 +92,7 @@ export type RecordPaymentPayload = {
   orderId: string;
   paymentMethodId: string;
   amountMicros: number;
+  tenderedAmountMicros?: number;
   idempotencyKey: string;
 };
 
@@ -407,8 +408,13 @@ const parseRecordPaymentPayload = (
   if (typeof payload !== 'object' || payload === null) {
     return invalid('INVALID_PAYLOAD', 'payload must be an object');
   }
-  const { orderId, paymentMethodId, amountMicros, idempotencyKey } =
-    payload as Record<string, unknown>;
+  const {
+    orderId,
+    paymentMethodId,
+    amountMicros,
+    tenderedAmountMicros,
+    idempotencyKey,
+  } = payload as Record<string, unknown>;
   if (!isUuid(orderId) || !isUuid(paymentMethodId)) {
     return invalid('INVALID_PAYLOAD', 'orderId and paymentMethodId must be UUIDs');
   }
@@ -419,11 +425,25 @@ const parseRecordPaymentPayload = (
   ) {
     return invalid('INVALID_PAYLOAD', 'amountMicros must be a positive safe integer');
   }
+  if (
+    tenderedAmountMicros !== undefined &&
+    (typeof tenderedAmountMicros !== 'number' ||
+      !Number.isSafeInteger(tenderedAmountMicros) ||
+      tenderedAmountMicros <= 0)
+  ) {
+    return invalid('INVALID_PAYLOAD', 'tenderedAmountMicros must be a positive safe integer');
+  }
   const parsedKey = parseIdempotencyKey(idempotencyKey);
   if (!parsedKey.ok) return parsedKey;
   return {
     ok: true,
-    data: { orderId, paymentMethodId, amountMicros, idempotencyKey: parsedKey.data },
+    data: {
+      orderId,
+      paymentMethodId,
+      amountMicros,
+      ...(tenderedAmountMicros !== undefined ? { tenderedAmountMicros } : {}),
+      idempotencyKey: parsedKey.data,
+    },
   };
 };
 

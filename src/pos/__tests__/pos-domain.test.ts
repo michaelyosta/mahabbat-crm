@@ -867,6 +867,169 @@ describe('pos domain happy path', () => {
   });
 });
 
+describe('pos cash tender and change', () => {
+  const setupOrderWithTotal = async (db: FakePosDb, totalMicros: number) => {
+    await executeOpenShift(db, { idempotencyKey: key(500) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(501) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(502) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    const menu = db.rows.posMenuItems.find((row) => row.id === MENU_A)!;
+    menu.price = { amountMicros: totalMicros, currencyCode: 'KZT' };
+    await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 1, idempotencyKey: key(503) },
+      waiter,
+    );
+    await executeCreatePrecheck(db, { orderId, idempotencyKey: key(504) }, waiter);
+    return orderId;
+  };
+
+  it('cash exact tender applies fully with no change', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrderWithTotal(db, 7_000_000_000);
+    const result = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 7_000_000_000, tenderedAmountMicros: 7_000_000_000, idempotencyKey: key(510) },
+      waiter,
+    );
+    expect(result.status).toBe(201);
+    const body = result.body as any;
+    expect(body.appliedMicros).toBe(7_000_000_000);
+    expect(body.changeMicros).toBe(0);
+    expect(body.remainingMicros).toBe(0);
+    const stored = db.rows.posPayments.find((row) => row.idempotencyKey === key(510))!;
+    expect((stored.amount as any).amountMicros).toBe(7_000_000_000);
+    expect((stored.tenderedAmount as any).amountMicros).toBe(7_000_000_000);
+    expect((stored.changeAmount as any).amountMicros).toBe(0);
+  });
+
+  it('cash over-tender caps applied and returns change', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrderWithTotal(db, 7_000_000_000);
+    const result = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 10_000_000_000, tenderedAmountMicros: 10_000_000_000, idempotencyKey: key(520) },
+      waiter,
+    );
+    expect(result.status).toBe(201);
+    const body = result.body as any;
+    expect(body.appliedMicros).toBe(7_000_000_000);
+    expect(body.changeMicros).toBe(3_000_000_000);
+    expect(body.remainingMicros).toBe(0);
+    const order = db.rows.posOrders.find((row) => row.id === orderId)!;
+    expect((order.paidTotal as any).amountMicros).toBe(7_000_000_000);
+  });
+
+  it('cash partial tender leaves remaining', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrderWithTotal(db, 7_000_000_000);
+    const result = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 4_000_000_000, tenderedAmountMicros: 4_000_000_000, idempotencyKey: key(530) },
+      waiter,
+    );
+    expect(result.status).toBe(201);
+    const body = result.body as any;
+    expect(body.appliedMicros).toBe(4_000_000_000);
+    expect(body.changeMicros).toBe(0);
+    expect(body.remainingMicros).toBe(3_000_000_000);
+  });
+
+  it('mixed card + cash with change closes order', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrderWithTotal(db, 20_000_000_000);
+    const card = await executeRecordPayment(db, { orderId, paymentMethodId: CARD_METHOD, amountMicros: 12_000_000_000, idempotencyKey: key(540) }, waiter);
+    expect(card.status).toBe(201);
+    expect((card.body as any).remainingMicros).toBe(8_000_000_000);
+    const cash = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 10_000_000_000, tenderedAmountMicros: 10_000_000_000, idempotencyKey: key(541) },
+      waiter,
+    );
+    expect(cash.status).toBe(201);
+    expect((cash.body as any).appliedMicros).toBe(8_000_000_000);
+    expect((cash.body as any).changeMicros).toBe(2_000_000_000);
+    expect((cash.body as any).remainingMicros).toBe(0);
+    const closed = await executeCloseOrder(db, { orderId, idempotencyKey: key(542) }, waiter);
+    expect(closed.status).toBe(201);
+  });
+
+  it('retry same idempotency key returns same payment and no duplicate', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrderWithTotal(db, 7_000_000_000);
+    const first = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 10_000_000_000, tenderedAmountMicros: 10_000_000_000, idempotencyKey: key(550) },
+      waiter,
+    );
+    expect(first.status).toBe(201);
+    const second = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 10_000_000_000, tenderedAmountMicros: 10_000_000_000, idempotencyKey: key(550) },
+      waiter,
+    );
+    expect(second.status).toBe(200);
+    expect((second.body as any).paymentId).toBe((first.body as any).paymentId);
+    expect(db.rows.posPayments.filter((row) => row.status === 'SUCCESS')).toHaveLength(1);
+    const paidTotal = (db.rows.posOrders.find((row) => row.id === orderId)?.paidTotal as any).amountMicros;
+    expect(paidTotal).toBe(7_000_000_000);
+  });
+
+  it('concurrent cash payments do not produce negative remaining', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrderWithTotal(db, 7_000_000_000);
+    const first = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 4_000_000_000, tenderedAmountMicros: 4_000_000_000, idempotencyKey: key(560) },
+      waiter,
+    );
+    expect(first.status).toBe(201);
+    // Second payment attempts to pay 4 000 but remaining is 3 000; without tendered cap it should overpay for CARD,
+    // but for cash with tendered equal to applied we test card-like non-cash overpayment via CASH without tendered mismatch:
+    // Use a second cash payment without tendered field to trigger plain overpayment check.
+    const second = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 4_000_000_000, idempotencyKey: key(561) },
+      waiter,
+    );
+    expect(second.status).toBe(400);
+    expect((second.body as any).code).toBe('OVERPAYMENT');
+    expect((db.rows.posOrders.find((row) => row.id === orderId)?.paidTotal as any).amountMicros).toBe(4_000_000_000);
+  });
+
+  it('CARD does not use cash change semantics', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrderWithTotal(db, 7_000_000_000);
+    // Send tendered for CARD; server should ignore cash semantics and apply amountMicros directly (no change)
+    const result = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CARD_METHOD, amountMicros: 7_000_000_000, tenderedAmountMicros: 10_000_000_000, idempotencyKey: key(570) },
+      waiter,
+    );
+    expect(result.status).toBe(201);
+    const body = result.body as any;
+    expect(body.appliedMicros).toBe(7_000_000_000);
+    expect(body.changeMicros).toBe(0);
+    expect(body.remainingMicros).toBe(0);
+    const stored = db.rows.posPayments.find((row) => row.idempotencyKey === key(570))!;
+    // CARD stored change should be 0 or null, not 3k
+    const change = stored.changeAmount ? (stored.changeAmount as any).amountMicros : 0;
+    expect(change).toBe(0);
+    // Overpayment for CARD must still be rejected even if tendered would have implied change
+    const freshDb = dbWithBaseline();
+    const freshOrderId = await setupOrderWithTotal(freshDb, 7_000_000_000);
+    const over = await executeRecordPayment(
+      freshDb,
+      { orderId: freshOrderId, paymentMethodId: CARD_METHOD, amountMicros: 10_000_000_000, idempotencyKey: key(571) },
+      waiter,
+    );
+    expect(over.status).toBe(400);
+    expect((over.body as any).code).toBe('OVERPAYMENT');
+  });
+});
+
 describe('pos domain concurrency races', () => {
   it('surfaces the existing shift when two openShift calls race', async () => {
     const db = dbWithBaseline();
