@@ -27,6 +27,26 @@ type ConsumptionIssueRecord = Existing & { orderId?: string | null; orderLineId?
 type CountRecord = Existing & { label?: string | null; locationId?: string | null; status?: string | null; ledgerWatermark?: string | null; createdByStaffId?: string | null; idempotencyKey?: string | null; startedAt?: string | null };
 type CountLineRecord = Existing & { countId?: string | null; stockItemId?: string | null; expectedQuantityMicros?: number | null; actualQuantityMicros?: number | null; varianceMicros?: number | null; unitCostMicrosSnapshot?: number | null; resolution?: string | null; producedRecipeVersionId?: string | null };
 
+type RevisionActualInput = {
+  stockItemId: string;
+  actualQuantityMicros: number | null;
+  resolution?: string;
+};
+
+type PlannedMovement = Omit<MovementRecord, 'id'> & { id: string };
+
+type RevisionPostingPlan = {
+  countId: string;
+  locationId: string;
+  idempotencyKey: string;
+  watermark: string;
+  claimToken: string;
+  lineUpdates: Array<{ id: string; data: Record<string, unknown> }>;
+  lineCreates: Array<Record<string, unknown>>;
+  movements: PlannedMovement[];
+  affectedItemIds: string[];
+};
+
 type Connection<T> = { edges?: Array<{ node?: T | null } | null>; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null };
 
 const queryConnection = async <T extends Existing>(
@@ -271,6 +291,8 @@ export const executeReceiveStock = async (
   const loc = await findLocationById(c, payload.locationId);
   if (!loc) return error('LOCATION_NOT_FOUND', 'Точка не найдена.');
   if (loc.isActive === false) return error('LOCATION_INACTIVE', 'Точка неактивна.');
+  const revisionLock = await rejectMovementDuringRevision(c, [payload.locationId]);
+  if (revisionLock) return revisionLock;
   // idempotency: check movements with sourceId == idempotencyKey already exists
   const existingGroup = await findMovementsBySource(c, payload.idempotencyKey);
   if (existingGroup.length > 0) return ok(200, { receiptId: payload.idempotencyKey, lineCount: existingGroup.length, replay: true });
@@ -308,6 +330,8 @@ export const executeWriteOffStock = async (
   if (!item) return error('ITEM_NOT_FOUND', 'Позиция не найдена.');
   const loc = await findLocationById(c, payload.locationId);
   if (!loc) return error('LOCATION_NOT_FOUND', 'Точка не найдена.');
+  const revisionLock = await rejectMovementDuringRevision(c, [payload.locationId]);
+  if (revisionLock) return revisionLock;
   const existing = await findMovementByIdempotency(c, payload.idempotencyKey);
   if (existing) return ok(200, { movementId: existing.id, replay: true });
   const bal = await ensureBalance(c, payload.stockItemId, payload.locationId);
@@ -339,6 +363,8 @@ export const executeTransferStock = async (
   const srcLoc = await findLocationById(c, payload.sourceLocationId);
   const dstLoc = await findLocationById(c, payload.destLocationId);
   if (!srcLoc || !dstLoc) return error('LOCATION_NOT_FOUND', 'Точка не найдена.');
+  const revisionLock = await rejectMovementDuringRevision(c, [payload.sourceLocationId, payload.destLocationId]);
+  if (revisionLock) return revisionLock;
   const item = await findItemById(c, payload.stockItemId);
   if (!item) return error('ITEM_NOT_FOUND', 'Позиция не найдена.');
   const srcBal = await ensureBalance(c, payload.stockItemId, payload.sourceLocationId);
@@ -491,6 +517,8 @@ export const executeProduceSemi = async (
   if (item.itemType !== 'SEMI_FINISHED') return error('INVALID_ITEM_TYPE', 'Только полуфабрикат можно производить.');
   const loc = await findLocationById(c, payload.locationId);
   if (!loc) return error('LOCATION_NOT_FOUND', 'Точка не найдена.');
+  const revisionLock = await rejectMovementDuringRevision(c, [payload.locationId]);
+  if (revisionLock) return revisionLock;
   const existing = await findMovementsBySource(c, payload.idempotencyKey);
   if (existing.length > 0) return ok(200, { productionId: payload.idempotencyKey, replay: true });
 
@@ -583,6 +611,8 @@ export const processConsumptionRequest = async (c: CoreApiClientLike, orderId: s
       const recHeader = await queryConnection<RecipeRecord>(c, 'inventoryRecipes', { filter: { targetId: { eq: line.menuItemId } }, first: 1 }, RECIPE_FIELDS);
       const locId = recHeader[0]?.defaultLocationId ?? null;
       if (!locId) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_LOCATION' }); continue; }
+      const revisionLock = await rejectMovementDuringRevision(c, [locId]);
+      if (revisionLock) return revisionLock;
       for (const rl of recipeLines) {
         const required = scaledQuantityMicros(rl.quantityMicros as number, (line.quantity * 1000), ver.yieldQuantityMicros as number);
         const bal = await ensureBalance(c, rl.stockItemId as string, locId);
@@ -610,6 +640,8 @@ export const processConsumptionRequest = async (c: CoreApiClientLike, orderId: s
     const recHeader = (await queryConnection<RecipeRecord>(c, 'inventoryRecipes', { filter: { targetKind: { eq: 'MENU_ITEM' }, targetId: { eq: line.menuItemId } }, first: 1 }, RECIPE_FIELDS))[0];
     const locId = recHeader?.defaultLocationId ?? null;
     if (!locId) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_LOCATION' }); continue; }
+    const revisionLock = await rejectMovementDuringRevision(c, [locId]);
+    if (revisionLock) return revisionLock;
     for (const rl of recipeLines) {
       const required = scaledQuantityMicros(rl.quantityMicros as number, (line.quantity * 1000), ver.yieldQuantityMicros as number);
       const bal = await ensureBalance(c, rl.stockItemId as string, locId);
@@ -668,133 +700,368 @@ export const executeStartCount = async (c: CoreApiClientLike, payload: { countId
   return ok(200, { countId: count.id, expectedLines: balances.length, watermark });
 };
 
+const revisionClaimHash = (idempotencyKey: string): string =>
+  createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 24);
+
+const revisionClaimToken = (idempotencyKey: string, watermark: string): string =>
+  `POSTING:${revisionClaimHash(idempotencyKey)}:${encodeURIComponent(watermark)}`;
+
+const parseRevisionClaim = (value: unknown): { hash: string; watermark: string } | null => {
+  if (typeof value !== 'string' || !value.startsWith('POSTING:')) return null;
+  const [, hash, encodedWatermark] = value.split(':');
+  if (!hash || !encodedWatermark) return null;
+  try {
+    return { hash, watermark: decodeURIComponent(encodedWatermark) };
+  } catch {
+    return null;
+  }
+};
+
+const rejectMovementDuringRevision = async (c: CoreApiClientLike, locationIds: string[]): Promise<InventoryResult | null> => {
+  const uniqueLocationIds = [...new Set(locationIds)];
+  for (const locationId of uniqueLocationIds) {
+    const activeCounts = await queryConnection<CountRecord>(
+      c,
+      'inventoryCounts',
+      { filter: { locationId: { eq: locationId }, status: { eq: 'ACTIVE' } }, first: 100 },
+      COUNT_FIELDS,
+    );
+    if (activeCounts.some((count) => parseRevisionClaim(count.ledgerWatermark))) {
+      return error('REVISION_IN_PROGRESS', 'На этой точке сейчас обновляются остатки. Повторите операцию после завершения ревизии.');
+    }
+  }
+  return null;
+};
+
+const revisionError = (code: string, message: string): Error & { code: string } => {
+  const result = new Error(message) as Error & { code: string };
+  result.code = code;
+  return result;
+};
+
+const revisionWatermarkParts = (watermark: unknown): { time: string; count: number } | null => {
+  if (typeof watermark !== 'string') return null;
+  const separator = watermark.lastIndexOf('|');
+  if (separator <= 0) return null;
+  const time = watermark.slice(0, separator);
+  const count = Number(watermark.slice(separator + 1));
+  if (!time || !Number.isSafeInteger(count) || count < 0) return null;
+  return { time, count };
+};
+
+const revisionMovementData = (
+  input: Omit<MovementRecord, 'id'> & { idempotencyKey: string },
+): PlannedMovement => ({
+  ...input,
+  id: deterministicMovementId(input),
+});
+
+const updateVirtualBalance = (
+  balance: BalanceRecord,
+  deltaMicros: number,
+  unitCostMicros: number | null,
+  sourceType: string,
+): void => {
+  const oldQty = balance.quantityMicros ?? 0;
+  const oldAvg = balance.averageCostMicros ?? 0;
+  const newQty = oldQty + deltaMicros;
+  let newAvg = oldAvg;
+  if (deltaMicros > 0 && unitCostMicros != null && (sourceType === 'RECEIPT' || sourceType === 'PRODUCTION')) {
+    newAvg = oldQty > 0 && newQty !== 0
+      ? computeNewWeightedAverage(oldQty, oldAvg, deltaMicros, unitCostMicros)
+      : unitCostMicros;
+  }
+  balance.quantityMicros = newQty;
+  balance.averageCostMicros = newQty === 0 ? 0 : newAvg;
+  balance.totalValueMicros = newQty === 0 ? 0 : quantityCostTotal(newQty, balance.averageCostMicros ?? 0);
+};
+
+const createRevisionPostingPlan = async (
+  c: CoreApiClientLike,
+  count: CountRecord,
+  lines: CountLineRecord[],
+  payload: { countId: string; actuals: RevisionActualInput[]; idempotencyKey: string },
+  actor: { staffId: string; role: string },
+  watermark: string,
+  claimToken: string,
+): Promise<RevisionPostingPlan> => {
+  const locationId = count.locationId as string;
+  const location = await findLocationById(c, locationId);
+  if (!location || location.isActive === false) throw revisionError('LOCATION_NOT_FOUND', 'Точка не найдена или отключена.');
+
+  const actualByItem = new Map<string, RevisionActualInput>();
+  for (const actual of payload.actuals) {
+    if (actualByItem.has(actual.stockItemId)) throw revisionError('DUPLICATE_ACTUAL', 'Одна позиция указана в ревизии несколько раз.');
+    actualByItem.set(actual.stockItemId, actual);
+  }
+
+  const allItemIds = new Set<string>([
+    ...lines.map((line) => String(line.stockItemId)),
+    ...payload.actuals.map((actual) => actual.stockItemId),
+  ]);
+  const items = new Map<string, ItemRecord>();
+  for (const itemId of allItemIds) {
+    const item = await findItemById(c, itemId);
+    if (!item || item.isActive === false) throw revisionError('ITEM_NOT_FOUND', 'Позиция ревизии не найдена или отключена.');
+    if (!['MASS', 'VOLUME', 'COUNT'].includes(String(item.unitKind)) || !['GRAM', 'MILLILITER', 'PIECE'].includes(String(item.baseUnit))) {
+      throw revisionError('UNIT_INVALID', 'У позиции указана неподдерживаемая единица измерения.');
+    }
+    items.set(itemId, item);
+  }
+
+  const balances = await findBalancesByLocation(c, locationId);
+  const virtualBalances = new Map<string, BalanceRecord>();
+  for (const balance of balances) {
+    if (balance.stockItemId) virtualBalances.set(balance.stockItemId, { ...balance });
+  }
+  for (const itemId of allItemIds) {
+    if (virtualBalances.has(itemId)) continue;
+    const extra = payload.actuals.find((actual) => actual.stockItemId === itemId && !lines.some((line) => String(line.stockItemId) === itemId));
+    const zeroExpectedLine = lines.find((line) => String(line.stockItemId) === itemId && line.expectedQuantityMicros === 0);
+    const actualQuantity = extra?.actualQuantityMicros ?? payload.actuals.find((actual) => actual.stockItemId === itemId)?.actualQuantityMicros;
+    if (actualQuantity != null && actualQuantity >= 0 && (extra || zeroExpectedLine)) {
+      virtualBalances.set(itemId, {
+        id: deterministicMovementId({ movementType: 'REVISION_BALANCE', stockItemId: itemId, locationId, idempotencyKey: payload.idempotencyKey }),
+        stockItemId: itemId,
+        locationId,
+        quantityMicros: 0,
+        averageCostMicros: 0,
+        totalValueMicros: 0,
+        version: 0,
+      });
+      continue;
+    }
+    throw revisionError('BALANCE_NOT_FOUND', 'Для позиции ревизии не создан остаток на этой точке.');
+  }
+
+  const lineByItem = new Map<string, CountLineRecord>();
+  for (const line of lines) {
+    const itemId = String(line.stockItemId);
+    if (lineByItem.has(itemId)) throw revisionError('DUPLICATE_COUNT_LINE', 'В ревизии есть повторяющаяся позиция.');
+    lineByItem.set(itemId, line);
+    if (!Number.isSafeInteger(line.expectedQuantityMicros) || (line.expectedQuantityMicros as number) < 0) {
+      throw revisionError('EXPECTED_QTY_INVALID', 'Ожидаемый остаток содержит неверное количество.');
+    }
+  }
+
+  const lineUpdates: RevisionPostingPlan['lineUpdates'] = [];
+  const lineCreates: RevisionPostingPlan['lineCreates'] = [];
+  const movements: PlannedMovement[] = [];
+  const movementKeys = new Set<string>();
+  const affectedItemIds = new Set<string>();
+  const now = new Date().toISOString();
+
+  const addMovement = (input: Omit<MovementRecord, 'id'> & { idempotencyKey: string }) => {
+    if (movementKeys.has(input.idempotencyKey)) throw revisionError('MOVEMENT_KEY_CONFLICT', 'В плане ревизии есть конфликт ключей операций.');
+    movementKeys.add(input.idempotencyKey);
+    movements.push(revisionMovementData(input));
+    affectedItemIds.add(String(input.stockItemId));
+    const balance = virtualBalances.get(String(input.stockItemId));
+    if (!balance) throw revisionError('BALANCE_NOT_FOUND', 'Для движения не найден остаток.');
+    updateVirtualBalance(balance, input.quantityDeltaMicros as number, input.unitCostMicros as number | null, input.sourceType as string);
+  };
+
+  const addDirectAdjustment = (itemId: string, variance: number, unitCostMicros: number, key: string) => {
+    if (!Number.isSafeInteger(variance) || !Number.isSafeInteger(unitCostMicros)) throw revisionError('QUANTITY_OVERFLOW', 'Количество или стоимость операции слишком велики.');
+    const totalCostMicros = quantityCostTotal(variance, unitCostMicros);
+    if (!Number.isSafeInteger(totalCostMicros)) throw revisionError('QUANTITY_OVERFLOW', 'Стоимость операции слишком велика.');
+    addMovement({
+      movementType: 'INVENTORY_ADJUSTMENT', stockItemId: itemId, locationId,
+      quantityDeltaMicros: variance, unitCostMicros, totalCostMicros,
+      sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId,
+      occurredAt: now, idempotencyKey: key,
+    });
+  };
+
+  const addUnrecordedProduction = async (itemId: string, quantityMicros: number, keyPrefix: string) => {
+    const recipe = await findRecipeByTarget(c, 'SEMI_FINISHED', itemId);
+    if (!recipe) throw revisionError('RECIPE_NOT_FOUND', 'Для полуфабриката не найдена калькуляция.');
+    const versions = await findRecipeVersions(c, recipe.id);
+    const version = versions.find((candidate) => candidate.status === 'ACTIVE') ?? null;
+    if (!version || !Number.isSafeInteger(version.yieldQuantityMicros) || (version.yieldQuantityMicros as number) <= 0) {
+      throw revisionError('RECIPE_NOT_FOUND', 'Для полуфабриката не найдена активная версия калькуляции.');
+    }
+    const recipeLines = await findRecipeLines(c, version.id);
+    if (recipeLines.length === 0) throw revisionError('RECIPE_EMPTY', 'Калькуляция полуфабриката пуста.');
+    const inputs: Array<{ stockItemId: string; requiredMicros: number; avgCostMicros: number }> = [];
+    for (const recipeLine of recipeLines) {
+      const inputId = String(recipeLine.stockItemId);
+      const inputItem = items.get(inputId) ?? await findItemById(c, inputId);
+      if (!inputItem || inputItem.isActive === false) throw revisionError('ITEM_NOT_FOUND', 'Ингредиент калькуляции не найден или отключён.');
+      items.set(inputId, inputItem);
+      const inputBalance = virtualBalances.get(inputId);
+      if (!inputBalance) throw revisionError('BALANCE_NOT_FOUND', 'Для ингредиента калькуляции не найден остаток.');
+      const requiredMicros = scaledQuantityMicros(recipeLine.quantityMicros as number, quantityMicros, version.yieldQuantityMicros as number);
+      if (!Number.isSafeInteger(requiredMicros) || requiredMicros < 0) throw revisionError('QUANTITY_OVERFLOW', 'Количество ингредиента слишком велико.');
+      inputs.push({ stockItemId: inputId, requiredMicros, avgCostMicros: inputBalance.averageCostMicros ?? 0 });
+    }
+    const unitCostMicros = computeProductionUnitCost(inputs.map((input) => ({ qtyMicros: input.requiredMicros, avgCostMicros: input.avgCostMicros })), quantityMicros);
+    for (const input of inputs) {
+      const totalCostMicros = quantityCostTotal(input.requiredMicros, input.avgCostMicros);
+      addMovement({
+        movementType: 'PRODUCTION_INPUT', stockItemId: input.stockItemId, locationId,
+        quantityDeltaMicros: -input.requiredMicros, unitCostMicros: input.avgCostMicros,
+        totalCostMicros: -totalCostMicros, sourceType: 'PRODUCTION', sourceId: payload.idempotencyKey,
+        recipeVersionId: version.id, actorStaffId: actor.staffId, occurredAt: now,
+        idempotencyKey: `${keyPrefix}:IN:${input.stockItemId}`,
+      });
+    }
+    const outputTotalCostMicros = quantityCostTotal(quantityMicros, unitCostMicros);
+    addMovement({
+      movementType: 'PRODUCTION_OUTPUT', stockItemId: itemId, locationId,
+      quantityDeltaMicros: quantityMicros, unitCostMicros: unitCostMicros,
+      totalCostMicros: outputTotalCostMicros, sourceType: 'PRODUCTION', sourceId: payload.idempotencyKey,
+      recipeVersionId: version.id, actorStaffId: actor.staffId, occurredAt: now,
+      idempotencyKey: `${keyPrefix}:OUT:${itemId}`,
+    });
+  };
+
+  const processLine = async (line: CountLineRecord, actualInput: RevisionActualInput | undefined) => {
+    const itemId = String(line.stockItemId);
+    const expected = line.expectedQuantityMicros as number;
+    const actual = actualInput?.actualQuantityMicros ?? null;
+    if (actual !== null && (!Number.isSafeInteger(actual) || actual < 0)) throw revisionError('INVALID_QTY', 'Фактическое количество указано неверно.');
+    const variance = actual === null ? null : actual - expected;
+    if (variance !== null && !Number.isSafeInteger(variance)) throw revisionError('QUANTITY_OVERFLOW', 'Разница ревизии слишком велика.');
+    const resolution = actual === null ? 'PENDING' : (actualInput?.resolution ?? 'DIRECT_ADJUSTMENT');
+    if (!['PENDING', 'DIRECT_ADJUSTMENT', 'UNRECORDED_PRODUCTION'].includes(resolution)) throw revisionError('RESOLUTION_INVALID', 'Вариант обработки расхождения не поддерживается.');
+    if (variance !== null && variance !== 0 && resolution === 'UNRECORDED_PRODUCTION' && items.get(itemId)?.itemType !== 'SEMI_FINISHED') {
+      throw revisionError('RESOLUTION_INVALID', 'Производство можно выбрать только для полуфабриката.');
+    }
+    if (variance !== null && variance < 0 && resolution === 'UNRECORDED_PRODUCTION') throw revisionError('RESOLUTION_INVALID', 'Производство нельзя выбрать для недостачи.');
+    lineUpdates.push({ id: line.id, data: { actualQuantityMicros: actual, varianceMicros: variance, resolution } });
+    if (variance === null || variance === 0) return;
+    if (variance > 0 && resolution === 'UNRECORDED_PRODUCTION') {
+      await addUnrecordedProduction(itemId, variance, `${payload.idempotencyKey}:prod:${itemId}`);
+      return;
+    }
+    addDirectAdjustment(itemId, variance, line.unitCostMicrosSnapshot ?? 0, `${payload.idempotencyKey}:${itemId}`);
+  };
+
+  for (const line of lines) await processLine(line, actualByItem.get(String(line.stockItemId)));
+
+  for (const actual of payload.actuals.filter((candidate) => !lineByItem.has(candidate.stockItemId))) {
+    if (actual.actualQuantityMicros === null) continue;
+    if (!Number.isSafeInteger(actual.actualQuantityMicros) || actual.actualQuantityMicros < 0) throw revisionError('INVALID_QTY', 'Фактическое количество указано неверно.');
+    const item = items.get(actual.stockItemId);
+    const resolution = actual.resolution ?? 'DIRECT_ADJUSTMENT';
+    if (resolution === 'UNRECORDED_PRODUCTION' && item?.itemType !== 'SEMI_FINISHED') throw revisionError('RESOLUTION_INVALID', 'Производство можно выбрать только для полуфабриката.');
+    const lineId = deterministicMovementId({ movementType: 'REVISION_LINE', stockItemId: actual.stockItemId, locationId: count.id, idempotencyKey: payload.idempotencyKey });
+    lineCreates.push({ id: lineId, countId: count.id, stockItemId: actual.stockItemId, expectedQuantityMicros: 0, actualQuantityMicros: actual.actualQuantityMicros, varianceMicros: actual.actualQuantityMicros, unitCostMicrosSnapshot: virtualBalances.get(actual.stockItemId)?.averageCostMicros ?? 0, resolution });
+    if (actual.actualQuantityMicros === 0) continue;
+    if (resolution === 'UNRECORDED_PRODUCTION') await addUnrecordedProduction(actual.stockItemId, actual.actualQuantityMicros, `${payload.idempotencyKey}:prod:${actual.stockItemId}`);
+    else addDirectAdjustment(actual.stockItemId, actual.actualQuantityMicros, virtualBalances.get(actual.stockItemId)?.averageCostMicros ?? 0, `${payload.idempotencyKey}:${actual.stockItemId}`);
+  }
+
+  return { countId: count.id, locationId, idempotencyKey: payload.idempotencyKey, watermark, claimToken, lineUpdates, lineCreates, movements, affectedItemIds: [...affectedItemIds] };
+};
+
+const claimRevision = async (c: CoreApiClientLike, count: CountRecord, idempotencyKey: string): Promise<{ watermark: string; claimToken: string; owned: boolean } | InventoryResult> => {
+  const currentWatermark = count.ledgerWatermark;
+  const existingClaim = parseRevisionClaim(currentWatermark);
+  if (existingClaim) {
+    if (existingClaim.hash !== revisionClaimHash(idempotencyKey)) return error('REVISION_IN_PROGRESS', 'Эта ревизия уже проводится другим действием.');
+    return { watermark: existingClaim.watermark, claimToken: currentWatermark as string, owned: false };
+  }
+  const parsed = revisionWatermarkParts(currentWatermark);
+  if (!parsed) return error('REVISION_WATERMARK_INVALID', 'Невозможно безопасно определить момент начала ревизии.');
+  const movements = await queryConnection<MovementRecord>(c, 'inventoryStockMovements', { filter: { locationId: { eq: count.locationId as string } }, first: 500 }, { id: true, occurredAt: true });
+  if (movements.length > parsed.count) return error('REVISION_STALE', 'Во время ревизии остатки на этой точке изменились. Обновите данные и начните ревизию заново.');
+  const hasNewTime = movements.some((movement) => String(movement.occurredAt ?? '') > parsed.time);
+  if (hasNewTime && movements.length !== parsed.count) return error('REVISION_STALE', 'Во время ревизии остатки на этой точке изменились. Обновите данные и начните ревизию заново.');
+  const claimToken = revisionClaimToken(idempotencyKey, currentWatermark as string);
+  const result = await c.mutation({
+    updateInventoryCounts: {
+      __args: {
+        filter: { id: { eq: count.id }, status: { eq: 'ACTIVE' }, ledgerWatermark: { eq: currentWatermark } },
+        data: { ledgerWatermark: claimToken },
+      },
+      id: true,
+    },
+  });
+  if (mutationUpdatedRows(result, 'updateInventoryCounts') === 0) {
+    const fresh = await findCountById(c, count.id);
+    const freshClaim = parseRevisionClaim(fresh?.ledgerWatermark);
+    if (freshClaim?.hash === revisionClaimHash(idempotencyKey)) return { watermark: freshClaim.watermark, claimToken: fresh?.ledgerWatermark as string, owned: false };
+    if (fresh?.status === 'POSTED') return ok(200, { countId: count.id, replay: true });
+    return error('REVISION_STALE', 'Во время ревизии остатки на этой точке изменились. Обновите данные и начните ревизию заново.');
+  }
+  return { watermark: currentWatermark as string, claimToken, owned: true };
+};
+
+const restoreRevisionClaim = async (c: CoreApiClientLike, plan: RevisionPostingPlan): Promise<void> => {
+  await c.mutation({
+    updateInventoryCounts: {
+      __args: { filter: { id: { eq: plan.countId }, ledgerWatermark: { eq: plan.claimToken } }, data: { ledgerWatermark: plan.watermark } },
+      id: true,
+    },
+  }).catch(() => null);
+};
+
+const stageRevisionLines = async (c: CoreApiClientLike, plan: RevisionPostingPlan): Promise<void> => {
+  for (const line of plan.lineCreates) {
+    await c.mutation({ createInventoryCountLine: { __args: { data: line }, id: true } });
+  }
+  for (const line of plan.lineUpdates) {
+    const result = await c.mutation({ updateInventoryCountLine: { __args: { id: line.id, data: line.data }, id: true } });
+    if (mutationUpdatedRows(result, 'updateInventoryCountLine') === 0) throw revisionError('COUNT_LINE_WRITE_FAILED', 'Строка ревизии не сохранена.');
+  }
+};
+
+const postRevisionMovements = async (c: CoreApiClientLike, movements: PlannedMovement[]): Promise<void> => {
+  if (movements.length === 0) return;
+  const result = await c.mutation({
+    createInventoryStockMovements: {
+      __args: { data: movements, upsert: true },
+      id: true,
+    },
+  });
+  const created = (result as Record<string, unknown>)?.createInventoryStockMovements;
+  if (!Array.isArray(created) || created.length !== movements.length || created.some((movement) => !(movement as Record<string, unknown>)?.id)) {
+    throw revisionError('REVISION_MOVEMENT_BATCH_FAILED', 'Ревизия не проведена: пакет движений не сохранён целиком.');
+  }
+};
+
+const retryRevisionProjection = async (c: CoreApiClientLike, plan: RevisionPostingPlan): Promise<void> => {
+  for (const itemId of plan.affectedItemIds) await reconcileBalanceProjection(c, itemId, plan.locationId);
+};
+
 export const executeFinalizeCount = async (
   c: CoreApiClientLike,
-  payload: { countId: string; actuals: Array<{ stockItemId: string; actualQuantityMicros: number; resolution?: string }>; idempotencyKey: string },
+  payload: { countId: string; actuals: RevisionActualInput[]; idempotencyKey: string },
   actor: { staffId: string; role: string },
 ): Promise<InventoryResult> => {
   const admin = requireAdmin(actor.role); if (admin) return admin;
-  // idempotency
   const existingMovs = await findMovementsBySource(c, payload.idempotencyKey);
-  if (existingMovs.length > 0) {
-    const cnt = await findCountById(c, payload.countId);
-    if (cnt?.status === 'POSTED') return ok(200, { countId: cnt.id, replay: true });
-  }
   const count = await findCountById(c, payload.countId);
   if (!count) return error('COUNT_NOT_FOUND', 'Ревизия не найдена.');
   if (count.status === 'POSTED') return ok(200, { countId: count.id, replay: true });
   if (count.status !== 'ACTIVE') return error('COUNT_STATUS', 'Ревизия не активна.');
-  // stale check: compare movement count at watermark
-  const watermark = count.ledgerWatermark as string;
-  const watermarkParts = watermark.split('|');
-  const watermarkCount = watermarkParts.length === 2 ? parseInt(watermarkParts[1], 10) : 0;
-  const allMovsForLoc = await queryConnection<MovementRecord>(c, 'inventoryStockMovements', { filter: { locationId: { eq: count.locationId as string } }, first: 500 }, { id: true, occurredAt: true, sourceId: true });
-  if (allMovsForLoc.length > watermarkCount) {
-    // also allow timestamp fallback if count-based not enough (e.g., external movements counted)
-    return error('REVISION_STALE', 'Во время ревизии остатки изменились. Обновите ревизию перед проведением.');
+  if (existingMovs.length > 0 && !parseRevisionClaim(count.ledgerWatermark)) {
+    return error('REVISION_RETRY_REQUIRED', 'Предыдущая попытка ревизии не завершилась. Начните новую ревизию для безопасного повторения.');
   }
-  // fallback timestamp > watermark (for cases where count equals but timestamp advanced due to same count but different source?)
-  const watermarkTime = watermarkParts[0];
-  const hasNewTime = allMovsForLoc.some(m => (m.occurredAt as string) > watermarkTime);
-  if (hasNewTime && allMovsForLoc.length === watermarkCount) {
-    // if timestamps advanced but count same shouldn't happen; ignore
-  } else if (hasNewTime) {
-    return error('REVISION_STALE', 'Во время ревизии остатки изменились. Обновите ревизию перед проведением.');
-  }
+
   const lines = await findCountLines(c, count.id);
-  const now = new Date().toISOString();
-  // Handle actuals for items not in expected lines (expected 0)
-  const linesByItem = new Map(lines.map(l => [l.stockItemId as string, l]));
-  const extraActuals = payload.actuals.filter(a => !linesByItem.has(a.stockItemId));
-  for (const extra of extraActuals) {
-    // expected 0, create virtual line handling
-    const variance = extra.actualQuantityMicros;
-    if (variance !== 0) {
-      const item = await findItemById(c, extra.stockItemId);
-      if (item?.itemType === 'SEMI_FINISHED' && extra.resolution === 'UNRECORDED_PRODUCTION') {
-        const res = await executeProduceSemi(c, { stockItemId: extra.stockItemId, quantityMicros: variance, locationId: count.locationId as string, idempotencyKey: `${payload.idempotencyKey}:prod:${extra.stockItemId}` }, actor);
-        if (res.status >= 400) {
-          const bal = await ensureBalance(c, extra.stockItemId, count.locationId as string);
-          const snap = bal.averageCostMicros ?? 0;
-          const key = `${payload.idempotencyKey}:${extra.stockItemId}`;
-          const adjustment = await appendMovement(c, {
-            movementType: 'INVENTORY_ADJUSTMENT', stockItemId: extra.stockItemId, locationId: count.locationId as string,
-            quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
-            sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
-          });
-          if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
-          await applyMovementToProjection(c, adjustment, extra.stockItemId, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
-        }
-      } else {
-        const bal = await ensureBalance(c, extra.stockItemId, count.locationId as string);
-        const snap = bal.averageCostMicros ?? 0;
-        const key = `${payload.idempotencyKey}:${extra.stockItemId}`;
-        const adjustment = await appendMovement(c, {
-          movementType: 'INVENTORY_ADJUSTMENT', stockItemId: extra.stockItemId, locationId: count.locationId as string,
-          quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
-          sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
-        });
-        if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
-        await applyMovementToProjection(c, adjustment, extra.stockItemId, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
-      }
+  const claim = await claimRevision(c, count, payload.idempotencyKey);
+  if ('status' in claim) return claim;
+  let plan: RevisionPostingPlan | null = null;
+  let movementBatchCommitted = false;
+  try {
+    plan = await createRevisionPostingPlan(c, count, lines, payload, actor, claim.watermark, claim.claimToken);
+    await stageRevisionLines(c, plan);
+    await postRevisionMovements(c, plan.movements);
+    movementBatchCommitted = plan.movements.length > 0;
+    await retryRevisionProjection(c, plan);
+    const posted = await c.mutation({ updateInventoryCount: { __args: { id: count.id, data: { status: 'POSTED', ledgerWatermark: claim.watermark } }, id: true } });
+    if (mutationUpdatedRows(posted, 'updateInventoryCount') === 0) throw revisionError('COUNT_POST_FAILED', 'Ревизия не переведена в завершённое состояние.');
+    return ok(201, { countId: count.id, movements: plan.movements.length });
+  } catch (caught) {
+    if (plan && !movementBatchCommitted) await restoreRevisionClaim(c, plan);
+    if (caught && typeof caught === 'object' && 'code' in caught && ['REVISION_STALE', 'REVISION_IN_PROGRESS', 'INVALID_QTY', 'RESOLUTION_INVALID', 'RECIPE_NOT_FOUND', 'RECIPE_EMPTY', 'BALANCE_NOT_FOUND', 'ITEM_NOT_FOUND', 'LOCATION_NOT_FOUND', 'UNIT_INVALID', 'DUPLICATE_ACTUAL', 'DUPLICATE_COUNT_LINE', 'EXPECTED_QTY_INVALID', 'QUANTITY_OVERFLOW', 'MOVEMENT_KEY_CONFLICT', 'COUNT_LINE_WRITE_FAILED'].includes(String((caught as { code?: unknown }).code))) {
+      return error(String((caught as { code: string }).code), (caught as unknown as Error).message);
     }
-    // also create a count line for audit
-    await c.mutation({ createInventoryCountLine: { __args: { data: { countId: count.id, stockItemId: extra.stockItemId, expectedQuantityMicros: 0, actualQuantityMicros: extra.actualQuantityMicros, varianceMicros: variance, unitCostMicrosSnapshot: 0, resolution: extra.resolution ?? 'PENDING' } }, id: true } }).catch(()=>null);
+    throw caught;
   }
-  for (const line of lines) {
-    const actualInput = payload.actuals.find(a => a.stockItemId === line.stockItemId);
-    const actual = actualInput ? actualInput.actualQuantityMicros : line.expectedQuantityMicros;
-    const expected = line.expectedQuantityMicros ?? 0;
-    const variance = (actual as number) - expected;
-    await c.mutation({ updateInventoryCountLine: { __args: { id: line.id, data: { actualQuantityMicros: actual, varianceMicros: variance, resolution: actualInput?.resolution ?? 'PENDING' } }, id: true } }).catch(()=>null);
-    if (variance === 0) continue;
-    const item = await findItemById(c, line.stockItemId as string);
-    if (variance < 0) {
-      // shortage adjustment
-      const snap = line.unitCostMicrosSnapshot ?? 0;
-      const key = `${payload.idempotencyKey}:${line.stockItemId}`;
-      const adjustment = await appendMovement(c, {
-        movementType: 'INVENTORY_ADJUSTMENT', stockItemId: line.stockItemId as string, locationId: count.locationId as string,
-        quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
-        sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
-      });
-      const bal = await ensureBalance(c, line.stockItemId as string, count.locationId as string);
-      if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
-      await applyMovementToProjection(c, adjustment, line.stockItemId as string, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
-    } else {
-      // positive variance
-      if (item?.itemType === 'SEMI_FINISHED' && actualInput?.resolution === 'UNRECORDED_PRODUCTION') {
-        // do production for variance qty
-        const res = await executeProduceSemi(c, { stockItemId: line.stockItemId as string, quantityMicros: variance, locationId: count.locationId as string, idempotencyKey: `${payload.idempotencyKey}:prod:${line.stockItemId}` }, actor);
-        if (res.status >= 400) {
-          // fallback to direct adjustment
-          const snap = line.unitCostMicrosSnapshot ?? 0;
-          const key = `${payload.idempotencyKey}:${line.stockItemId}`;
-          const adjustment = await appendMovement(c, {
-            movementType: 'INVENTORY_ADJUSTMENT', stockItemId: line.stockItemId as string, locationId: count.locationId as string,
-            quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
-            sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
-          });
-          const bal = await ensureBalance(c, line.stockItemId as string, count.locationId as string);
-          if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
-          await applyMovementToProjection(c, adjustment, line.stockItemId as string, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
-        }
-      } else {
-        const snap = line.unitCostMicrosSnapshot ?? 0;
-        const key = `${payload.idempotencyKey}:${line.stockItemId}`;
-        const adjustment = await appendMovement(c, {
-          movementType: 'INVENTORY_ADJUSTMENT', stockItemId: line.stockItemId as string, locationId: count.locationId as string,
-          quantityDeltaMicros: variance, unitCostMicros: snap, totalCostMicros: quantityCostTotal(variance, snap),
-          sourceType: 'REVISION', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
-        });
-        const bal = await ensureBalance(c, line.stockItemId as string, count.locationId as string);
-        if (!adjustment) return error('CONFLICT', 'Корректировка ревизии не проведена.');
-        await applyMovementToProjection(c, adjustment, line.stockItemId as string, count.locationId as string, bal, variance, snap, 'WRITE_OFF');
-      }
-    }
-  }
-  await c.mutation({ updateInventoryCount: { __args: { id: count.id, data: { status: 'POSTED' } }, id: true } });
-  return ok(201, { countId: count.id });
 };
 
 export const dispatchInventoryCommand = async (

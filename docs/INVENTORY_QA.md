@@ -2,7 +2,7 @@
 
 Соответствует §67-78 спеки. Локальные гейты — `yarn typecheck`, `yarn test:unit`, `yarn lint`.
 
-## Unit / boundary (262 tests PASS)
+## Unit / boundary (268 tests PASS)
 - `src/inventory/__tests__/inventory-domain.test.ts` — 19 tests:
   - Units kg↔g, fixed-point, scaled quantity
   - Receipt MWA + retry idempotency
@@ -13,7 +13,64 @@
   - Revision shortage, positive semi UNRECORDED_PRODUCTION, repeat revision 0, stale `REVISION_STALE`
   - Projection ledger==balance
   - Prepared void vs not-prepared
-  - Negative stock allowed
+- Negative stock allowed
+
+## Atomic revision recovery — 2026-08-21
+
+**ROOT CAUSE:** the previous `finalizeInventoryCount` implementation wrote
+revision movements and refreshed each balance sequentially. It validated and
+mutated one row at a time; a later count-line, movement, projection, or
+production operation could return an error after an earlier row had already
+been committed. The observed `+1 g` Cucumber movement was therefore a real
+partial authoritative write, followed by HTTP 409; the next attempt then saw
+that write as a new movement and returned `REVISION_STALE`. Reconciliation was
+zero only because the ledger and projection had both captured the same partial
+event; it did not prove business atomicity.
+
+**ATOMIC BOUNDARY:** finalization now builds an immutable `RevisionPostingPlan`
+before the first revision movement. Prevalidation covers the active count and
+location, watermark, duplicate/unknown items, units, expected and actual
+quantities, NULL versus explicit zero, all resolutions, recipe/version/line
+requirements for unrecorded production, affected balances, overflow and
+deterministic movement keys. A conditional update claims the ACTIVE count
+against its original watermark. The claim is stored in the existing watermark
+field and is not a new domain state.
+
+All planned revision movements, including semi-finished ingredient inputs and
+output, are then sent as one `createInventoryStockMovements` batch with
+deterministic ids and upsert semantics. Validation failures and a failed batch
+therefore write zero revision movements, restore the claim, leave balances
+unchanged and leave the count retryable. Projection refresh and the POSTED
+transition run only after the complete movement batch; a claimed retry resumes
+the same idempotent plan rather than creating a second event. A stale check is
+performed before the claim, so the finalize operation does not stale itself.
+
+The App CoreApiClient exposes no cross-object database transaction, and Twenty
+core remains unmodified. The bounded protocol consequently closes the normal
+business-validation failure surface before the single ledger batch and uses
+the claim plus deterministic idempotency keys for safe recovery of any
+post-batch runtime retry. While a revision owns the posting claim, every
+other movement command touching that location is rejected with a retryable
+`REVISION_IN_PROGRESS`; a movement that wins before the claim leaves the
+revision stale before any plan is posted. No compensation movement is used
+as normal control flow.
+
+**REGRESSION EVIDENCE:** `inventory-domain.test.ts` now covers five-line
+prevalidation failure, the original `5.000 kg → 5.001 kg` one-gram boundary,
+NULL versus zero, unrecorded production all-or-nothing, stale-before-finalize,
+concurrent finalizers, an external movement racing a claimed revision, and
+retry idempotency. `scripts/verify-inventory-revision-atomicity.mjs`
+is the live smoke: on both `:2020` and `:3000` it produced
+`REVISION_STALE`, `movements=0`, unchanged balance and ACTIVE count, then
+posted one successful adjustment with the count POSTED.
+
+**REVISION UX PRINCIPLE:** Revision UI follows the restaurant employee's
+physical-count workflow. Internal ledger, posting states and reconciliation
+semantics remain server-side implementation details. Additional user decisions
+are requested only when they materially change inventory accounting. Ordinary
+rows therefore ask only for `Сколько есть`; a semi-finished positive variance
+alone opens the contextual production/correction choice and consequence
+preview.
 - `pos-domain.test.ts` 26 tests + inventory consumption integration через FakeDb — POS close всё ещё 78/78 логики (см. ниже).
 
 ## Live evidence — 2026-08-20 (recovery checkpoint)
