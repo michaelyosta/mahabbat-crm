@@ -1216,10 +1216,15 @@ export const executeOpenShift = async (
     return okResult(201, { shiftId: created.id, status: created.status });
   } catch {
     // A concurrent caller may have won the unique (staffId, isOpen) race.
-    const raced = await findOpenShiftByStaffId(client, staffId);
+    for (const delayMs of [0, 25, 75, 150]) {
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
 
-    if (raced) {
-      return okResult(200, { shiftId: raced.id, status: raced.status ?? 'OPEN' });
+      const raced = await findOpenShiftByStaffId(client, staffId);
+      if (raced) {
+        return okResult(200, { shiftId: raced.id, status: raced.status ?? 'OPEN' });
+      }
     }
 
     return errorResult('CONFLICT', 'Shift could not be opened.');
@@ -1546,10 +1551,18 @@ export const executeAddLine = async (
 
     return okResult(201, { lineId: created.id, orderId: payload.orderId });
   } catch {
-    const raced = await findLineByIdempotencyKey(client, payload.idempotencyKey);
+    // A concurrent duplicate can commit the line before its indexed read is
+    // visible to the retrying resolver. Give the authoritative record a short
+    // bounded convergence window before returning a transport-looking 500.
+    for (const delayMs of [0, 25, 75, 150]) {
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
 
-    if (raced) {
-      return okResult(200, { lineId: raced.id });
+      const raced = await findLineByIdempotencyKey(client, payload.idempotencyKey);
+      if (raced) {
+        return okResult(200, { lineId: raced.id });
+      }
     }
 
     return errorResult('CONFLICT', 'Line could not be added.');
@@ -2049,7 +2062,7 @@ export const executeVoidOrderLines = async (
       updatePosOrder: {
         __args: {
           id: order.id,
-          data: { status: 'CANCELLED', claimToken: null, openToken: null },
+          data: { status: 'CANCELLED', claimToken: null },
         },
         id: true,
       },

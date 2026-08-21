@@ -1,0 +1,25 @@
+# Safe template only. Keep the actual tunnel UUID, credentials file, Access
+# policy, reviewer emails, and temporary secrets outside Git.
+# Replace placeholders locally after the Cloudflare account and review zone
+# have been identified. Do not use a Quick Tunnel for unsupervised review.
+
+tunnel:
+  name: mahabbat-pilot-review
+  credentials_file: <SECURE_LOCAL_CLOUDFLARED_CREDENTIALS_PATH>
+
+ingress:
+  - hostname: <CRM_REVIEW_HOST>
+    service: http://localhost:3000
+  - hostname: <POS_REVIEW_HOST>
+    service: http://localhost:3100
+  - service: http_status:404
+
+access:
+  type: one-time-pin
+  session_duration: 12h
+  allowed_reviewer_emails:
+    - <REVIEWER_EMAIL_1>
+    - <REVIEWER_EMAIL_2>
+
+# Application authentication remains enabled behind Access:
+# CRM -> Twenty login; POS -> Mahabbat PosStaff PIN.
