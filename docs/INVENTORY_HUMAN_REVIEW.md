@@ -42,13 +42,13 @@ yarn seed:inventory:review
 дублирует этот namespace и ничего не удаляет. PIN/API key передаются только
 через process environment и не записываются в Git, документы или чат.
 
-В demo используются понятные подписи: `Кухня (проверка)`, `Бар (проверка)`,
-`Шашлыки (проверка)`, `Помидоры (проверка)`, `Огурцы (проверка)`, `Лук
-(проверка)`, `Перец (проверка)`, `Масло (проверка)`, `Огонёк (проверка)` и
-`Салат (проверка)`. Технические UUID и acceptance leftovers не используются
-как presentation. Для нового trial выбирается новый namespace; generic
-destructive reset не существует и не должен появиться без namespace guard и
-проверки зависимостей.
+В demo используются чистые ресторанные подписи: `Кухня`, `Бар`, `Шашлыки`,
+`Помидоры`, `Огурцы`, `Лук`, `Перец`, `Масло`, `Молоко`, `Бутылки`, `Огонёк`
+и `Салат`. Namespace остаётся только внутренним ключом idempotency и не
+показывается сотруднику. Технические UUID и acceptance leftovers не
+используются как presentation. Для нового trial выбирается новый namespace;
+generic destructive reset не существует и не должен появиться без namespace
+guard и проверки зависимостей.
 
 ## Runtime preflight
 
@@ -89,6 +89,22 @@ server/worker/executor runtime.
 `WRITE_OFF`, `INVENTORY_ADJUSTMENT`, `MWA`, `RecipeVersion`, `ledger`,
 `micros`, `sourceId` и UUID. Технические значения остаются на server-side
 аудите и acceptance evidence.
+
+## Mental model ревизии
+
+Revision UI follows the restaurant employee's physical-count workflow.
+Internal ledger, posting states and reconciliation semantics remain server-side
+implementation details. Additional user decisions are requested only when
+they materially change inventory accounting.
+
+В активной таблице сотрудник отвечает на один вопрос — `Сколько есть?`.
+`Сколько должно быть` читается как текущий учётный остаток; `Разница` и
+`Недостача / излишек` рассчитываются автоматически. Пусто означает «не
+учитывать», а `0` — «товара фактически нет». Для обычных строк нет выбора
+причины. Только положительное расхождение полуфабриката открывает вопрос
+`Откуда появился этот остаток?` и варианты `Произвели, но не внесли` или
+`Просто скорректировать остаток`, с предварительным показом списания
+ингредиентов.
 
 ## Evidence
 
