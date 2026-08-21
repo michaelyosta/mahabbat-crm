@@ -24,6 +24,7 @@ export type PosTableVisualState =
   | 'payment';
 
 const POS_ERROR_MESSAGES: Record<string, string> = {
+  ROUTE_UNAVAILABLE: 'Нет связи с сервером. Проверьте сеть и попробуйте снова',
   COMMAND_FORBIDDEN: 'Действие доступно только администратору',
   INVALID_STAFF: 'Сотрудник не найден или отключён',
   SHIFT_REQUIRED: 'Сначала откройте смену',
