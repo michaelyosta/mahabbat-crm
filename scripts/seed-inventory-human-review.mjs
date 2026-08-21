@@ -51,7 +51,6 @@ const inventoryCommand = async (apiUrl, apiKey, command, sessionToken, payload) 
 
 const main = async () => {
   const { apiUrl, apiKey, pin, namespace } = config();
-  const suffix = '(проверка)';
   const admin = await posCommand(apiUrl, apiKey, 'authenticatePosStaff', { pin, terminalId: `inventory-human-review-${namespace}` });
   if (admin.staff?.role !== 'ADMIN' || typeof admin.sessionToken !== 'string') throw new Error('The supplied review PIN is not an ADMIN PIN');
 
@@ -60,12 +59,12 @@ const main = async () => {
     return inventoryCommand(apiUrl, apiKey, name, admin.sessionToken, { ...commandPayload, idempotencyKey: `${namespace}:${name}:${key}` });
   };
   const createLocation = async (key, name, sortOrder) => {
-    const result = await command('createStockLocation', { key, name: `${name} ${suffix}`, sortOrder });
+    const result = await command('createStockLocation', { key, name, sortOrder });
     if (!UUID_RE.test(result.locationId ?? '')) throw new Error(`Location ${name} did not return an id`);
     return result.locationId;
   };
-  const createItem = async (key, name, itemType, defaultLocationId) => {
-    const result = await command('createStockItem', { key, name: `${name} ${suffix}`, itemType, unitKind: 'MASS', baseUnit: 'GRAM', defaultLocationId });
+  const createItem = async (key, name, itemType, defaultLocationId, unitKind = 'MASS', baseUnit = 'GRAM') => {
+    const result = await command('createStockItem', { key, name, itemType, unitKind, baseUnit, defaultLocationId });
     if (!UUID_RE.test(result.stockItemId ?? '')) throw new Error(`Stock item ${name} did not return an id`);
     return result.stockItemId;
   };
@@ -81,13 +80,15 @@ const main = async () => {
     onion: await createItem('onion', 'Лук', 'RAW_MATERIAL', locations.kitchen),
     pepper: await createItem('pepper', 'Перец', 'RAW_MATERIAL', locations.kitchen),
     oil: await createItem('oil', 'Масло', 'RAW_MATERIAL', locations.kitchen),
+    milk: await createItem('milk', 'Молоко', 'RAW_MATERIAL', locations.kitchen, 'VOLUME', 'MILLILITER'),
+    bottles: await createItem('bottles', 'Бутылки', 'RAW_MATERIAL', locations.kitchen, 'COUNT', 'PIECE'),
     ogonek: await createItem('ogonek', 'Огонёк', 'SEMI_FINISHED', locations.kitchen),
   };
 
   const menuId = stableUuid(`${namespace}:salad`);
   const menuItems = await restGet(apiUrl, apiKey, 'posMenuItems');
   if (!menuItems.some((item) => String(item.id) === menuId)) {
-    await restBatch(apiUrl, apiKey, 'posMenuItems', [{ id: menuId, name: `Салат ${suffix}`, category: 'Ревью склада', price: { amountMicros: 1_000_000, currencyCode: 'KZT' }, isActive: true }]);
+    await restBatch(apiUrl, apiKey, 'posMenuItems', [{ id: menuId, name: 'Салат', category: 'Ревью склада', price: { amountMicros: 1_000_000, currencyCode: 'KZT' }, isActive: true }]);
   }
 
   await command('receiveStock', {
@@ -101,14 +102,14 @@ const main = async () => {
     ], comment: 'Начальные остатки для проверки сотрудником',
   }).then((result) => { if (!accepted(result.status ?? 200)) throw new Error('Opening review receipt failed'); });
   const recipe = await command('upsertRecipe', {
-    key: 'ogonek-recipe', label: `Огонёк ${suffix}`, targetKind: 'SEMI_FINISHED', targetId: items.ogonek,
+    key: 'ogonek-recipe', label: 'Огонёк', targetKind: 'SEMI_FINISHED', targetId: items.ogonek,
     defaultLocationId: locations.kitchen, yieldQuantityMicros: kg(1),
     lines: [{ stockItemId: items.tomato, quantityMicros: grams(500) }, { stockItemId: items.onion, quantityMicros: grams(500) }],
   });
   if (!UUID_RE.test(recipe.recipeVersionId ?? '')) throw new Error('Review recipe did not return a version');
 
   console.log(`PASS human review demo prepared: ${namespace} (additive and idempotent; no deletes)`);
-  console.log('Natural labels: Кухня, Бар, Шашлыки, Помидоры, Огурцы, Лук, Перец, Масло, Огонёк, Салат');
+  console.log('Natural labels: Кухня, Бар, Шашлыки, Помидоры, Огурцы, Лук, Перец, Масло, Молоко, Бутылки, Огонёк, Салат');
 };
 
 main().catch((error) => { console.error(`Human review demo seed failed: ${error.message}`); process.exitCode = 1; });
