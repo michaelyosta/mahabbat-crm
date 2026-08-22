@@ -84,7 +84,11 @@ export default defineLogicFunction({
   name: 'pos-command-resolver',
   description:
     'App-only server resolver enforcing the POS command boundary from a verified internal signature',
-  timeoutSeconds: 10,
+  // PIN authentication verifies every active staff hash with scrypt before it
+  // can issue a session. Keep the server-route boundary above the measured
+  // cold/warm verification window so normal runtime jitter is not returned as
+  // SERVER_ROUTE_USER_UNCAUGHT_ERROR.
+  timeoutSeconds: 20,
   handler,
   serverRouteTriggerSettings: {
     forwardedRequestHeaders: ['x-mahabbat-signature'],
