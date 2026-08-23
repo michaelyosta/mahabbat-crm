@@ -4,6 +4,7 @@ import {
   commandError,
   formatMicrosForInput,
   formatNegativeTimer,
+  isReservationDraftReady,
   isSyntheticPosRecord,
   isSyntheticPosStaffId,
   isSyntheticPosValue,
@@ -147,5 +148,20 @@ describe('POS UI presentation helpers', () => {
         { id: 'kebab', category: 'Шашлыки', name: 'Люля-кебаб' },
       ]).map((row) => row.id),
     ).toEqual(['kebab', 'plov', 'tea']);
+  });
+
+  it('requires a table, time and guest contact for a review booking', () => {
+    const base = {
+      tableId: 'table-1',
+      scheduledAt: '2026-08-23T19:30',
+      guestName: 'Айдар',
+      phone: '',
+    };
+
+    expect(isReservationDraftReady(base)).toBe(true);
+    expect(isReservationDraftReady({ ...base, guestName: '', phone: '+7 700 000 00 00' })).toBe(true);
+    expect(isReservationDraftReady({ ...base, tableId: '' })).toBe(false);
+    expect(isReservationDraftReady({ ...base, scheduledAt: '' })).toBe(false);
+    expect(isReservationDraftReady({ ...base, guestName: '', phone: '' })).toBe(false);
   });
 });

@@ -113,3 +113,31 @@ Live browser evidence after the fresh bundle deployment:
   begins; no rectangles overlap.
 - The rest of the review dataset remains human-readable: `Основной зал`,
   `VIP`, `Летняя терраса`, natural table names and Russian menu items.
+
+## Terminal hardening pass: 1024×768
+
+The restaurant's actual monitors use 1024×768, so this is now the primary POS
+presentation viewport. The same three-panel workflow is preserved; no POS
+domain or permission rule changed.
+
+The bounded hardening pass adds:
+
+- a 1024×768 layout with a compact zone rail, a 320 px stable order panel and
+  a three-column, two-row table grid;
+- fully visible totals and primary order actions without document scrolling;
+- 48 px operational controls and quantity buttons;
+- a dedicated stop-list action beside search, leaving the category strip its
+  own touch-scrollable row without overlap;
+- a searchable, category-filtered stop-list with confirmation before removing
+  an available dish from the menu;
+- a booking form with no arbitrary preselected table, explicit occupied-table
+  labels and a clear requirement for time plus guest contact;
+- an explicit closed-shift explanation while preserving access to previously
+  open orders;
+- readable 11–12 px secondary operational text and reduced decorative borders;
+- guest tabs that fit three guests plus `+ Гость` at 1024 px.
+
+Browser geometry at 1024×768 confirms `scrollWidth === clientWidth` and
+`scrollHeight === clientHeight`; the table grid has no internal overflow, all
+three guest tabs plus the add action fit, and the order footer remains pinned.
+The 1366×768 and 1920×1080 layouts also retain zero document overflow.
