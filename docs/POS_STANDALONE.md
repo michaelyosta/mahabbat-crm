@@ -142,7 +142,7 @@ Mahabbat POS Gateway  (Node, :3100, also serves static UI)
 2. Subsequent `Authorization: Bearer <token>` → `getAuthenticatedPosContext` → `dispatchPosCommand`.
 3. Refresh → restore from `sessionStorage` if present and not expired → re-fetch `PosSession` validity via cheap `/api/pos/command` ping or `GET /api/pos/rest/posSessions`; on 401 show PIN again.
 4. Logout → `POST /api/pos/command { command:'logoutPosStaff' }` → `revokePosSession` (sets `revokedAt`) → clear storage.
-5. 15m TTL (SESSION_TTL_MS) → 401 `POS_SESSION_EXPIRED` → re-PIN. Revoked/inactive/malformed → 401. Role spoof → `INVALID_ACTOR` / context mismatch → 400/401.
+5. Sliding idle timeout: login starts a 15-minute inactivity window. Authenticated business commands restart it server-side; real pointer/keyboard activity sends a throttled non-mutating `refreshPosSession` command, at most once per minute. Background REST polling does not extend the window. `MAHABBAT_POS_SESSION_IDLE_MINUTES` can set 1-1440 minutes at deployment; invalid values fall back to 15. Idle expiry → 401 `POS_SESSION_EXPIRED` → re-PIN. Revoked/inactive/malformed → 401. Role spoof → `INVALID_ACTOR` / context mismatch → 400/401.
 
 **API adapter:**
 

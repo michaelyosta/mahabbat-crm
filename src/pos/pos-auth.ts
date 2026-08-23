@@ -18,13 +18,31 @@ const PIN_SCRYPT_P = 1;
 const PIN_KEY_LENGTH = 32;
 const PIN_SCRYPT_MAX_MEMORY = 32 * 1024 * 1024;
 const PIN_SALT_BYTES = 16;
-const SESSION_TTL_MS = 15 * 60 * 1000;
+const DEFAULT_SESSION_IDLE_MINUTES = 15;
+const MAX_SESSION_IDLE_MINUTES = 24 * 60;
 const MAX_LOGIN_FAILURES = 5;
 const LOCKOUT_MS = 60 * 1000;
 const MAX_STAFF_ROWS = 1000;
 
 type Connection<T> = {
   edges?: Array<{ node?: T | null } | null>;
+};
+
+export const posSessionIdleTtlMs = (
+  configuredMinutes = process.env.MAHABBAT_POS_SESSION_IDLE_MINUTES,
+): number => {
+  if (configuredMinutes === undefined || configuredMinutes.trim() === '') {
+    return DEFAULT_SESSION_IDLE_MINUTES * 60 * 1000;
+  }
+  const minutes = Number(configuredMinutes);
+  if (
+    !Number.isInteger(minutes) ||
+    minutes < 1 ||
+    minutes > MAX_SESSION_IDLE_MINUTES
+  ) {
+    return DEFAULT_SESSION_IDLE_MINUTES * 60 * 1000;
+  }
+  return minutes * 60 * 1000;
 };
 
 type PosStaffRecord = {
@@ -403,7 +421,7 @@ export const authenticatePosStaff = async (
   }
 
   const issuedAt = new Date();
-  const expiresAt = new Date(issuedAt.getTime() + SESSION_TTL_MS);
+  const expiresAt = new Date(issuedAt.getTime() + posSessionIdleTtlMs());
   const sessionToken = randomBytes(32).toString('base64url');
   const sessionId = randomUUID();
   const role = roleFromValue(candidate.staffRole);
@@ -530,6 +548,26 @@ export const getAuthenticatedPosContext = async (
       terminalId: session.terminalId,
     },
   };
+};
+
+export const refreshPosSessionActivity = async (
+  client: CoreApiClientLike,
+  context: AuthenticatedPosContext,
+  now = new Date(),
+  idleTtlMs = posSessionIdleTtlMs(),
+): Promise<AuthenticatedPosContext> => {
+  const expiresAt = new Date(now.getTime() + idleTtlMs).toISOString();
+  await client.mutation({
+    updatePosSession: {
+      __args: {
+        id: context.sessionRecordId,
+        data: { expiresAt },
+      },
+      id: true,
+    },
+  });
+
+  return { ...context, expiresAt };
 };
 
 export const revokePosSession = async (

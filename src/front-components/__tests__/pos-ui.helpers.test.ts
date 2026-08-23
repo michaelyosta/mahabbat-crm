@@ -4,8 +4,15 @@ import {
   commandError,
   formatMicrosForInput,
   formatNegativeTimer,
+  isSyntheticPosRecord,
+  isSyntheticPosStaffId,
+  isSyntheticPosValue,
   isOverdueReservation,
   parseMoneyInputToMicros,
+  sortPosMenu,
+  sortPosTables,
+  sortPosZones,
+  tableDisplayName,
   tableVisualState,
 } from 'src/front-components/pos-ui.helpers';
 
@@ -87,5 +94,58 @@ describe('POS UI presentation helpers', () => {
     expect(commandError({ body: { code: 'COMMAND_FORBIDDEN' } })).toBe(
       'Действие доступно только администратору',
     );
+  });
+
+  it('keeps acceptance fixtures out of the human POS presentation', () => {
+    expect(isSyntheticPosValue('INV-1787277711610 POS zone')).toBe(true);
+    expect(isSyntheticPosValue('Inventory Acceptance')).toBe(true);
+    expect(isSyntheticPosValue('Missing Recipe')).toBe(true);
+    expect(isSyntheticPosValue('Салат (проверка)')).toBe(true);
+    expect(isSyntheticPosRecord({ id: 'table', layout: 'acceptance-only' })).toBe(
+      true,
+    );
+
+    expect(isSyntheticPosValue('Основной зал')).toBe(false);
+    expect(isSyntheticPosValue('Салат «Цезарь»')).toBe(false);
+    expect(isSyntheticPosValue('Тестовая нарезка')).toBe(true);
+    expect(isSyntheticPosValue('Демо официант')).toBe(true);
+    expect(
+      isSyntheticPosStaffId('a75d336d-ed90-4ee0-abd5-f2326ae4d21f'),
+    ).toBe(true);
+    expect(isSyntheticPosStaffId('review-staff')).toBe(false);
+  });
+
+  it('uses a restaurant-facing table name when one is configured', () => {
+    expect(tableDisplayName({ id: '1', number: '3' })).toBe('Стол 3');
+    expect(tableDisplayName({ id: '2', number: 'VIP 1' })).toBe('VIP 1');
+    expect(
+      tableDisplayName({ id: '3', number: '7', name: 'Стол у окна' }),
+    ).toBe('Стол у окна');
+  });
+
+  it('keeps review navigation and menu in an operational order', () => {
+    expect(
+      sortPosZones([
+        { id: 'terrace', name: 'Летняя терраса' },
+        { id: 'vip', name: 'VIP' },
+        { id: 'main', name: 'Основной зал' },
+      ]).map((row) => row.name),
+    ).toEqual(['Основной зал', 'VIP', 'Летняя терраса']);
+
+    expect(
+      sortPosTables([
+        { id: '10', number: '10' },
+        { id: '2', number: '2' },
+        { id: '1', number: '1' },
+      ]).map((row) => row.number),
+    ).toEqual(['1', '2', '10']);
+
+    expect(
+      sortPosMenu([
+        { id: 'tea', category: 'Напитки', name: 'Чай' },
+        { id: 'plov', category: 'Горячее', name: 'Плов' },
+        { id: 'kebab', category: 'Шашлыки', name: 'Люля-кебаб' },
+      ]).map((row) => row.id),
+    ).toEqual(['kebab', 'plov', 'tea']);
   });
 });

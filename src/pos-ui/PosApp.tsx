@@ -16,10 +16,16 @@ import {
   initials,
   isActiveOrder,
   isOverdueReservation,
+  isSyntheticPosRecord,
+  isSyntheticPosStaffId,
   micros,
   money,
   parseMoneyInputToMicros,
+  sortPosMenu,
+  sortPosTables,
+  sortPosZones,
   tableVisualState,
+  tableDisplayName,
   timeOnly,
   uuid,
   type PosRow,
@@ -191,7 +197,7 @@ const LoginView = ({
         {busy ? 'Входим…' : 'Войти'}
       </button>
       {error && <div className="mah-pos-toast error">{error}</div>}
-      <div className="mah-pos-login-hint">PIN хранится только на сервере</div>
+      <div className="mah-pos-login-hint">Введите личный PIN сотрудника</div>
     </div>
   </div>
 );
@@ -220,7 +226,7 @@ const PosHeader = ({
       <div className="mah-pos-brand-mark">M</div>
       <div>
         Mahabbat
-        <small>restaurant POS</small>
+        <small>ресторанная касса</small>
       </div>
     </div>
     <button
@@ -397,11 +403,11 @@ const TableBoard = ({
                 type="button"
                 className={`mah-pos-table ${visualState} ${selectedTableId === table.id ? 'selected' : ''}`}
                 key={table.id}
-                aria-label={`Стол ${table.number}: ${copy.label}`}
+                aria-label={`${tableDisplayName(table)}: ${copy.label}`}
                 onClick={() => onSelect(table)}
               >
                 <div className="mah-pos-table-top">
-                  <strong>Стол {table.number}</strong>
+                  <strong>{tableDisplayName(table)}</strong>
                   <span>{copy.icon}</span>
                 </div>
                 <span className="mah-pos-table-state">{copy.label}</span>
@@ -506,7 +512,7 @@ const MenuBrowser = ({
         </div>
         <button
           type="button"
-          className="mah-pos-stop-button"
+          className={`mah-pos-stop-button ${stopList.size > 0 ? 'active' : ''}`}
           onClick={onStopList}
         >
           Стоп-лист · {stopList.size}
@@ -588,7 +594,7 @@ const EmptyOrderPanel = ({
           const table = tables.find((item) => item.id === order.tableId);
           return (
             <button type="button" key={order.id} onClick={() => onOrder(order)}>
-              <span>Стол {table?.number ?? '—'}</span>
+              <span>{table ? tableDisplayName(table) : 'Стол —'}</span>
               <strong>{money(order.total)}</strong>
             </button>
           );
@@ -625,7 +631,7 @@ const TableContextPanel = ({
     </span>
     <div className="mah-pos-table-context-main">
       <div className="mah-pos-empty-icon">{reservation ? '◷' : '○'}</div>
-      <h2>Стол {table.number}</h2>
+      <h2>{tableDisplayName(table)}</h2>
       <p>
         {activeShift
           ? 'Выберите действие'
@@ -716,7 +722,7 @@ const OrderPanel = ({
     <>
       <header className="mah-pos-panel-head">
         <div className="mah-pos-panel-title">
-          <h2>Стол {table?.number ?? '—'}</h2>
+          <h2>{table ? tableDisplayName(table) : 'Стол —'}</h2>
           <span
             className={`mah-pos-status-chip ${locked ? 'locked' : 'success'}`}
           >
@@ -942,6 +948,8 @@ const OrderPanel = ({
 
 export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessionChange }: PosAppProps) => {
   const rootRef = useRef<HTMLDivElement>(null);
+  const activityRefreshSentAtRef = useRef(0);
+  const activityRefreshInFlightRef = useRef(false);
   const [session, setSessionState] = useState<PosSession | null>(() => {
     if (initialSession) return initialSession;
     if (mode === 'standalone') return restorePosSession();
@@ -1107,6 +1115,56 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     [api],
   );
 
+  useEffect(() => {
+    if (!session) {
+      activityRefreshSentAtRef.current = 0;
+      activityRefreshInFlightRef.current = false;
+      return;
+    }
+
+    const refreshAfterUserActivity = () => {
+      const happenedAt = Date.now();
+      if (
+        activityRefreshInFlightRef.current ||
+        happenedAt - activityRefreshSentAtRef.current < 60_000
+      ) {
+        return;
+      }
+
+      activityRefreshSentAtRef.current = happenedAt;
+      activityRefreshInFlightRef.current = true;
+      void command('refreshPosSession', {})
+        .catch((value) => {
+          const code = String(
+            (value as unknown as { body?: { code?: string } })?.body?.code ??
+              '',
+          );
+          if (
+            [
+              'POS_SESSION_EXPIRED',
+              'POS_SESSION_INVALID',
+              'POS_SESSION_REQUIRED',
+            ].includes(code)
+          ) {
+            setSession(null);
+            setError('Сессия истекла. Введите PIN снова.');
+          }
+        })
+        .finally(() => {
+          activityRefreshInFlightRef.current = false;
+        });
+    };
+
+    globalThis.addEventListener('pointerdown', refreshAfterUserActivity, {
+      passive: true,
+    });
+    globalThis.addEventListener('keydown', refreshAfterUserActivity);
+    return () => {
+      globalThis.removeEventListener('pointerdown', refreshAfterUserActivity);
+      globalThis.removeEventListener('keydown', refreshAfterUserActivity);
+    };
+  }, [command, session, setSession]);
+
   const run = useCallback(
     async (
       name: string,
@@ -1179,14 +1237,32 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     setSheet(null);
   };
 
-  const zones = (rows.posZones ?? []).filter((row) => row.isActive !== false);
-  const allTables = (rows.posTables ?? []).filter(
-    (row) => row.isActive !== false,
+  const zones = sortPosZones(
+    (rows.posZones ?? []).filter(
+      (row) => row.isActive !== false && !isSyntheticPosRecord(row),
+    ),
   );
+  const visibleZoneIds = new Set(zones.map((row) => row.id));
+  const allTables = sortPosTables(
+    (rows.posTables ?? []).filter(
+      (row) =>
+        row.isActive !== false &&
+        !isSyntheticPosRecord(row) &&
+        visibleZoneIds.has(row.zoneId),
+    ),
+  );
+  const visibleTableIds = new Set(allTables.map((row) => row.id));
   const tables = allTables.filter((row) => !zoneId || row.zoneId === zoneId);
-  const orders = rows.posOrders ?? [];
+  const orders = (rows.posOrders ?? []).filter((row) =>
+    visibleTableIds.has(row.tableId) &&
+    !isSyntheticPosRecord(row) &&
+    !isSyntheticPosStaffId(row.ownerStaffId),
+  );
   const activeReservations = (rows.posReservations ?? []).filter(
-    (row) => row.status === 'ACTIVE',
+    (row) =>
+      row.status === 'ACTIVE' &&
+      visibleTableIds.has(row.tableId) &&
+      !isSyntheticPosRecord(row),
   );
   const selectedOrder = orders.find((row) => row.id === orderId);
   const selectedTable = allTables.find((row) => row.id === tableId);
@@ -1199,8 +1275,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   const lines = (rows.posOrderLines ?? []).filter(
     (row) => row.orderId === orderId,
   );
-  const menu = (rows.posMenuItems ?? []).filter(
-    (row) => row.isActive !== false,
+  const menu = sortPosMenu(
+    (rows.posMenuItems ?? []).filter(
+      (row) => row.isActive !== false && !isSyntheticPosRecord(row),
+    ),
   );
   const stopList = new Set(
     (rows.posStopListEntries ?? [])
@@ -1270,10 +1348,12 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   const staffNames = useMemo(
     () =>
       new Map(
-        (rows.posStaffs ?? []).map((staff) => [
+        (rows.posStaffs ?? [])
+          .filter((staff) => !isSyntheticPosRecord(staff))
+          .map((staff) => [
           staff.id,
           String(staff.displayName ?? 'Сотрудник'),
-        ]),
+          ]),
       ),
     [rows.posStaffs],
   );

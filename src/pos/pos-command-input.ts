@@ -668,6 +668,7 @@ export const parseCommandPayload = <T>(
     case 'authenticatePosStaff':
       return parseAuthenticatePosStaff(payload) as unknown as ParseResult<T>;
     case 'logoutPosStaff':
+    case 'refreshPosSession':
       if (typeof payload !== 'object' || payload === null) {
         return invalid('INVALID_PAYLOAD', 'payload must be an object');
       }
