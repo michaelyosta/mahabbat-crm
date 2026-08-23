@@ -126,8 +126,8 @@ The bounded hardening pass adds:
   a three-column, two-row table grid;
 - fully visible totals and primary order actions without document scrolling;
 - 48 px operational controls and quantity buttons;
-- a dedicated stop-list action beside search, leaving the category strip its
-  own touch-scrollable row without overlap;
+- a dedicated stop-list action beside search and a two-row terminal category
+  grid where every category label remains fully visible without scrolling;
 - a searchable, category-filtered stop-list with confirmation before removing
   an available dish from the menu;
 - a booking form with no arbitrary preselected table, explicit occupied-table
@@ -141,3 +141,7 @@ Browser geometry at 1024×768 confirms `scrollWidth === clientWidth` and
 `scrollHeight === clientHeight`; the table grid has no internal overflow, all
 three guest tabs plus the add action fit, and the order footer remains pinned.
 The 1366×768 and 1920×1080 layouts also retain zero document overflow.
+
+The selected table uses an inset focus ring instead of an external outline, so
+the complete selected state remains visible at every edge of the scrollable
+table grid.
