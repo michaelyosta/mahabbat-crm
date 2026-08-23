@@ -145,3 +145,24 @@ The 1366×768 and 1920×1080 layouts also retain zero document overflow.
 The selected table uses an inset focus ring instead of an external outline, so
 the complete selected state remains visible at every edge of the scrollable
 table grid.
+
+## Operational clarity pass: closed shift and kitchen lines
+
+The final edge-case review used an administrator viewing another employee's
+open order after the administrator's shift had closed. The UI now follows the
+existing server rules instead of exposing ambiguous controls:
+
+- one central mode message explains that new tables are unavailable while an
+  existing editable order can still be supplemented and completed;
+- the order panel identifies `Чужой заказ · доступ администратора`, while a
+  foreign waiter receives a read-only presentation;
+- fully sent kitchen quantities no longer show a decrement action that the
+  server would reject; `+ ещё` creates a visible unsent delta for the next
+  kitchen ticket;
+- guest tabs show position count or `Пусто`, leaving monetary subtotals to the
+  order groups where they are easier to scan;
+- inactive guests, ordinary categories, menu cards and line surfaces use
+  quieter borders so active operational states carry the visual emphasis.
+
+No shift, ownership, kitchen-ticket, payment, precheck or permission semantics
+changed in this pass.

@@ -129,6 +129,42 @@ export const isReservationDraftReady = ({
   );
 };
 
+export const posLineQuantityState = (
+  quantityValue: unknown,
+  kitchenSentQuantityValue: unknown,
+): {
+  quantity: number;
+  sentQuantity: number;
+  unsentQuantity: number;
+  fullySent: boolean;
+  canDecrease: boolean;
+} => {
+  const parsedQuantity = Number(quantityValue);
+  const parsedSentQuantity = Number(kitchenSentQuantityValue);
+  const quantity = Math.max(
+    1,
+    Number.isFinite(parsedQuantity) ? Math.trunc(parsedQuantity) : 1,
+  );
+  const sentQuantity = Math.min(
+    quantity,
+    Math.max(
+      0,
+      Number.isFinite(parsedSentQuantity)
+        ? Math.trunc(parsedSentQuantity)
+        : 0,
+    ),
+  );
+  const unsentQuantity = quantity - sentQuantity;
+
+  return {
+    quantity,
+    sentQuantity,
+    unsentQuantity,
+    fullySent: sentQuantity > 0 && unsentQuantity === 0,
+    canDecrease: quantity > Math.max(1, sentQuantity),
+  };
+};
+
 const POS_ERROR_MESSAGES: Record<string, string> = {
   ROUTE_UNAVAILABLE: 'Нет связи с сервером. Проверьте сеть и попробуйте снова',
   COMMAND_FORBIDDEN: 'Действие доступно только администратору',

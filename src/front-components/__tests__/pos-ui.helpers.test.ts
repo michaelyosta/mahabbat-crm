@@ -10,6 +10,7 @@ import {
   isSyntheticPosValue,
   isOverdueReservation,
   parseMoneyInputToMicros,
+  posLineQuantityState,
   sortPosMenu,
   sortPosTables,
   sortPosZones,
@@ -163,5 +164,29 @@ describe('POS UI presentation helpers', () => {
     expect(isReservationDraftReady({ ...base, tableId: '' })).toBe(false);
     expect(isReservationDraftReady({ ...base, scheduledAt: '' })).toBe(false);
     expect(isReservationDraftReady({ ...base, guestName: '', phone: '' })).toBe(false);
+  });
+
+  it('keeps sent kitchen quantities honest in the line controls', () => {
+    expect(posLineQuantityState(1, 1)).toEqual({
+      quantity: 1,
+      sentQuantity: 1,
+      unsentQuantity: 0,
+      fullySent: true,
+      canDecrease: false,
+    });
+    expect(posLineQuantityState(2, 1)).toEqual({
+      quantity: 2,
+      sentQuantity: 1,
+      unsentQuantity: 1,
+      fullySent: false,
+      canDecrease: true,
+    });
+    expect(posLineQuantityState(1, 0)).toEqual({
+      quantity: 1,
+      sentQuantity: 0,
+      unsentQuantity: 1,
+      fullySent: false,
+      canDecrease: false,
+    });
   });
 });

@@ -22,6 +22,7 @@ import {
   micros,
   money,
   parseMoneyInputToMicros,
+  posLineQuantityState,
   sortPosMenu,
   sortPosTables,
   sortPosZones,
@@ -333,7 +334,7 @@ const tableStateCopy: Record<
 > = {
   free: { label: 'Свободен', icon: '○' },
   'my-order': { label: 'Мой заказ', icon: '●' },
-  'other-order': { label: 'Другой официант', icon: '◆' },
+  'other-order': { label: 'Чужой заказ', icon: '◆' },
   reserved: { label: 'Бронь', icon: '◷' },
   overdue: { label: 'Просрочено', icon: '!' },
   precheck: { label: 'Пречек', icon: '▣' },
@@ -397,7 +398,7 @@ const TableBoard = ({
               : '';
             const ownerMeta =
               visualState === 'other-order'
-                ? owner || 'Другой официант'
+                ? owner || 'Другой сотрудник'
                 : visualState === 'my-order'
                   ? 'Ваш стол'
                   : '';
@@ -440,8 +441,10 @@ const MenuBrowser = ({
   stopList,
   search,
   category,
+  orderSelected,
   selectedGuest,
   shiftOpen,
+  orderEditable,
   orderLocked,
   busy,
   onSearch,
@@ -453,8 +456,10 @@ const MenuBrowser = ({
   stopList: Set<string>;
   search: string;
   category: string;
+  orderSelected: boolean;
   selectedGuest?: PosRow;
   shiftOpen: boolean;
+  orderEditable: boolean;
   orderLocked: boolean;
   busy: boolean;
   onSearch: (value: string) => void;
@@ -482,13 +487,15 @@ const MenuBrowser = ({
       ),
     [category, menu, search],
   );
-  const hasOrder = Boolean(selectedGuest);
+  const hasGuest = Boolean(selectedGuest);
   const context = orderLocked
     ? 'Заказ заблокирован пречеком'
-    : selectedGuest && !shiftOpen
-      ? 'Открытый заказ · смена закрыта'
+    : orderSelected && !orderEditable
+      ? 'Чужой заказ · только просмотр'
     : selectedGuest
       ? `Добавляем: ${selectedGuest.displayNumber ?? selectedGuest.name ?? 'гость'}`
+      : orderSelected
+        ? 'Добавьте гостя в заказ'
       : 'Сначала выберите или откройте стол';
 
   return (
@@ -513,10 +520,12 @@ const MenuBrowser = ({
       </div>
       {!shiftOpen && (
         <div className="mah-pos-shift-note" role="status">
-          <strong>Смена закрыта.</strong>{' '}
-          {hasOrder
-            ? 'Администратор может завершить этот открытый заказ; новые столы недоступны.'
-            : 'Меню доступно для просмотра. Чтобы открыть новый стол, откройте смену.'}
+          <strong>Режим: смена закрыта.</strong>{' '}
+          {orderSelected
+            ? orderEditable
+              ? 'Новые столы недоступны. Открытый заказ можно дополнить и завершить.'
+              : 'Новые столы недоступны. Этот заказ доступен только для просмотра.'
+            : 'Откройте смену, чтобы принимать новые столы.'}
         </div>
       )}
       <div className="mah-pos-menu-tools">
@@ -540,9 +549,15 @@ const MenuBrowser = ({
             return (
               <button
                 type="button"
-                className={`mah-pos-dish ${stopped ? 'stopped' : ''} ${!hasOrder && !stopped ? 'preview' : ''}`}
+                className={`mah-pos-dish ${stopped ? 'stopped' : ''} ${!hasGuest && !stopped ? 'preview' : ''}`}
                 key={item.id}
-                disabled={stopped || !hasOrder || orderLocked || busy}
+                disabled={
+                  stopped ||
+                  !hasGuest ||
+                  !orderEditable ||
+                  orderLocked ||
+                  busy
+                }
                 onClick={() => onItem(item)}
               >
                 {stopped && (
@@ -693,7 +708,7 @@ const TableContextPanel = ({
 
 const OrderPanel = ({
   session,
-  shiftOpen,
+  orderEditable,
   order,
   table,
   guests,
@@ -717,7 +732,7 @@ const OrderPanel = ({
   onAdmin,
 }: {
   session: PosSession;
-  shiftOpen: boolean;
+  orderEditable: boolean;
   order: PosRow;
   table?: PosRow;
   guests: PosRow[];
@@ -741,6 +756,12 @@ const OrderPanel = ({
   onAdmin: () => void;
 }) => {
   const locked = Boolean(precheck);
+  const foreignOrder = order.ownerStaffId !== session.staff.id;
+  const accessLabel = foreignOrder
+    ? session.staff.role === 'ADMIN'
+      ? 'Чужой заказ · доступ администратора'
+      : 'Чужой заказ · только просмотр'
+    : `${session.staff.displayName} · ваш заказ`;
   return (
     <>
       <header className="mah-pos-panel-head">
@@ -764,31 +785,25 @@ const OrderPanel = ({
           )}
         </div>
         <div className="mah-pos-panel-meta">
-          {order.ownerStaffId === session.staff.id
-            ? `${session.staff.displayName} · ваш заказ`
-            : 'Заказ другого официанта'}
+          {accessLabel}
         </div>
-        {!shiftOpen && (
-          <div className="mah-pos-panel-notice">
-            Смена закрыта · доступен ранее открытый заказ
-          </div>
-        )}
       </header>
       <div className="mah-pos-guest-list">
         {guests.map((guest) => {
           const guestLines = lines.filter((line) => line.guestId === guest.id);
+          const empty = guestLines.length === 0;
           return (
             <button
               type="button"
               key={guest.id}
-              className={`mah-pos-guest ${guest.id === selectedGuest?.id ? 'active' : ''}`}
+              className={`mah-pos-guest ${empty ? 'empty' : ''} ${guest.id === selectedGuest?.id ? 'active' : ''}`}
               onClick={() => onGuest(guest.id)}
             >
               <strong>
                 {guest.displayNumber ?? guest.name ?? `Гость ${guest.ordinal}`}
               </strong>
               <small>
-                {guestLines.length} поз. · {money(guest.subtotal)}
+                {guestLines.length ? `${guestLines.length} поз.` : 'Пусто'}
               </small>
             </button>
           );
@@ -796,7 +811,7 @@ const OrderPanel = ({
         <button
           type="button"
           className="mah-pos-guest mah-pos-add-guest"
-          disabled={busy || locked}
+          disabled={busy || locked || !orderEditable}
           onClick={onAddGuest}
         >
           + Гость
@@ -806,15 +821,23 @@ const OrderPanel = ({
         {guests.length === 0 ? (
           <div className="mah-pos-empty-lines">
             <div>
-              <strong>Добавьте первого гостя</strong>
-              После этого можно добавлять блюда из меню
+              <strong>
+                {orderEditable
+                  ? 'Добавьте первого гостя'
+                  : 'Заказ доступен только для просмотра'}
+              </strong>
+              {orderEditable
+                ? 'После этого можно добавлять блюда из меню'
+                : 'Изменения доступны владельцу заказа или администратору'}
             </div>
           </div>
         ) : lines.length === 0 ? (
           <div className="mah-pos-empty-lines">
             <div>
               <strong>Заказ пока пуст</strong>
-              Выберите гостя и коснитесь блюда
+              {orderEditable
+                ? 'Выберите гостя и коснитесь блюда'
+                : 'Изменения доступны владельцу заказа или администратору'}
             </div>
           </div>
         ) : (
@@ -833,7 +856,24 @@ const OrderPanel = ({
                 </div>
                 {guestLines.map((line) => {
                   const voided = line.status === 'VOIDED';
-                  const sent = Number(line.kitchenSentQuantity ?? 0) > 0;
+                  const {
+                    quantity,
+                    sentQuantity,
+                    unsentQuantity,
+                    fullySent,
+                    canDecrease,
+                  } = posLineQuantityState(
+                    line.quantity,
+                    line.kitchenSentQuantity,
+                  );
+                  const sent = sentQuantity > 0;
+                  const lineStateLabel = voided
+                    ? '× Отменено'
+                    : sent && unsentQuantity > 0
+                      ? `Кухня ${sentQuantity} · новое ${unsentQuantity}`
+                      : sent
+                        ? '✓ На кухне'
+                        : '● Новое';
                   return (
                     <div
                       className={`mah-pos-line ${voided ? 'voided' : ''}`}
@@ -848,39 +888,58 @@ const OrderPanel = ({
                           <span
                             className={`mah-pos-line-state ${voided ? 'voided' : sent ? 'sent' : 'new'}`}
                           >
-                            {voided ? '× Отменено' : sent ? '✓ На кухне' : '● Новое'}
+                            {lineStateLabel}
                           </span>
                         </div>
                       </div>
                       <div className="mah-pos-line-actions">
-                        <button
-                          type="button"
-                          className="mah-pos-qty-button"
-                          aria-label={`Уменьшить ${line.itemNameSnapshot}`}
-                          disabled={
-                            busy ||
-                            locked ||
-                            voided ||
-                            Number(line.quantity ?? 1) <= 1
-                          }
-                          onClick={() =>
-                            onQuantity(line, Number(line.quantity ?? 1) - 1)
-                          }
-                        >
-                          −
-                        </button>
-                        <span className="mah-pos-qty">{line.quantity}</span>
-                        <button
-                          type="button"
-                          className="mah-pos-qty-button"
-                          aria-label={`Увеличить ${line.itemNameSnapshot}`}
-                          disabled={busy || locked || voided}
-                          onClick={() =>
-                            onQuantity(line, Number(line.quantity ?? 1) + 1)
-                          }
-                        >
-                          +
-                        </button>
+                        {voided ? (
+                          <span className="mah-pos-qty mah-pos-static-qty">
+                            × {quantity}
+                          </span>
+                        ) : fullySent ? (
+                          <>
+                            <span className="mah-pos-qty mah-pos-static-qty">
+                              × {quantity}
+                            </span>
+                            <button
+                              type="button"
+                              className="mah-pos-qty-button mah-pos-add-more"
+                              aria-label={`Добавить ещё ${line.itemNameSnapshot}`}
+                              disabled={busy || locked || !orderEditable}
+                              onClick={() => onQuantity(line, quantity + 1)}
+                            >
+                              + ещё
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              className="mah-pos-qty-button"
+                              aria-label={`Уменьшить ${line.itemNameSnapshot}`}
+                              disabled={
+                                busy ||
+                                locked ||
+                                !orderEditable ||
+                                !canDecrease
+                              }
+                              onClick={() => onQuantity(line, quantity - 1)}
+                            >
+                              −
+                            </button>
+                            <span className="mah-pos-qty">{quantity}</span>
+                            <button
+                              type="button"
+                              className="mah-pos-qty-button"
+                              aria-label={`Увеличить ${line.itemNameSnapshot}`}
+                              disabled={busy || locked || !orderEditable}
+                              onClick={() => onQuantity(line, quantity + 1)}
+                            >
+                              +
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   );
@@ -933,7 +992,7 @@ const OrderPanel = ({
               type="button"
               className="mah-pos-btn success"
               style={{ width: '100%' }}
-              disabled={busy}
+              disabled={busy || !orderEditable}
               onClick={onCloseOrder}
             >
               ОПЛАЧЕНО · ЗАКРЫТЬ СТОЛ
@@ -943,7 +1002,7 @@ const OrderPanel = ({
               type="button"
               className="mah-pos-btn primary"
               style={{ width: '100%' }}
-              disabled={busy}
+              disabled={busy || !orderEditable}
               onClick={onPayment}
             >
               ОПЛАТИТЬ · {money(remainingMicros)}
@@ -954,7 +1013,7 @@ const OrderPanel = ({
             <button
               type="button"
               className="mah-pos-btn primary"
-              disabled={busy || unsentCount === 0}
+              disabled={busy || !orderEditable || unsentCount === 0}
               onClick={onPrint}
             >
               ПЕЧАТЬ · {unsentCount}
@@ -962,7 +1021,11 @@ const OrderPanel = ({
             <button
               type="button"
               className="mah-pos-btn"
-              disabled={busy || lines.every((line) => line.status !== 'ACTIVE')}
+              disabled={
+                busy ||
+                !orderEditable ||
+                lines.every((line) => line.status !== 'ACTIVE')
+              }
               onClick={onPrecheck}
             >
               ПРЕЧЕК
@@ -1295,6 +1358,12 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
       !isSyntheticPosRecord(row),
   );
   const selectedOrder = orders.find((row) => row.id === orderId);
+  const selectedOrderEditable = Boolean(
+    selectedOrder &&
+      session &&
+      (session.staff.role === 'ADMIN' ||
+        selectedOrder.ownerStaffId === session.staff.id),
+  );
   const selectedTable = allTables.find((row) => row.id === tableId);
   const selectedReservation = activeReservations.find(
     (row) => row.tableId === tableId,
@@ -1492,7 +1561,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   };
 
   const addGuest = async () => {
-    if (!orderId) return;
+    if (!orderId || !selectedOrderEditable) return;
     const result = await run(
       'addGuest',
       {
@@ -1506,7 +1575,13 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   };
 
   const addLine = (item: PosRow) => {
-    if (!orderId || !selectedGuest || stopList.has(item.id) || orderPrecheck)
+    if (
+      !orderId ||
+      !selectedGuest ||
+      !selectedOrderEditable ||
+      stopList.has(item.id) ||
+      orderPrecheck
+    )
       return;
     void run(
       'addLine',
@@ -1522,7 +1597,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   };
 
   const changeQuantity = (line: PosRow, quantity: number) => {
-    if (orderPrecheck || quantity < 1) return;
+    if (!selectedOrderEditable || orderPrecheck || quantity < 1) return;
     void run(
       'changeLineQuantity',
       { lineId: line.id, quantity },
@@ -1721,8 +1796,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
             stopList={stopList}
             search={search}
             category={category}
+            orderSelected={Boolean(selectedOrder)}
             selectedGuest={selectedGuest}
             shiftOpen={Boolean(activeShift)}
+            orderEditable={selectedOrderEditable}
             orderLocked={Boolean(orderPrecheck)}
             busy={busy}
             onSearch={setSearch}
@@ -1735,7 +1812,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
           {selectedOrder ? (
             <OrderPanel
               session={session}
-              shiftOpen={Boolean(activeShift)}
+              orderEditable={selectedOrderEditable}
               order={selectedOrder}
               table={selectedTable}
               guests={guests}
