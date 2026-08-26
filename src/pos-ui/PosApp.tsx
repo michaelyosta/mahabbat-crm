@@ -26,6 +26,7 @@ import {
   sortPosMenu,
   sortPosTables,
   sortPosZones,
+  summarizePosDayPayments,
   tableVisualState,
   tableDisplayName,
   timeOnly,
@@ -1351,6 +1352,11 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     !isSyntheticPosRecord(row) &&
     !isSyntheticPosStaffId(row.ownerStaffId),
   );
+  const dayCashSummary = summarizePosDayPayments({
+    payments: rows.posPayments ?? [],
+    orders,
+    now,
+  });
   const activeReservations = (rows.posReservations ?? []).filter(
     (row) =>
       row.status === 'ACTIVE' &&
@@ -2666,6 +2672,37 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
               )}
             </div>
           </div>
+          {session.staff.role === 'ADMIN' && (
+            <div className="mah-pos-sheet-section">
+              <div className="mah-pos-day-cash">
+                <div className="mah-pos-day-cash-head">
+                  <div>
+                    <span>Касса за день</span>
+                    <small>
+                      {new Intl.DateTimeFormat('ru-KZ', {
+                        day: 'numeric',
+                        month: 'long',
+                      }).format(new Date(now))}
+                    </small>
+                  </div>
+                  <strong>{money(dayCashSummary.totalMicros)}</strong>
+                </div>
+                <div className="mah-pos-day-cash-split">
+                  <div>
+                    <span>Наличными</span>
+                    <strong>{money(dayCashSummary.cashMicros)}</strong>
+                  </div>
+                  <div>
+                    <span>Безналичными</span>
+                    <strong>{money(dayCashSummary.cashlessMicros)}</strong>
+                  </div>
+                </div>
+                <small className="mah-pos-day-cash-note">
+                  Успешных оплат: {dayCashSummary.paymentCount}
+                </small>
+              </div>
+            </div>
+          )}
           <div className="mah-pos-form">
             {!activeShift ? (
               <button

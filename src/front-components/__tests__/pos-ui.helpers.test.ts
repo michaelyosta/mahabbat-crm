@@ -14,6 +14,7 @@ import {
   sortPosMenu,
   sortPosTables,
   sortPosZones,
+  summarizePosDayPayments,
   tableDisplayName,
   tableVisualState,
 } from 'src/front-components/pos-ui.helpers';
@@ -96,6 +97,65 @@ describe('POS UI presentation helpers', () => {
     expect(commandError({ body: { code: 'COMMAND_FORBIDDEN' } })).toBe(
       'Действие доступно только администратору',
     );
+  });
+
+  it('summarizes only successful visible-order payments for the local day', () => {
+    const now = new Date(2026, 7, 26, 12).getTime();
+    const today = new Date(2026, 7, 26, 9).toISOString();
+    const yesterday = new Date(2026, 7, 25, 23, 59).toISOString();
+    const summary = summarizePosDayPayments({
+      now,
+      orders: [{ id: 'review-order' }],
+      payments: [
+        {
+          id: 'cash',
+          orderId: 'review-order',
+          status: 'SUCCESS',
+          createdAt: today,
+          paymentMethodTypeSnapshot: 'CASH',
+          amount: { amountMicros: 12_000_000_000 },
+        },
+        {
+          id: 'card',
+          orderId: 'review-order',
+          status: 'SUCCESS',
+          createdAt: today,
+          paymentMethodTypeSnapshot: 'CARD',
+          amount: { amountMicros: 8_500_000_000 },
+        },
+        {
+          id: 'rejected',
+          orderId: 'review-order',
+          status: 'REJECTED',
+          createdAt: today,
+          paymentMethodTypeSnapshot: 'CASH',
+          amount: { amountMicros: 99_000_000_000 },
+        },
+        {
+          id: 'old',
+          orderId: 'review-order',
+          status: 'SUCCESS',
+          createdAt: yesterday,
+          paymentMethodTypeSnapshot: 'CASH',
+          amount: { amountMicros: 7_000_000_000 },
+        },
+        {
+          id: 'acceptance',
+          orderId: 'hidden-order',
+          status: 'SUCCESS',
+          createdAt: today,
+          paymentMethodTypeSnapshot: 'CASH',
+          amount: { amountMicros: 1_000_000_000 },
+        },
+      ],
+    });
+
+    expect(summary).toEqual({
+      totalMicros: 20_500_000_000,
+      cashMicros: 12_000_000_000,
+      cashlessMicros: 8_500_000_000,
+      paymentCount: 2,
+    });
   });
 
   it('keeps acceptance fixtures out of the human POS presentation', () => {

@@ -247,6 +247,61 @@ export const money = (
     Math.round(micros(value) / 1_000_000),
   )} ₸`;
 
+export const summarizePosDayPayments = ({
+  payments,
+  orders,
+  now = Date.now(),
+}: {
+  payments: PosRow[];
+  orders: PosRow[];
+  now?: number;
+}): {
+  totalMicros: number;
+  cashMicros: number;
+  cashlessMicros: number;
+  paymentCount: number;
+} => {
+  const currentDay = new Date(now);
+  const visibleOrderIds = new Set(orders.map((order) => String(order.id)));
+  let cashMicros = 0;
+  let cashlessMicros = 0;
+  let paymentCount = 0;
+
+  for (const payment of payments) {
+    const createdAt = new Date(String(payment.createdAt ?? ''));
+    const amountMicros = micros(payment.amount);
+    const isToday =
+      Number.isFinite(createdAt.getTime()) &&
+      createdAt.getFullYear() === currentDay.getFullYear() &&
+      createdAt.getMonth() === currentDay.getMonth() &&
+      createdAt.getDate() === currentDay.getDate();
+
+    if (
+      payment.status !== 'SUCCESS' ||
+      !visibleOrderIds.has(String(payment.orderId ?? '')) ||
+      !isToday ||
+      !Number.isSafeInteger(amountMicros) ||
+      amountMicros <= 0
+    ) {
+      continue;
+    }
+
+    if (payment.paymentMethodTypeSnapshot === 'CASH') {
+      cashMicros += amountMicros;
+    } else {
+      cashlessMicros += amountMicros;
+    }
+    paymentCount += 1;
+  }
+
+  return {
+    totalMicros: cashMicros + cashlessMicros,
+    cashMicros,
+    cashlessMicros,
+    paymentCount,
+  };
+};
+
 export const dateTime = (value?: string | null): string =>
   value
     ? new Intl.DateTimeFormat('ru-KZ', {
