@@ -61,6 +61,7 @@ Twenty or logged by the App.
 - `yarn lint` - Lint the project with oxlint
 - `yarn typecheck` - Type-check the project
 - `yarn test:unit` - Run unit tests
+- `yarn test:printing` - Run the ESC/POS renderer, transport-classification, and printer-simulator checks
 - `yarn test` - Run integration tests
 
 ## Troubleshooting

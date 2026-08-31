@@ -16,6 +16,10 @@ export const POS_KITCHEN_TICKET_LINE_QUANTITY_FIELD_UNIVERSAL_IDENTIFIER =
   '8d2b3f45-6c78-4e90-9f12-3456789abce4';
 export const POS_KITCHEN_TICKET_LINE_ACTION_FIELD_UNIVERSAL_IDENTIFIER =
   '8d2b3f45-6c78-4e90-9f12-3456789abce5';
+export const POS_KITCHEN_TICKET_LINE_PRODUCTION_STATION_FIELD_UNIVERSAL_IDENTIFIER =
+  '8d2b3f45-6c78-4e90-9f12-3456789abce9';
+export const POS_KITCHEN_TICKET_LINE_STATION_NAME_SNAPSHOT_FIELD_UNIVERSAL_IDENTIFIER =
+  '8d2b3f45-6c78-4e90-9f12-3456789abcea';
 export const POS_KITCHEN_TICKET_LINE_UNIQUE_TICKET_ORDER_LINE_INDEX_UNIVERSAL_IDENTIFIER =
   '8d2b3f45-6c78-4e90-9f12-3456789abce6';
 
@@ -144,6 +148,34 @@ export default defineObject({
           color: 'red',
         },
       ],
+    },
+    {
+      universalIdentifier: POS_KITCHEN_TICKET_LINE_PRODUCTION_STATION_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'productionStation',
+      label: 'Станция',
+      description: 'Снапшот логической станции для повторной печати',
+      icon: 'IconToolsKitchen2',
+      relationTargetObjectMetadataUniversalIdentifier:
+        'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b22',
+      relationTargetFieldMetadataUniversalIdentifier:
+        'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b28',
+      universalSettings: {
+        relationType: RelationType.MANY_TO_ONE,
+        onDelete: OnDeleteAction.SET_NULL,
+        joinColumnName: 'productionStationId',
+      },
+    },
+    {
+      universalIdentifier: POS_KITCHEN_TICKET_LINE_STATION_NAME_SNAPSHOT_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'stationNameSnapshot',
+      label: 'Станция snapshot',
+      description: 'Название станции на момент создания документа',
+      icon: 'IconTag',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
     },
   ],
 });

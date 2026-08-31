@@ -14,6 +14,8 @@ export const POS_MENU_ITEM_LINES_FIELD_UNIVERSAL_IDENTIFIER =
   'a068393e-a10e-439b-88ba-16ceb29b7991';
 export const POS_MENU_ITEM_STOP_LIST_ENTRIES_FIELD_UNIVERSAL_IDENTIFIER =
   '8f1a5790-8226-4870-954c-a2d31f13f10b';
+export const POS_MENU_ITEM_PRODUCTION_STATION_FIELD_UNIVERSAL_IDENTIFIER =
+  'a1f0c4d8-5e72-4b93-9a61-2d7f8c0e4b2a';
 
 export default defineObject({
   universalIdentifier: POS_MENU_ITEM_UNIVERSAL_IDENTIFIER,
@@ -94,6 +96,22 @@ export default defineObject({
         '6aa9339d-385d-42cd-940f-00e88955e2a1',
       universalSettings: {
         relationType: RelationType.ONE_TO_MANY,
+      },
+    },
+    {
+      universalIdentifier: POS_MENU_ITEM_PRODUCTION_STATION_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'productionStation',
+      label: 'Станция приготовления',
+      description: 'Явный маршрут позиции меню: Кухня, Бар, Мангал и т.д.',
+      icon: 'IconToolsKitchen2',
+      relationTargetObjectMetadataUniversalIdentifier:
+        'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b22',
+      relationTargetFieldMetadataUniversalIdentifier:
+        'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b28',
+      universalSettings: {
+        relationType: RelationType.MANY_TO_ONE,
+        joinColumnName: 'productionStationId',
       },
     },
   ],

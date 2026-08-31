@@ -24,11 +24,13 @@
     "identity:smoke": "node scripts/identity-import-smoke.mjs",
     "aggregate-sales:smoke": "node scripts/aggregate-sales-smoke.mjs",
     "pos:gateway": "node pos-standalone/server/gateway.mjs",
+    "pos:print-gateway": "node pos-standalone/server/print-gateway.mjs",
     "pos:web:dev": "vite --config pos-standalone/web/vite.config.ts",
     "pos:web:build": "vite build --config pos-standalone/web/vite.config.ts",
     "pos:dev": "node pos-standalone/dev.mjs",
     "pos:deploy:build": "docker build -f pos-standalone/Dockerfile -t mahabbat-pos-gateway:local ..",
-    "test:pos:standalone": "node --test pos-standalone/server/__tests__/gateway.test.mjs"
+    "test:pos:standalone": "node --test pos-standalone/server/__tests__/gateway.test.mjs",
+    "test:printing": "node --test pos-standalone/server/__tests__/printing.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.7.2",

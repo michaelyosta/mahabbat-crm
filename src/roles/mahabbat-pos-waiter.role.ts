@@ -17,6 +17,9 @@ import { POS_PREPAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-prepayment.
 import { POS_OPERATIONAL_EVENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-operational-event.object';
 import { POS_KITCHEN_TICKET_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-kitchen-ticket.object';
 import { POS_KITCHEN_TICKET_LINE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-kitchen-ticket-line.object';
+import { POS_PRINTER_DEVICE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-printer-device.object';
+import { POS_PRODUCTION_STATION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-production-station.object';
+import { POS_PRINT_JOB_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-print-job.object';
 
 export default defineRole({
   universalIdentifier: MAHABBAT_POS_WAITER_ROLE_UNIVERSAL_IDENTIFIER,
@@ -48,6 +51,9 @@ export default defineRole({
     POS_KITCHEN_TICKET_UNIVERSAL_IDENTIFIER,
     POS_KITCHEN_TICKET_LINE_UNIVERSAL_IDENTIFIER,
     POS_OPERATIONAL_EVENT_UNIVERSAL_IDENTIFIER,
+    POS_PRINTER_DEVICE_UNIVERSAL_IDENTIFIER,
+    POS_PRODUCTION_STATION_UNIVERSAL_IDENTIFIER,
+    POS_PRINT_JOB_UNIVERSAL_IDENTIFIER,
   ].map((objectUniversalIdentifier) => ({
     objectUniversalIdentifier,
     canReadObjectRecords: true,

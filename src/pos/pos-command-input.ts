@@ -159,6 +159,37 @@ export type TransferOrderLinesToGuestPayload = {
   idempotencyKey: string;
 };
 
+export type UpsertPrinterDevicePayload = {
+  printerDeviceId?: string;
+  label: string;
+  host: string;
+  port: number;
+  isActive: boolean;
+  isPrecheckPrinter: boolean;
+  paperWidth: '58' | '80';
+  encodingProfile: 'CP866' | 'WINDOWS1251' | 'UTF8';
+  escPosCodePage?: number | null;
+  cutSupport: boolean;
+};
+
+export type UpsertProductionStationPayload = {
+  productionStationId?: string;
+  label: string;
+  printerDeviceId?: string | null;
+  isActive: boolean;
+};
+
+export type SetMenuItemProductionStationPayload = {
+  menuItemId: string;
+  productionStationId?: string | null;
+  idempotencyKey: string;
+};
+
+export type RetryPrintJobPayload = {
+  printJobId: string;
+  idempotencyKey: string;
+};
+
 const parseIdempotencyKey = (value: unknown): ParseResult<string> => {
   if (!isUuid(value)) {
     return invalid('INVALID_PAYLOAD', 'idempotencyKey must be a UUID');
@@ -592,6 +623,75 @@ const parseTransferOrderLinesToGuestPayload = (payload: unknown): ParseResult<Tr
   return { ok: true, data: { lineIds: parsedIds.data, targetGuestId, idempotencyKey: parsedKey.data } };
 };
 
+const parseBoundedLabel = (value: unknown, field: string): ParseResult<string> => {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 128) {
+    return invalid('INVALID_PAYLOAD', `${field} must be 1 to 128 characters`);
+  }
+  return { ok: true, data: value.trim() };
+};
+
+const parsePrinterHost = (value: unknown): ParseResult<string> => {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 253 || /[\u0000-\u001f\u007f\s]/.test(value)) {
+    return invalid('INVALID_PAYLOAD', 'host must be a non-empty hostname or IP without whitespace');
+  }
+  return { ok: true, data: value.trim() };
+};
+
+const parsePrinterDevicePayload = (payload: unknown): ParseResult<UpsertPrinterDevicePayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const value = payload as Record<string, unknown>;
+  const label = parseBoundedLabel(value.label, 'label');
+  if (!label.ok) return label;
+  const host = parsePrinterHost(value.host);
+  if (!host.ok) return host;
+  if (value.printerDeviceId !== undefined && !isUuid(value.printerDeviceId)) return invalid('INVALID_PAYLOAD', 'printerDeviceId must be a UUID');
+  if (typeof value.port !== 'number' || !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) return invalid('INVALID_PAYLOAD', 'port must be an integer between 1 and 65535');
+  if (typeof value.isActive !== 'boolean' || typeof value.isPrecheckPrinter !== 'boolean' || typeof value.cutSupport !== 'boolean') return invalid('INVALID_PAYLOAD', 'printer boolean flags are required');
+  if (value.paperWidth !== '58' && value.paperWidth !== '80') return invalid('INVALID_PAYLOAD', 'paperWidth must be 58 or 80');
+  if (value.encodingProfile !== 'CP866' && value.encodingProfile !== 'WINDOWS1251' && value.encodingProfile !== 'UTF8') return invalid('INVALID_PAYLOAD', 'encodingProfile is invalid');
+  if (value.escPosCodePage !== undefined && value.escPosCodePage !== null && (!Number.isSafeInteger(value.escPosCodePage) || Number(value.escPosCodePage) < 0 || Number(value.escPosCodePage) > 255)) return invalid('INVALID_PAYLOAD', 'escPosCodePage must be between 0 and 255');
+  return { ok: true, data: {
+    ...(typeof value.printerDeviceId === 'string' ? { printerDeviceId: value.printerDeviceId } : {}),
+    label: label.data, host: host.data, port: value.port, isActive: value.isActive,
+    isPrecheckPrinter: value.isPrecheckPrinter, paperWidth: value.paperWidth,
+    encodingProfile: value.encodingProfile, escPosCodePage: value.escPosCodePage === null ? null : value.escPosCodePage as number | undefined,
+    cutSupport: value.cutSupport,
+  } };
+};
+
+const parseProductionStationPayload = (payload: unknown): ParseResult<UpsertProductionStationPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const value = payload as Record<string, unknown>;
+  const label = parseBoundedLabel(value.label, 'label');
+  if (!label.ok) return label;
+  if (value.productionStationId !== undefined && !isUuid(value.productionStationId)) return invalid('INVALID_PAYLOAD', 'productionStationId must be a UUID');
+  if (value.printerDeviceId !== undefined && value.printerDeviceId !== null && !isUuid(value.printerDeviceId)) return invalid('INVALID_PAYLOAD', 'printerDeviceId must be a UUID or null');
+  if (typeof value.isActive !== 'boolean') return invalid('INVALID_PAYLOAD', 'isActive is required');
+  return { ok: true, data: {
+    ...(typeof value.productionStationId === 'string' ? { productionStationId: value.productionStationId } : {}),
+    label: label.data, printerDeviceId: value.printerDeviceId === null ? null : value.printerDeviceId as string | undefined, isActive: value.isActive,
+  } };
+};
+
+const parseSetMenuItemProductionStationPayload = (payload: unknown): ParseResult<SetMenuItemProductionStationPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const value = payload as Record<string, unknown>;
+  if (!isUuid(value.menuItemId)) return invalid('INVALID_PAYLOAD', 'menuItemId must be a UUID');
+  if (value.productionStationId !== undefined && value.productionStationId !== null && !isUuid(value.productionStationId)) return invalid('INVALID_PAYLOAD', 'productionStationId must be a UUID or null');
+  const key = parseIdempotencyKey(value.idempotencyKey);
+  if (!key.ok) return key;
+  return { ok: true, data: { menuItemId: value.menuItemId, productionStationId: value.productionStationId === null ? null : value.productionStationId as string | undefined, idempotencyKey: key.data } };
+};
+
+const parseRetryPrintJobPayload = (payload: unknown): ParseResult<RetryPrintJobPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const value = payload as Record<string, unknown>;
+  if (!isUuid(value.printJobId)) return invalid('INVALID_PAYLOAD', 'printJobId must be a UUID');
+  const key = parseIdempotencyKey(value.idempotencyKey);
+  if (!key.ok) return key;
+  return { ok: true, data: { printJobId: value.printJobId, idempotencyKey: key.data } };
+};
+
 export const parsePosCommandEnvelope = (
   body: unknown,
 ): ParseResult<PosCommandEnvelope> => {
@@ -714,5 +814,13 @@ export const parseCommandPayload = <T>(
       return parseTransferOrderToWaiterPayload(payload) as unknown as ParseResult<T>;
     case 'transferOrderLinesToGuest':
       return parseTransferOrderLinesToGuestPayload(payload) as unknown as ParseResult<T>;
+    case 'upsertPrinterDevice':
+      return parsePrinterDevicePayload(payload) as unknown as ParseResult<T>;
+    case 'upsertProductionStation':
+      return parseProductionStationPayload(payload) as unknown as ParseResult<T>;
+    case 'setMenuItemProductionStation':
+      return parseSetMenuItemProductionStationPayload(payload) as unknown as ParseResult<T>;
+    case 'retryPrintJob':
+      return parseRetryPrintJobPayload(payload) as unknown as ParseResult<T>;
   }
 };

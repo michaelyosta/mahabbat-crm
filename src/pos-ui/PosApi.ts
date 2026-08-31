@@ -16,7 +16,10 @@ export type PosListCollection =
   | 'posPayments'
   | 'posPaymentMethods'
   | 'posPrepayments'
-  | 'posStaffs';
+  | 'posStaffs'
+  | 'posPrinterDevices'
+  | 'posProductionStations'
+  | 'posPrintJobs';
 
 export type PosApi = {
   loginWithPin(pin: string, terminalId?: string): Promise<PosSession>;

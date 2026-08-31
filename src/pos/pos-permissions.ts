@@ -23,6 +23,10 @@ export const POS_COMMANDS = [
   'transferOrderToTable',
   'transferOrderToWaiter',
   'transferOrderLinesToGuest',
+  'upsertPrinterDevice',
+  'upsertProductionStation',
+  'setMenuItemProductionStation',
+  'retryPrintJob',
 ] as const;
 
 export type PosCommand = (typeof POS_COMMANDS)[number];
@@ -49,7 +53,11 @@ const WAITER_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(
       command !== 'voidOrderLines' &&
       command !== 'transferOrderToTable' &&
       command !== 'transferOrderToWaiter' &&
-      command !== 'transferOrderLinesToGuest',
+      command !== 'transferOrderLinesToGuest' &&
+      command !== 'upsertPrinterDevice' &&
+      command !== 'upsertProductionStation' &&
+      command !== 'setMenuItemProductionStation' &&
+      command !== 'retryPrintJob',
   ),
 );
 

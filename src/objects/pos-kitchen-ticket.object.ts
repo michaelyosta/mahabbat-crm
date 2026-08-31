@@ -16,6 +16,8 @@ export const POS_KITCHEN_TICKET_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER =
   '7c1a2f34-5b67-4d89-8e01-23456789abd4';
 export const POS_KITCHEN_TICKET_REQUEST_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER =
   '7c1a2f34-5b67-4d89-8e01-23456789abd5';
+export const POS_KITCHEN_TICKET_CREATED_AT_FIELD_UNIVERSAL_IDENTIFIER =
+  '7c1a2f34-5b67-4d89-8e01-23456789abda';
 export const POS_KITCHEN_TICKET_LINES_FIELD_UNIVERSAL_IDENTIFIER =
   '7c1a2f34-5b67-4d89-8e01-23456789abd6';
 export const POS_KITCHEN_TICKET_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
@@ -108,23 +110,34 @@ export default defineObject({
       description: 'Состояние printer adapter',
       icon: 'IconPrinter',
       isNullable: false,
-      defaultValue: "'PRINTED'",
+      defaultValue: "'QUEUED'",
       isUIEditable: false,
       options: [
         {
+          id: '7c1a2f34-5b67-4d89-8e01-23456789abe5',
+          value: 'QUEUED',
+          label: 'Ожидает отправки',
+          position: 0,
+          color: 'blue',
+        },
+        {
           id: '7c1a2f34-5b67-4d89-8e01-23456789abe3',
           value: 'PRINTED',
-          label: 'Отправлена',
-          position: 0,
+          label: 'Старая запись',
+          position: 1,
           color: 'green',
         },
         {
           id: '7c1a2f34-5b67-4d89-8e01-23456789abe4',
           value: 'FAILED',
           label: 'Ошибка',
-          position: 1,
+          position: 2,
           color: 'red',
         },
+        { id: '7c1a2f34-5b67-4d89-8e01-23456789abe6', value: 'DISPATCHING', label: 'Отправляется', position: 3, color: 'yellow' },
+        { id: '7c1a2f34-5b67-4d89-8e01-23456789abe7', value: 'SENT', label: 'Отправлено', position: 4, color: 'green' },
+        { id: '7c1a2f34-5b67-4d89-8e01-23456789abe8', value: 'OUTCOME_UNKNOWN', label: 'Результат неизвестен', position: 5, color: 'orange' },
+        { id: '7c1a2f34-5b67-4d89-8e01-23456789abe9', value: 'CONFIRMED', label: 'Подтверждено', position: 6, color: 'green' },
       ],
     },
     {
@@ -148,6 +161,17 @@ export default defineObject({
       icon: 'IconRepeat',
       isNullable: false,
       defaultValue: "''",
+      isUIEditable: false,
+    },
+    {
+      universalIdentifier: POS_KITCHEN_TICKET_CREATED_AT_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.DATE_TIME,
+      name: 'createdAt',
+      label: 'Создана',
+      description: 'Время создания kitchen ticket',
+      icon: 'IconClockPlus',
+      isNullable: false,
+      defaultValue: 'now',
       isUIEditable: false,
     },
     {

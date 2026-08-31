@@ -47,4 +47,16 @@ describe('pos permissions', () => {
       expect(commandAllowedForRole(command, 'ADMIN')).toBe(true);
     }
   });
+
+  it('keeps printer configuration and explicit reprints ADMIN-only', () => {
+    for (const command of [
+      'upsertPrinterDevice',
+      'upsertProductionStation',
+      'setMenuItemProductionStation',
+      'retryPrintJob',
+    ] as const) {
+      expect(commandAllowedForRole(command, 'WAITER')).toBe(false);
+      expect(commandAllowedForRole(command, 'ADMIN')).toBe(true);
+    }
+  });
 });

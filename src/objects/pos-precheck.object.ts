@@ -28,6 +28,8 @@ export const POS_PRECHECK_CANCEL_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER =
   '9e3c4f56-7a89-4f01-8123-456789abcd02';
 export const POS_PRECHECK_PRINT_STATUS_FIELD_UNIVERSAL_IDENTIFIER =
   '9e3c4f56-7a89-4f01-8123-456789abcd03';
+export const POS_PRECHECK_GUEST_ITEMS_SNAPSHOT_FIELD_UNIVERSAL_IDENTIFIER =
+  '9e3c4f56-7a89-4f01-8123-456789abcd07';
 export const POS_PRECHECK_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
   '9e3c4f56-7a89-4f01-8123-456789abcd04';
 export const POS_PRECHECK_UNIQUE_ACTIVE_ORDER_KEY_INDEX_UNIVERSAL_IDENTIFIER =
@@ -211,24 +213,47 @@ export default defineObject({
       description: 'Результат bounded precheck adapter',
       icon: 'IconPrinter',
       isNullable: false,
-      defaultValue: "'PRINTED'",
+      defaultValue: "'QUEUED'",
       isUIEditable: false,
       options: [
         {
+          id: '9e3c4f56-7a89-4f01-8123-456789abcd15',
+          value: 'QUEUED',
+          label: 'Ожидает отправки',
+          position: 0,
+          color: 'blue',
+        },
+        {
           id: '9e3c4f56-7a89-4f01-8123-456789abcd13',
           value: 'PRINTED',
-          label: 'Готов',
-          position: 0,
+          label: 'Старая запись',
+          position: 1,
           color: 'green',
         },
         {
           id: '9e3c4f56-7a89-4f01-8123-456789abcd14',
           value: 'FAILED',
           label: 'Ошибка',
-          position: 1,
+          position: 2,
           color: 'red',
         },
+        { id: '9e3c4f56-7a89-4f01-8123-456789abcd16', value: 'DISPATCHING', label: 'Отправляется', position: 3, color: 'yellow' },
+        { id: '9e3c4f56-7a89-4f01-8123-456789abcd17', value: 'SENT', label: 'Отправлено', position: 4, color: 'green' },
+        { id: '9e3c4f56-7a89-4f01-8123-456789abcd18', value: 'OUTCOME_UNKNOWN', label: 'Результат неизвестен', position: 5, color: 'orange' },
+        { id: '9e3c4f56-7a89-4f01-8123-456789abcd19', value: 'CONFIRMED', label: 'Подтверждено', position: 6, color: 'green' },
       ],
+    },
+    {
+      universalIdentifier: POS_PRECHECK_GUEST_ITEMS_SNAPSHOT_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'guestItemsSnapshot',
+      label: 'Позиции гостей snapshot',
+      description: 'Immutable JSON позиций, названий и цен для пречека',
+      icon: 'IconListDetails',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
+      universalSettings: { displayedMaxRows: 8 },
     },
   ],
 });

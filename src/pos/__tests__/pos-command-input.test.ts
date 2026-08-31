@@ -173,4 +173,26 @@ describe('parseCommandPayload', () => {
       }).ok,
     ).toBe(false);
   });
+
+  it('validates physical printing configuration and reprint payloads', () => {
+    expect(parseCommandPayload('upsertPrinterDevice', {
+      label: 'Кухня', host: '192.168.1.50', port: 9100, isActive: true,
+      isPrecheckPrinter: false, paperWidth: '80', encodingProfile: 'CP866',
+      escPosCodePage: 17, cutSupport: true,
+    }).ok).toBe(true);
+    expect(parseCommandPayload('upsertPrinterDevice', {
+      label: 'Кухня', host: '192.168.1. 50', port: 9100, isActive: true,
+      isPrecheckPrinter: false, paperWidth: '80', encodingProfile: 'CP866',
+      cutSupport: true,
+    }).ok).toBe(false);
+    expect(parseCommandPayload('upsertProductionStation', {
+      label: 'Горячий цех', printerDeviceId: null, isActive: true,
+    }).ok).toBe(true);
+    expect(parseCommandPayload('setMenuItemProductionStation', {
+      menuItemId: STAFF, productionStationId: null, idempotencyKey: KEY,
+    }).ok).toBe(true);
+    expect(parseCommandPayload('retryPrintJob', {
+      printJobId: STAFF, idempotencyKey: KEY,
+    }).ok).toBe(true);
+  });
 });

@@ -21,10 +21,14 @@ import {
   sumActiveLinesMicros,
 } from 'src/pos/pos-money';
 import {
-  kitchenPrintAdapter,
-  type KitchenPrintableLine,
-} from 'src/pos/kitchen-print-adapter';
-import { precheckPrintAdapter } from 'src/pos/precheck-print-adapter';
+  executeRetryPrintJob,
+  findPrinter,
+  findStation,
+  enqueueKitchenPrintJobs,
+  enqueuePrecheckPrintJob,
+  type KitchenQueueLine,
+  type PrecheckQueueSnapshot,
+} from 'src/printing/print-queue';
 
 const ensureInventoryConsumptionRequest = async (client: CoreApiClientLike, orderId: string): Promise<void> => {
   try {
@@ -62,6 +66,13 @@ type MenuItemRecord = ExistingRecord & {
   name?: string | null;
   price?: unknown;
   isActive?: boolean | null;
+  productionStationId?: string | null;
+};
+
+type ProductionStationRecord = ExistingRecord & {
+  label?: string | null;
+  isActive?: boolean | null;
+  printerDeviceId?: string | null;
 };
 
 type OrderRecord = ExistingRecord & {
@@ -135,7 +146,23 @@ type KitchenTicketLineRecord = ExistingRecord & {
   itemNameSnapshot?: string | null;
   quantity?: number | null;
   action?: string | null;
+  productionStationId?: string | null;
+  stationNameSnapshot?: string | null;
 };
+
+const toKitchenQueueLines = (lines: KitchenTicketLineRecord[]): KitchenQueueLine[] =>
+  lines
+    .filter((line): line is KitchenTicketLineRecord & { orderLineId: string } => Boolean(line.orderLineId))
+    .map((line) => ({
+      orderLineId: line.orderLineId,
+      guestId: line.guestId ?? null,
+      guestDisplayNumber: line.guestDisplayNumber ?? null,
+      itemNameSnapshot: line.itemNameSnapshot ?? '',
+      quantity: Math.max(0, line.quantity ?? 0),
+      action: line.action === 'CANCEL' ? 'CANCEL' : 'ADD',
+      productionStationId: line.productionStationId ?? null,
+      stationNameSnapshot: line.stationNameSnapshot ?? null,
+    }));
 
 type PrecheckRecord = ExistingRecord & {
   orderId?: string | null;
@@ -150,6 +177,8 @@ type PrecheckRecord = ExistingRecord & {
   idempotencyKey?: string | null;
   cancelIdempotencyKey?: string | null;
   printStatus?: string | null;
+  guestItemsSnapshot?: string | null;
+  createdAt?: string | null;
 };
 
 type PaymentMethodRecord = ExistingRecord & {
@@ -242,6 +271,10 @@ export const POS_ERROR_CODES = [
   'LINE_ALREADY_SENT',
   'STOP_LIST_NOT_FOUND',
   'KITCHEN_TICKET_NOT_FOUND',
+  'PRINT_JOB_NOT_FOUND',
+  'PRINTER_DEVICE_NOT_FOUND',
+  'PRODUCTION_STATION_NOT_FOUND',
+  'PRINT_CONFIG_INVALID',
   'PRECHECK_NOT_FOUND',
   'PRECHECK_NOT_ACTIVE',
   'PAYMENT_METHOD_NOT_FOUND',
@@ -317,6 +350,14 @@ const MENU_ITEM_FIELDS: NodeSelection = {
   name: true,
   price: { amountMicros: true, currencyCode: true },
   isActive: true,
+  productionStationId: true,
+};
+
+const PRODUCTION_STATION_FIELDS: NodeSelection = {
+  id: true,
+  label: true,
+  isActive: true,
+  printerDeviceId: true,
 };
 
 const ORDER_FIELDS: NodeSelection = {
@@ -396,6 +437,8 @@ const KITCHEN_TICKET_LINE_FIELDS: NodeSelection = {
   itemNameSnapshot: true,
   quantity: true,
   action: true,
+  productionStationId: true,
+  stationNameSnapshot: true,
 };
 
 const PRECHECK_FIELDS: NodeSelection = {
@@ -412,6 +455,8 @@ const PRECHECK_FIELDS: NodeSelection = {
   idempotencyKey: true,
   cancelIdempotencyKey: true,
   printStatus: true,
+  guestItemsSnapshot: true,
+  createdAt: true,
 };
 
 const PAYMENT_METHOD_FIELDS: NodeSelection = {
@@ -651,6 +696,30 @@ const findKitchenTicketBySemanticKey = async (
   );
 
   return tickets[0] ?? null;
+};
+
+const findKitchenTicketsByOrder = async (
+  client: CoreApiClientLike,
+  orderId: string,
+): Promise<KitchenTicketRecord[]> =>
+  queryConnection<KitchenTicketRecord>(
+    client,
+    'posKitchenTickets',
+    { filter: { orderId: { eq: orderId } }, first: 100 },
+    KITCHEN_TICKET_FIELDS,
+  );
+
+const findProductionStationById = async (
+  client: CoreApiClientLike,
+  stationId: string,
+): Promise<ProductionStationRecord | null> => {
+  const stations = await queryConnection<ProductionStationRecord>(
+    client,
+    'posProductionStations',
+    { filter: { id: { eq: stationId } }, first: 1 },
+    PRODUCTION_STATION_FIELDS,
+  );
+  return stations[0] ?? null;
 };
 
 const findKitchenTicketLines = async (
@@ -1141,6 +1210,142 @@ const createOperationalEvent = async (
   } catch {
     return findOperationalEventByIdempotencyKey(client, input.idempotencyKey);
   }
+};
+
+const PRINTING_PRINTER_FIELDS: NodeSelection = {
+  id: true,
+  label: true,
+  connectionType: true,
+  host: true,
+  port: true,
+  isActive: true,
+  isPrecheckPrinter: true,
+  paperWidth: true,
+  encodingProfile: true,
+  escPosCodePage: true,
+  cutSupport: true,
+  status: true,
+};
+
+const PRINTING_STATION_FIELDS: NodeSelection = {
+  id: true,
+  label: true,
+  isActive: true,
+  printerDeviceId: true,
+};
+
+const validPrinterHost = (host: string): boolean =>
+  host.length > 0 && host.length <= 253 && !/[\u0000-\u001f\u007f\s]/.test(host);
+
+export const executeUpsertPrinterDevice = async (
+  client: CoreApiClientLike,
+  payload: {
+    printerDeviceId?: string;
+    label: string;
+    host: string;
+    port: number;
+    isActive: boolean;
+    isPrecheckPrinter: boolean;
+    paperWidth: '58' | '80';
+    encodingProfile: 'CP866' | 'WINDOWS1251' | 'UTF8';
+    escPosCodePage?: number | null;
+    cutSupport: boolean;
+  },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  if (!payload.label.trim() || !validPrinterHost(payload.host) || !Number.isInteger(payload.port) || payload.port < 1 || payload.port > 65535) {
+    return errorResult('PRINT_CONFIG_INVALID', 'Параметры принтера некорректны.');
+  }
+  const updatedAt = new Date().toISOString();
+  const data = {
+    label: payload.label.trim(),
+    connectionType: 'ETHERNET_RAW_TCP',
+    host: payload.host.trim(),
+    port: payload.port,
+    isActive: payload.isActive,
+    isPrecheckPrinter: payload.isPrecheckPrinter,
+    paperWidth: payload.paperWidth,
+    encodingProfile: payload.encodingProfile,
+    escPosCodePage: payload.escPosCodePage ?? null,
+    cutSupport: payload.cutSupport,
+    status: 'CONFIGURED',
+    updatedAt,
+  };
+  try {
+    const result = payload.printerDeviceId
+      ? await client.mutation({ updatePosPrinterDevice: { __args: { id: payload.printerDeviceId, data }, ...PRINTING_PRINTER_FIELDS } })
+      : await client.mutation({ createPosPrinterDevice: { __args: { data: { ...data, createdAt: updatedAt } }, ...PRINTING_PRINTER_FIELDS } });
+    const printer = (payload.printerDeviceId
+      ? (result as { updatePosPrinterDevice?: Record<string, unknown> }).updatePosPrinterDevice
+      : (result as { createPosPrinterDevice?: Record<string, unknown> }).createPosPrinterDevice) as { id?: string } | undefined;
+    if (!printer?.id) return errorResult('CONFLICT', 'Принтер не удалось сохранить.');
+    await createOperationalEvent(client, {
+      eventType: 'PRINTER_DEVICE_CONFIGURED',
+      actorStaffId: actor.staffId,
+      details: { printerDeviceId: printer.id, host: data.host, port: data.port, isActive: data.isActive, isPrecheckPrinter: data.isPrecheckPrinter },
+      idempotencyKey: `printer-config:${printer.id}:${updatedAt}`,
+    });
+    return okResult(payload.printerDeviceId ? 200 : 201, { printerDeviceId: printer.id, status: 'CONFIGURED' });
+  } catch {
+    return errorResult('CONFLICT', 'Принтер не удалось сохранить.');
+  }
+};
+
+export const executeUpsertProductionStation = async (
+  client: CoreApiClientLike,
+  payload: { productionStationId?: string; label: string; printerDeviceId?: string | null; isActive: boolean },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  if (!payload.label.trim()) return errorResult('PRINT_CONFIG_INVALID', 'Название станции не может быть пустым.');
+  if (payload.printerDeviceId) {
+    const printer = await findPrinter(client, payload.printerDeviceId);
+    if (!printer) return errorResult('PRINTER_DEVICE_NOT_FOUND', 'Принтер не найден.');
+  }
+  const updatedAt = new Date().toISOString();
+  const data = { label: payload.label.trim(), printerDeviceId: payload.printerDeviceId ?? null, isActive: payload.isActive, updatedAt };
+  try {
+    const result = payload.productionStationId
+      ? await client.mutation({ updatePosProductionStation: { __args: { id: payload.productionStationId, data }, ...PRINTING_STATION_FIELDS } })
+      : await client.mutation({ createPosProductionStation: { __args: { data: { ...data, createdAt: updatedAt } }, ...PRINTING_STATION_FIELDS } });
+    const station = (payload.productionStationId
+      ? (result as { updatePosProductionStation?: Record<string, unknown> }).updatePosProductionStation
+      : (result as { createPosProductionStation?: Record<string, unknown> }).createPosProductionStation) as { id?: string } | undefined;
+    if (!station?.id) return errorResult('CONFLICT', 'Станцию не удалось сохранить.');
+    await createOperationalEvent(client, {
+      eventType: 'PRODUCTION_STATION_CONFIGURED',
+      actorStaffId: actor.staffId,
+      details: { productionStationId: station.id, printerDeviceId: data.printerDeviceId, isActive: data.isActive },
+      idempotencyKey: `station-config:${station.id}:${updatedAt}`,
+    });
+    return okResult(payload.productionStationId ? 200 : 201, { productionStationId: station.id, status: 'CONFIGURED' });
+  } catch {
+    return errorResult('CONFLICT', 'Станцию не удалось сохранить.');
+  }
+};
+
+export const executeSetMenuItemProductionStation = async (
+  client: CoreApiClientLike,
+  payload: { menuItemId: string; productionStationId?: string | null; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const menuItem = await findMenuItemById(client, payload.menuItemId);
+  if (!menuItem) return errorResult('MENU_ITEM_NOT_FOUND', 'Блюдо не найдено.');
+  if (payload.productionStationId) {
+    const station = await findStation(client, payload.productionStationId);
+    if (!station) return errorResult('PRODUCTION_STATION_NOT_FOUND', 'Производственная станция не найдена.');
+  }
+  try {
+    await client.mutation({ updatePosMenuItem: { __args: { id: payload.menuItemId, data: { productionStationId: payload.productionStationId ?? null } }, id: true, productionStationId: true } });
+  } catch {
+    return errorResult('CONFLICT', 'Маршрут блюда не удалось сохранить.');
+  }
+  await createOperationalEvent(client, {
+    eventType: 'MENU_ITEM_PRINT_ROUTE_CONFIGURED',
+    actorStaffId: actor.staffId,
+    details: { menuItemId: payload.menuItemId, productionStationId: payload.productionStationId ?? null },
+    idempotencyKey: payload.idempotencyKey,
+  });
+  return okResult(200, { menuItemId: payload.menuItemId, productionStationId: payload.productionStationId ?? null });
 };
 
 const parseEventDetails = (event: OperationalEventRecord): Record<string, unknown> => {
@@ -1787,10 +1992,17 @@ export const executePrintKitchenTicket = async (
   );
   if (requestReplay) {
     await repairKitchenTicket(client, requestReplay, actor);
+    const replayLines = await findKitchenTicketLines(client, requestReplay.id);
+    const jobs = await enqueueKitchenPrintJobs(client, {
+      ticketId: requestReplay.id,
+      orderId: payload.orderId,
+      ticketType: 'NEW_ITEMS',
+      lines: toKitchenQueueLines(replayLines),
+    });
     return okResult(200, {
       ticketId: requestReplay.id,
-      printStatus: requestReplay.printStatus ?? 'PRINTED',
-      lineCount: (await findKitchenTicketLines(client, requestReplay.id)).length,
+      printStatus: jobs.find((job) => job.status)?.status ?? requestReplay.printStatus ?? 'QUEUED',
+      lineCount: replayLines.length,
     });
   }
 
@@ -1802,14 +2014,24 @@ export const executePrintKitchenTicket = async (
     return okResult(200, { ticketId: null, printStatus: 'NO_UNSENT_LINES', lineCount: 0 });
   }
 
+  const previousTickets = await findKitchenTicketsByOrder(client, payload.orderId);
+  const isAdditional = previousTickets.some((candidate) => candidate.ticketType === 'NEW_ITEMS');
   const semanticKey = kitchenSemanticKey(payload.orderId, lines);
   const semanticReplay = await findKitchenTicketBySemanticKey(client, semanticKey);
   if (semanticReplay) {
     await repairKitchenTicket(client, semanticReplay, actor);
+    const replayLines = await findKitchenTicketLines(client, semanticReplay.id);
+    const jobs = await enqueueKitchenPrintJobs(client, {
+      ticketId: semanticReplay.id,
+      orderId: payload.orderId,
+      ticketType: 'NEW_ITEMS',
+      lines: toKitchenQueueLines(replayLines),
+      isAdditional,
+    });
     return okResult(200, {
       ticketId: semanticReplay.id,
-      printStatus: semanticReplay.printStatus ?? 'PRINTED',
-      lineCount: (await findKitchenTicketLines(client, semanticReplay.id)).length,
+      printStatus: jobs.find((job) => job.status)?.status ?? semanticReplay.printStatus ?? 'QUEUED',
+      lineCount: replayLines.length,
     });
   }
 
@@ -1825,7 +2047,7 @@ export const executePrintKitchenTicket = async (
             ticketType: 'NEW_ITEMS',
             createdAt,
             createdByStaffId: actor.staffId,
-            printStatus: 'PRINTED',
+            printStatus: 'QUEUED',
             idempotencyKey: semanticKey,
             requestIdempotencyKey: payload.idempotencyKey,
           },
@@ -1848,24 +2070,22 @@ export const executePrintKitchenTicket = async (
 
   const existingTicketLines = await findKitchenTicketLines(client, ticket.id);
   const existingLineIds = new Set(existingTicketLines.map((line) => line.orderLineId));
-  const printableLines = [] as Array<{
-    orderLineId: string;
-    guestDisplayNumber: string | null;
-    itemNameSnapshot: string;
-    quantity: number;
-    action: 'ADD';
-  }>;
-
   for (const line of lines) {
     const delta = Math.max(0, (line.quantity ?? 0) - (line.kitchenSentQuantity ?? 0));
     if (!delta || existingLineIds.has(line.id)) continue;
     const guest = line.guestId ? await findGuestById(client, line.guestId) : null;
-    const printable = {
+    const menuItem = line.menuItemId ? await findMenuItemById(client, line.menuItemId) : null;
+    const station = menuItem?.productionStationId
+      ? await findProductionStationById(client, menuItem.productionStationId)
+      : null;
+    const printable: KitchenQueueLine = {
       orderLineId: line.id,
       guestDisplayNumber: guest?.displayNumber ?? null,
       itemNameSnapshot: line.itemNameSnapshot ?? '',
       quantity: delta,
       action: 'ADD' as const,
+      productionStationId: station?.id ?? menuItem?.productionStationId ?? null,
+      stationNameSnapshot: station?.label ?? null,
     };
     try {
       await client.mutation({
@@ -1879,6 +2099,8 @@ export const executePrintKitchenTicket = async (
               itemNameSnapshot: printable.itemNameSnapshot,
               quantity: printable.quantity,
               action: printable.action,
+              productionStationId: printable.productionStationId,
+              stationNameSnapshot: printable.stationNameSnapshot,
             },
           },
           id: true,
@@ -1893,23 +2115,22 @@ export const executePrintKitchenTicket = async (
         return errorResult('CONFLICT', 'Kitchen ticket line could not be created.');
       }
     }
-    printableLines.push(printable);
   }
 
   await repairKitchenTicket(client, ticket, actor);
-  if (createdNewTicket && printableLines.length > 0) {
-    await kitchenPrintAdapter.print({
-      ticketId: ticket.id,
-      orderId: payload.orderId,
-      ticketType: 'NEW_ITEMS',
-      lines: printableLines,
-    });
-  }
+  const ticketLines = await findKitchenTicketLines(client, ticket.id);
+  const jobs = await enqueueKitchenPrintJobs(client, {
+    ticketId: ticket.id,
+    orderId: payload.orderId,
+    ticketType: 'NEW_ITEMS',
+    lines: toKitchenQueueLines(ticketLines),
+    isAdditional,
+  });
 
   return okResult(createdNewTicket ? 201 : 200, {
     ticketId: ticket.id,
-    printStatus: ticket.printStatus ?? 'PRINTED',
-    lineCount: (await findKitchenTicketLines(client, ticket.id)).length,
+    printStatus: jobs.find((job) => job.status)?.status ?? ticket.printStatus ?? 'QUEUED',
+    lineCount: ticketLines.length,
   });
 };
 
@@ -1922,8 +2143,6 @@ const createCancellationKitchenTicket = async (
 ): Promise<KitchenTicketRecord | null> => {
   const semanticKey = `kitchen-cancellation:${orderId}:${operationKey}`;
   let ticket = await findKitchenTicketBySemanticKey(client, semanticKey);
-  let createdNew = false;
-
   if (!ticket) {
     try {
       const result = (await client.mutation({
@@ -1934,7 +2153,7 @@ const createCancellationKitchenTicket = async (
               ticketType: 'CANCELLATION',
               createdAt: new Date().toISOString(),
               createdByStaffId: actor.staffId,
-              printStatus: 'PRINTED',
+              printStatus: 'QUEUED',
               idempotencyKey: semanticKey,
               requestIdempotencyKey: operationKey,
             },
@@ -1943,7 +2162,6 @@ const createCancellationKitchenTicket = async (
         },
       })) as { createPosKitchenTicket?: KitchenTicketRecord };
       ticket = result.createPosKitchenTicket ?? null;
-      createdNew = true;
     } catch {
       ticket = await findKitchenTicketBySemanticKey(client, semanticKey);
     }
@@ -1953,19 +2171,23 @@ const createCancellationKitchenTicket = async (
 
   const existing = await findKitchenTicketLines(client, ticket.id);
   const existingIds = new Set(existing.map((line) => line.orderLineId));
-  const printableLines: KitchenPrintableLine[] = [];
-
   for (const line of lines) {
     if (!line.id || existingIds.has(line.id)) continue;
     const guest = line.guestId ? await findGuestById(client, line.guestId) : null;
+    const menuItem = line.menuItemId ? await findMenuItemById(client, line.menuItemId) : null;
+    const station = menuItem?.productionStationId
+      ? await findProductionStationById(client, menuItem.productionStationId)
+      : null;
     const quantity = Math.max(0, line.kitchenSentQuantity ?? 0);
     if (!quantity) continue;
-    const printable: KitchenPrintableLine = {
+    const printable: KitchenQueueLine = {
       orderLineId: line.id,
       guestDisplayNumber: guest?.displayNumber ?? null,
       itemNameSnapshot: line.itemNameSnapshot ?? '',
       quantity,
       action: 'CANCEL',
+      productionStationId: station?.id ?? menuItem?.productionStationId ?? null,
+      stationNameSnapshot: station?.label ?? null,
     };
     try {
       await client.mutation({
@@ -1979,24 +2201,26 @@ const createCancellationKitchenTicket = async (
               itemNameSnapshot: printable.itemNameSnapshot,
               quantity: printable.quantity,
               action: 'CANCEL',
+              productionStationId: printable.productionStationId,
+              stationNameSnapshot: printable.stationNameSnapshot,
             },
           },
           id: true,
         },
       });
-      printableLines.push(printable);
     } catch {
       const raced = await findKitchenTicketLine(client, ticket.id, line.id);
       if (!raced) return null;
     }
   }
 
-  if (createdNew && printableLines.length > 0) {
-    await kitchenPrintAdapter.print({
+  const ticketLines = await findKitchenTicketLines(client, ticket.id);
+  if (ticketLines.length > 0) {
+    await enqueueKitchenPrintJobs(client, {
       ticketId: ticket.id,
       orderId,
       ticketType: 'CANCELLATION',
-      lines: printableLines,
+      lines: toKitchenQueueLines(ticketLines),
     });
   }
 
@@ -2225,12 +2449,18 @@ const buildPrecheckSnapshot = async (
   order: OrderRecord;
   subtotal: ReturnType<typeof normalizeCurrency>;
   guestTotals: Array<{ displayNumber: string; amountMicros: number; currencyCode: string }>;
+  guestItems: PrecheckQueueSnapshot['guests'];
+  tableNumber: string;
+  waiterName: string;
 }> => {
   await updateLinesTotals(client, order);
   const refreshedOrder = await findOrderById(client, order.id);
   if (!refreshedOrder) throw new Error('Order disappeared while creating precheck.');
 
   const guests = await findGuestsByOrder(client, order.id);
+  const lines = (await findLinesByOrder(client, order.id)).filter(
+    (line) => line.status === 'ACTIVE',
+  );
   const guestTotals = guests.map((guest) => {
     const subtotal = normalizeCurrency(guest.subtotal);
     return {
@@ -2239,11 +2469,58 @@ const buildPrecheckSnapshot = async (
       currencyCode: subtotal.currencyCode,
     };
   });
+  const guestItems = guests.map((guest) => ({
+    displayNumber: guest.displayNumber ?? `Гость ${guest.ordinal ?? 0}`,
+    lines: lines
+      .filter((line) => line.guestId === guest.id)
+      .map((line) => {
+        const unitPriceMicros = normalizeCurrency(line.unitPrice).amountMicros;
+        const quantity = line.quantity ?? 0;
+        return {
+          itemNameSnapshot: line.itemNameSnapshot ?? '',
+          quantity,
+          unitPriceMicros,
+          lineTotalMicros: unitPriceMicros * quantity,
+        };
+      }),
+  }));
+  const table = order.tableId ? await findTableById(client, order.tableId) : null;
+  const staff = order.ownerStaffId ? await findStaffById(client, order.ownerStaffId) : null;
 
   return {
     order: refreshedOrder,
     subtotal: normalizeCurrency(refreshedOrder.subtotal),
     guestTotals,
+    guestItems,
+    tableNumber: table?.number ?? '—',
+    waiterName: staff?.displayName ?? 'Сотрудник',
+  };
+};
+
+const precheckQueueSnapshotFromRecord = async (
+  client: CoreApiClientLike,
+  precheck: PrecheckRecord,
+  order: OrderRecord,
+): Promise<PrecheckQueueSnapshot> => {
+  let guests: PrecheckQueueSnapshot['guests'] = [];
+  try {
+    const parsed = JSON.parse(precheck.guestItemsSnapshot ?? '[]') as unknown;
+    if (Array.isArray(parsed)) guests = parsed as PrecheckQueueSnapshot['guests'];
+  } catch {
+    // A legacy precheck without the item snapshot remains printable as a
+    // totals-only document; new prechecks always store the immutable list.
+  }
+  const table = order.tableId ? await findTableById(client, order.tableId) : null;
+  const staff = order.ownerStaffId ? await findStaffById(client, order.ownerStaffId) : null;
+  return {
+    precheckId: precheck.id,
+    orderId: order.id,
+    tableNumber: table?.number ?? '—',
+    waiterName: staff?.displayName ?? 'Сотрудник',
+    createdAt: precheck.createdAt ?? new Date().toISOString(),
+    guests,
+    subtotalMicros: normalizeCurrency(precheck.subtotalSnapshot).amountMicros,
+    totalMicros: normalizeCurrency(precheck.totalSnapshot).amountMicros,
   };
 };
 
@@ -2258,7 +2535,7 @@ const precheckResponse = (
     orderId: order.id,
     orderStatus: order.status ?? 'PRECHECK_PRINTED',
     status: precheck.status ?? 'ACTIVE',
-    printStatus: precheck.printStatus ?? 'PRINTED',
+    printStatus: precheck.printStatus ?? 'QUEUED',
     totalSnapshot: precheck.totalSnapshot ?? null,
   },
 });
@@ -2287,6 +2564,7 @@ export const executeCreatePrecheck = async (
       await repairPrecheckOrderLock(client, order);
     }
     const refreshed = (await findOrderById(client, payload.orderId)) ?? order;
+    await enqueuePrecheckPrintJob(client, await precheckQueueSnapshotFromRecord(client, existingByIdempotency, refreshed));
     return precheckResponse(existingByIdempotency, refreshed, 200);
   }
 
@@ -2294,6 +2572,7 @@ export const executeCreatePrecheck = async (
   if (active) {
     await repairPrecheckOrderLock(client, order);
     const refreshed = (await findOrderById(client, payload.orderId)) ?? order;
+    await enqueuePrecheckPrintJob(client, await precheckQueueSnapshotFromRecord(client, active, refreshed));
     return precheckResponse(active, refreshed, 200);
   }
 
@@ -2317,10 +2596,11 @@ export const executeCreatePrecheck = async (
             subtotalSnapshot: snapshot.subtotal,
             totalSnapshot: normalizeCurrency(snapshot.order.total),
             guestTotalsSnapshot,
+            guestItemsSnapshot: JSON.stringify(snapshot.guestItems),
             createdByStaffId: actor.staffId,
             activeOrderKey: payload.orderId,
             idempotencyKey: payload.idempotencyKey,
-            printStatus: 'PRINTED',
+            printStatus: 'QUEUED',
             createdAt,
           },
         },
@@ -2330,6 +2610,7 @@ export const executeCreatePrecheck = async (
         subtotalSnapshot: { amountMicros: true, currencyCode: true },
         totalSnapshot: { amountMicros: true, currencyCode: true },
         guestTotalsSnapshot: true,
+        guestItemsSnapshot: true,
         createdByStaffId: true,
         activeOrderKey: true,
         idempotencyKey: true,
@@ -2350,17 +2631,20 @@ export const executeCreatePrecheck = async (
 
   await repairPrecheckOrderLock(client, order);
   const lockedOrder = (await findOrderById(client, payload.orderId)) ?? order;
+  const queued = await enqueuePrecheckPrintJob(client, {
+    precheckId: precheck.id,
+    orderId: payload.orderId,
+    tableNumber: snapshot.tableNumber,
+    waiterName: snapshot.waiterName,
+    createdAt,
+    guests: snapshot.guestItems,
+    subtotalMicros: snapshot.subtotal.amountMicros,
+    totalMicros: normalizeCurrency(snapshot.order.total).amountMicros,
+  });
 
-  if (createdNew) {
-    await precheckPrintAdapter.print({
-      precheckId: precheck.id,
-      orderId: payload.orderId,
-      subtotalMicros: snapshot.subtotal.amountMicros,
-      totalMicros: normalizeCurrency(snapshot.order.total).amountMicros,
-      guestTotals: snapshot.guestTotals,
-    });
+  if (queued?.status && queued.status !== precheck.printStatus) {
+    precheck.printStatus = queued.status;
   }
-
   return precheckResponse(precheck, lockedOrder, createdNew ? 201 : 200);
 };
 
@@ -3286,6 +3570,37 @@ export const dispatchPosCommand = async (
         targetGuestId: payload.targetGuestId as string,
         idempotencyKey: payload.idempotencyKey as string,
       }, actor);
+    case 'upsertPrinterDevice':
+      return executeUpsertPrinterDevice(client, {
+        printerDeviceId: payload.printerDeviceId as string | undefined,
+        label: payload.label as string,
+        host: payload.host as string,
+        port: payload.port as number,
+        isActive: payload.isActive as boolean,
+        isPrecheckPrinter: payload.isPrecheckPrinter as boolean,
+        paperWidth: payload.paperWidth as '58' | '80',
+        encodingProfile: payload.encodingProfile as 'CP866' | 'WINDOWS1251' | 'UTF8',
+        escPosCodePage: payload.escPosCodePage as number | null | undefined,
+        cutSupport: payload.cutSupport as boolean,
+      }, actor);
+    case 'upsertProductionStation':
+      return executeUpsertProductionStation(client, {
+        productionStationId: payload.productionStationId as string | undefined,
+        label: payload.label as string,
+        printerDeviceId: payload.printerDeviceId as string | null | undefined,
+        isActive: payload.isActive as boolean,
+      }, actor);
+    case 'setMenuItemProductionStation':
+      return executeSetMenuItemProductionStation(client, {
+        menuItemId: payload.menuItemId as string,
+        productionStationId: payload.productionStationId as string | null | undefined,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'retryPrintJob':
+      return executeRetryPrintJob(client, {
+        printJobId: payload.printJobId as string,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor.staffId);
     case 'authenticatePosStaff':
     case 'logoutPosStaff':
       return errorResult(

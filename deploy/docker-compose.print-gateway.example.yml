@@ -1,0 +1,13 @@
+# Example only. Run the gateway on the same LAN as the Ethernet printers.
+# For Docker Desktop/Windows, a native Node process is usually simpler for printer reachability.
+services:
+  mahabbat-print-gateway:
+    image: node:24-alpine
+    working_dir: /app
+    command: ['node', 'server/print-gateway.mjs']
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ../pos-standalone/server:/app/server:ro
+    env_file:
+      - ./print-gateway.env

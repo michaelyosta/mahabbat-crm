@@ -29,6 +29,7 @@ navigation, page layouts, front components и Apps SDK.
 - Mahabbat source: `src/`.
 - Tests and verification: `src/**/__tests__`, `src/**/*.test.ts`, `scripts/`.
 - Deployment templates: `deploy/`.
+- Physical Ethernet ESC/POS printing: `docs/PHYSICAL_PRINTING.md`.
 - Project decisions and operational notes: `docs/`.
 
 The app is intentionally kept as a separate repository from a local Twenty
