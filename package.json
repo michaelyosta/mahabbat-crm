@@ -21,6 +21,7 @@
     "seed:demo:dry": "node scripts/seed-demo.mjs --dry-run",
     "seed:pos": "node scripts/seed-pos.mjs",
     "seed:pos:dry": "node scripts/seed-pos.mjs --dry-run",
+    "cleanup:pos:review-fixtures": "node scripts/cleanup-pos-review-fixtures.mjs",
     "seed:inventory:review": "node scripts/seed-inventory-human-review.mjs",
     "verify-runtime-api-parity": "node scripts/verify-runtime-api-parity.mjs",
     "identity:smoke": "node scripts/identity-import-smoke.mjs",
@@ -30,7 +31,7 @@
     "pos:web:dev": "vite --config pos-standalone/web/vite.config.ts",
     "pos:web:build": "vite build --config pos-standalone/web/vite.config.ts",
     "pos:dev": "node pos-standalone/dev.mjs",
-    "pos:deploy:build": "docker build -f pos-standalone/Dockerfile -t mahabbat-pos-gateway:local ..",
+    "pos:deploy:build": "docker build -f pos-standalone/Dockerfile -t mahabbat-pos-gateway:local .",
     "test:pos:standalone": "node --test pos-standalone/server/__tests__/gateway.test.mjs",
     "test:printing": "node --test pos-standalone/server/__tests__/printing.test.mjs"
   },

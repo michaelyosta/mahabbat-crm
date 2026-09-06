@@ -3603,6 +3603,7 @@ export const dispatchPosCommand = async (
       }, actor.staffId);
     case 'authenticatePosStaff':
     case 'logoutPosStaff':
+    case 'refreshPosSession':
       return errorResult(
         'COMMAND_FORBIDDEN',
         'POS authentication commands are handled before domain dispatch.',

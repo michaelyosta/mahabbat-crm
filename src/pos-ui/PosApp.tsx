@@ -16,10 +16,19 @@ import {
   initials,
   isActiveOrder,
   isOverdueReservation,
+  isReservationDraftReady,
+  isSyntheticPosRecord,
+  isSyntheticPosStaffId,
   micros,
   money,
   parseMoneyInputToMicros,
+  posLineQuantityState,
+  sortPosMenu,
+  sortPosTables,
+  sortPosZones,
+  summarizePosDayPayments,
   tableVisualState,
+  tableDisplayName,
   timeOnly,
   uuid,
   type PosRow,
@@ -191,7 +200,7 @@ const LoginView = ({
         {busy ? 'Входим…' : 'Войти'}
       </button>
       {error && <div className="mah-pos-toast error">{error}</div>}
-      <div className="mah-pos-login-hint">PIN хранится только на сервере</div>
+      <div className="mah-pos-login-hint">Введите личный PIN сотрудника</div>
     </div>
   </div>
 );
@@ -220,7 +229,7 @@ const PosHeader = ({
       <div className="mah-pos-brand-mark">M</div>
       <div>
         Mahabbat
-        <small>restaurant POS</small>
+        <small>ресторанная касса</small>
       </div>
     </div>
     <button
@@ -238,7 +247,7 @@ const PosHeader = ({
       className="mah-pos-top-action"
       onClick={onReservation}
     >
-      Брони · {reservationCount}
+      {reservationCount > 0 ? `Брони · ${reservationCount}` : 'Брони'}
       {overdueCount > 0 && <span>⚠ {overdueCount}</span>}
     </button>
     <div className="mah-pos-top-actions">
@@ -302,18 +311,20 @@ const ZoneNavigation = ({
           </button>
         ))}
       </div>
-      <div className="mah-pos-sidebar-bottom">
-        <button
-          type="button"
-          className={`mah-pos-sidebar-card ${overdue ? 'alert' : ''}`}
-          onClick={onReservations}
-        >
-          <strong>Брони · {reservations.length}</strong>
-          <small>
-            {overdue ? `${overdue} просрочено` : 'Открыть список'}
-          </small>
-        </button>
-      </div>
+      {reservations.length > 0 && (
+        <div className="mah-pos-sidebar-bottom">
+          <button
+            type="button"
+            className={`mah-pos-sidebar-card ${overdue ? 'alert' : ''}`}
+            onClick={onReservations}
+          >
+            <strong>Брони · {reservations.length}</strong>
+            <small>
+              {overdue ? `${overdue} просрочено` : 'Открыть список'}
+            </small>
+          </button>
+        </div>
+      )}
     </aside>
   );
 };
@@ -324,7 +335,7 @@ const tableStateCopy: Record<
 > = {
   free: { label: 'Свободен', icon: '○' },
   'my-order': { label: 'Мой заказ', icon: '●' },
-  'other-order': { label: 'Другой официант', icon: '◆' },
+  'other-order': { label: 'Чужой заказ', icon: '◆' },
   reserved: { label: 'Бронь', icon: '◷' },
   overdue: { label: 'Просрочено', icon: '!' },
   precheck: { label: 'Пречек', icon: '▣' },
@@ -388,7 +399,7 @@ const TableBoard = ({
               : '';
             const ownerMeta =
               visualState === 'other-order'
-                ? owner || 'Другой официант'
+                ? owner || 'Другой сотрудник'
                 : visualState === 'my-order'
                   ? 'Ваш стол'
                   : '';
@@ -397,11 +408,11 @@ const TableBoard = ({
                 type="button"
                 className={`mah-pos-table ${visualState} ${selectedTableId === table.id ? 'selected' : ''}`}
                 key={table.id}
-                aria-label={`Стол ${table.number}: ${copy.label}`}
+                aria-label={`${tableDisplayName(table)}: ${copy.label}`}
                 onClick={() => onSelect(table)}
               >
                 <div className="mah-pos-table-top">
-                  <strong>Стол {table.number}</strong>
+                  <strong>{tableDisplayName(table)}</strong>
                   <span>{copy.icon}</span>
                 </div>
                 <span className="mah-pos-table-state">{copy.label}</span>
@@ -431,7 +442,10 @@ const MenuBrowser = ({
   stopList,
   search,
   category,
+  orderSelected,
   selectedGuest,
+  shiftOpen,
+  orderEditable,
   orderLocked,
   busy,
   onSearch,
@@ -443,7 +457,10 @@ const MenuBrowser = ({
   stopList: Set<string>;
   search: string;
   category: string;
+  orderSelected: boolean;
   selectedGuest?: PosRow;
+  shiftOpen: boolean;
+  orderEditable: boolean;
   orderLocked: boolean;
   busy: boolean;
   onSearch: (value: string) => void;
@@ -471,11 +488,15 @@ const MenuBrowser = ({
       ),
     [category, menu, search],
   );
-  const hasOrder = Boolean(selectedGuest);
+  const hasGuest = Boolean(selectedGuest);
   const context = orderLocked
     ? 'Заказ заблокирован пречеком'
+    : orderSelected && !orderEditable
+      ? 'Чужой заказ · только просмотр'
     : selectedGuest
       ? `Добавляем: ${selectedGuest.displayNumber ?? selectedGuest.name ?? 'гость'}`
+      : orderSelected
+        ? 'Добавьте гостя в заказ'
       : 'Сначала выберите или откройте стол';
 
   return (
@@ -490,7 +511,24 @@ const MenuBrowser = ({
           placeholder="Поиск блюда"
           aria-label="Поиск блюда"
         />
+        <button
+          type="button"
+          className={`mah-pos-stop-button ${stopList.size > 0 ? 'active' : ''}`}
+          onClick={onStopList}
+        >
+          {stopList.size > 0 ? `Стоп-лист · ${stopList.size}` : 'Стоп-лист'}
+        </button>
       </div>
+      {!shiftOpen && (
+        <div className="mah-pos-shift-note" role="status">
+          <strong>Режим: смена закрыта.</strong>{' '}
+          {orderSelected
+            ? orderEditable
+              ? 'Новые столы недоступны. Открытый заказ можно дополнить и завершить.'
+              : 'Новые столы недоступны. Этот заказ доступен только для просмотра.'
+            : 'Откройте смену, чтобы принимать новые столы.'}
+        </div>
+      )}
       <div className="mah-pos-menu-tools">
         <div className="mah-pos-categories">
           {categories.map((item) => (
@@ -504,13 +542,6 @@ const MenuBrowser = ({
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          className="mah-pos-stop-button"
-          onClick={onStopList}
-        >
-          Стоп-лист · {stopList.size}
-        </button>
       </div>
       <div className="mah-pos-menu-grid">
         {filteredMenu.length ? (
@@ -519,9 +550,15 @@ const MenuBrowser = ({
             return (
               <button
                 type="button"
-                className={`mah-pos-dish ${stopped ? 'stopped' : ''} ${!hasOrder && !stopped ? 'preview' : ''}`}
+                className={`mah-pos-dish ${stopped ? 'stopped' : ''} ${!hasGuest && !stopped ? 'preview' : ''}`}
                 key={item.id}
-                disabled={stopped || !hasOrder || orderLocked || busy}
+                disabled={
+                  stopped ||
+                  !hasGuest ||
+                  !orderEditable ||
+                  orderLocked ||
+                  busy
+                }
                 onClick={() => onItem(item)}
               >
                 {stopped && (
@@ -571,6 +608,12 @@ const EmptyOrderPanel = ({
           : 'После открытия смены станут доступны столы и новые заказы.'}
       </p>
       {!activeShift && (
+        <div className="mah-pos-empty-guide">
+          <span>Новые столы недоступны</span>
+          <span>Ранее открытые заказы сохранены</span>
+        </div>
+      )}
+      {!activeShift && (
         <button
           type="button"
           className="mah-pos-btn primary"
@@ -588,7 +631,7 @@ const EmptyOrderPanel = ({
           const table = tables.find((item) => item.id === order.tableId);
           return (
             <button type="button" key={order.id} onClick={() => onOrder(order)}>
-              <span>Стол {table?.number ?? '—'}</span>
+              <span>{table ? tableDisplayName(table) : 'Стол —'}</span>
               <strong>{money(order.total)}</strong>
             </button>
           );
@@ -625,7 +668,7 @@ const TableContextPanel = ({
     </span>
     <div className="mah-pos-table-context-main">
       <div className="mah-pos-empty-icon">{reservation ? '◷' : '○'}</div>
-      <h2>Стол {table.number}</h2>
+      <h2>{tableDisplayName(table)}</h2>
       <p>
         {activeShift
           ? 'Выберите действие'
@@ -666,6 +709,7 @@ const TableContextPanel = ({
 
 const OrderPanel = ({
   session,
+  orderEditable,
   order,
   table,
   guests,
@@ -689,6 +733,7 @@ const OrderPanel = ({
   onAdmin,
 }: {
   session: PosSession;
+  orderEditable: boolean;
   order: PosRow;
   table?: PosRow;
   guests: PosRow[];
@@ -712,11 +757,17 @@ const OrderPanel = ({
   onAdmin: () => void;
 }) => {
   const locked = Boolean(precheck);
+  const foreignOrder = order.ownerStaffId !== session.staff.id;
+  const accessLabel = foreignOrder
+    ? session.staff.role === 'ADMIN'
+      ? 'Чужой заказ · доступ администратора'
+      : 'Чужой заказ · только просмотр'
+    : `${session.staff.displayName} · ваш заказ`;
   return (
     <>
       <header className="mah-pos-panel-head">
         <div className="mah-pos-panel-title">
-          <h2>Стол {table?.number ?? '—'}</h2>
+          <h2>{table ? tableDisplayName(table) : 'Стол —'}</h2>
           <span
             className={`mah-pos-status-chip ${locked ? 'locked' : 'success'}`}
           >
@@ -735,26 +786,25 @@ const OrderPanel = ({
           )}
         </div>
         <div className="mah-pos-panel-meta">
-          {order.ownerStaffId === session.staff.id
-            ? `${session.staff.displayName} · ваш заказ`
-            : 'Заказ другого официанта'}
+          {accessLabel}
         </div>
       </header>
       <div className="mah-pos-guest-list">
         {guests.map((guest) => {
           const guestLines = lines.filter((line) => line.guestId === guest.id);
+          const empty = guestLines.length === 0;
           return (
             <button
               type="button"
               key={guest.id}
-              className={`mah-pos-guest ${guest.id === selectedGuest?.id ? 'active' : ''}`}
+              className={`mah-pos-guest ${empty ? 'empty' : ''} ${guest.id === selectedGuest?.id ? 'active' : ''}`}
               onClick={() => onGuest(guest.id)}
             >
               <strong>
                 {guest.displayNumber ?? guest.name ?? `Гость ${guest.ordinal}`}
               </strong>
               <small>
-                {guestLines.length} поз. · {money(guest.subtotal)}
+                {guestLines.length ? `${guestLines.length} поз.` : 'Пусто'}
               </small>
             </button>
           );
@@ -762,7 +812,7 @@ const OrderPanel = ({
         <button
           type="button"
           className="mah-pos-guest mah-pos-add-guest"
-          disabled={busy || locked}
+          disabled={busy || locked || !orderEditable}
           onClick={onAddGuest}
         >
           + Гость
@@ -772,15 +822,23 @@ const OrderPanel = ({
         {guests.length === 0 ? (
           <div className="mah-pos-empty-lines">
             <div>
-              <strong>Добавьте первого гостя</strong>
-              После этого можно добавлять блюда из меню
+              <strong>
+                {orderEditable
+                  ? 'Добавьте первого гостя'
+                  : 'Заказ доступен только для просмотра'}
+              </strong>
+              {orderEditable
+                ? 'После этого можно добавлять блюда из меню'
+                : 'Изменения доступны владельцу заказа или администратору'}
             </div>
           </div>
         ) : lines.length === 0 ? (
           <div className="mah-pos-empty-lines">
             <div>
               <strong>Заказ пока пуст</strong>
-              Выберите гостя и коснитесь блюда
+              {orderEditable
+                ? 'Выберите гостя и коснитесь блюда'
+                : 'Изменения доступны владельцу заказа или администратору'}
             </div>
           </div>
         ) : (
@@ -799,7 +857,24 @@ const OrderPanel = ({
                 </div>
                 {guestLines.map((line) => {
                   const voided = line.status === 'VOIDED';
-                  const sent = Number(line.kitchenSentQuantity ?? 0) > 0;
+                  const {
+                    quantity,
+                    sentQuantity,
+                    unsentQuantity,
+                    fullySent,
+                    canDecrease,
+                  } = posLineQuantityState(
+                    line.quantity,
+                    line.kitchenSentQuantity,
+                  );
+                  const sent = sentQuantity > 0;
+                  const lineStateLabel = voided
+                    ? '× Отменено'
+                    : sent && unsentQuantity > 0
+                      ? `Кухня ${sentQuantity} · новое ${unsentQuantity}`
+                      : sent
+                        ? '✓ На кухне'
+                        : '● Новое';
                   return (
                     <div
                       className={`mah-pos-line ${voided ? 'voided' : ''}`}
@@ -814,39 +889,58 @@ const OrderPanel = ({
                           <span
                             className={`mah-pos-line-state ${voided ? 'voided' : sent ? 'sent' : 'new'}`}
                           >
-                            {voided ? '× Отменено' : sent ? '✓ На кухне' : '● Новое'}
+                            {lineStateLabel}
                           </span>
                         </div>
                       </div>
                       <div className="mah-pos-line-actions">
-                        <button
-                          type="button"
-                          className="mah-pos-qty-button"
-                          aria-label={`Уменьшить ${line.itemNameSnapshot}`}
-                          disabled={
-                            busy ||
-                            locked ||
-                            voided ||
-                            Number(line.quantity ?? 1) <= 1
-                          }
-                          onClick={() =>
-                            onQuantity(line, Number(line.quantity ?? 1) - 1)
-                          }
-                        >
-                          −
-                        </button>
-                        <span className="mah-pos-qty">{line.quantity}</span>
-                        <button
-                          type="button"
-                          className="mah-pos-qty-button"
-                          aria-label={`Увеличить ${line.itemNameSnapshot}`}
-                          disabled={busy || locked || voided}
-                          onClick={() =>
-                            onQuantity(line, Number(line.quantity ?? 1) + 1)
-                          }
-                        >
-                          +
-                        </button>
+                        {voided ? (
+                          <span className="mah-pos-qty mah-pos-static-qty">
+                            × {quantity}
+                          </span>
+                        ) : fullySent ? (
+                          <>
+                            <span className="mah-pos-qty mah-pos-static-qty">
+                              × {quantity}
+                            </span>
+                            <button
+                              type="button"
+                              className="mah-pos-qty-button mah-pos-add-more"
+                              aria-label={`Добавить ещё ${line.itemNameSnapshot}`}
+                              disabled={busy || locked || !orderEditable}
+                              onClick={() => onQuantity(line, quantity + 1)}
+                            >
+                              + ещё
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              className="mah-pos-qty-button"
+                              aria-label={`Уменьшить ${line.itemNameSnapshot}`}
+                              disabled={
+                                busy ||
+                                locked ||
+                                !orderEditable ||
+                                !canDecrease
+                              }
+                              onClick={() => onQuantity(line, quantity - 1)}
+                            >
+                              −
+                            </button>
+                            <span className="mah-pos-qty">{quantity}</span>
+                            <button
+                              type="button"
+                              className="mah-pos-qty-button"
+                              aria-label={`Увеличить ${line.itemNameSnapshot}`}
+                              disabled={busy || locked || !orderEditable}
+                              onClick={() => onQuantity(line, quantity + 1)}
+                            >
+                              +
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   );
@@ -899,7 +993,7 @@ const OrderPanel = ({
               type="button"
               className="mah-pos-btn success"
               style={{ width: '100%' }}
-              disabled={busy}
+              disabled={busy || !orderEditable}
               onClick={onCloseOrder}
             >
               ОПЛАЧЕНО · ЗАКРЫТЬ СТОЛ
@@ -909,7 +1003,7 @@ const OrderPanel = ({
               type="button"
               className="mah-pos-btn primary"
               style={{ width: '100%' }}
-              disabled={busy}
+              disabled={busy || !orderEditable}
               onClick={onPayment}
             >
               ОПЛАТИТЬ · {money(remainingMicros)}
@@ -920,7 +1014,7 @@ const OrderPanel = ({
             <button
               type="button"
               className="mah-pos-btn primary"
-              disabled={busy || unsentCount === 0}
+              disabled={busy || !orderEditable || unsentCount === 0}
               onClick={onPrint}
             >
               ПЕЧАТЬ · {unsentCount}
@@ -928,7 +1022,11 @@ const OrderPanel = ({
             <button
               type="button"
               className="mah-pos-btn"
-              disabled={busy || lines.every((line) => line.status !== 'ACTIVE')}
+              disabled={
+                busy ||
+                !orderEditable ||
+                lines.every((line) => line.status !== 'ACTIVE')
+              }
               onClick={onPrecheck}
             >
               ПРЕЧЕК
@@ -942,6 +1040,8 @@ const OrderPanel = ({
 
 export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessionChange }: PosAppProps) => {
   const rootRef = useRef<HTMLDivElement>(null);
+  const activityRefreshSentAtRef = useRef(0);
+  const activityRefreshInFlightRef = useRef(false);
   const [session, setSessionState] = useState<PosSession | null>(() => {
     if (initialSession) return initialSession;
     if (mode === 'standalone') return restorePosSession();
@@ -976,6 +1076,8 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   const [reservationPhone, setReservationPhone] = useState('');
   const [reservationAt, setReservationAt] = useState('');
   const [reservationPrepayment, setReservationPrepayment] = useState('');
+  const [stopListSearch, setStopListSearch] = useState('');
+  const [stopListCategory, setStopListCategory] = useState('Все');
   const [selectedLineIds, setSelectedLineIds] = useState<string[]>([]);
   const [voidPreparedState, setVoidPreparedState] = useState<
     'PREPARED' | 'NOT_PREPARED'
@@ -1107,6 +1209,56 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     [api],
   );
 
+  useEffect(() => {
+    if (!session) {
+      activityRefreshSentAtRef.current = 0;
+      activityRefreshInFlightRef.current = false;
+      return;
+    }
+
+    const refreshAfterUserActivity = () => {
+      const happenedAt = Date.now();
+      if (
+        activityRefreshInFlightRef.current ||
+        happenedAt - activityRefreshSentAtRef.current < 60_000
+      ) {
+        return;
+      }
+
+      activityRefreshSentAtRef.current = happenedAt;
+      activityRefreshInFlightRef.current = true;
+      void command('refreshPosSession', {})
+        .catch((value) => {
+          const code = String(
+            (value as unknown as { body?: { code?: string } })?.body?.code ??
+              '',
+          );
+          if (
+            [
+              'POS_SESSION_EXPIRED',
+              'POS_SESSION_INVALID',
+              'POS_SESSION_REQUIRED',
+            ].includes(code)
+          ) {
+            setSession(null);
+            setError('Сессия истекла. Введите PIN снова.');
+          }
+        })
+        .finally(() => {
+          activityRefreshInFlightRef.current = false;
+        });
+    };
+
+    globalThis.addEventListener('pointerdown', refreshAfterUserActivity, {
+      passive: true,
+    });
+    globalThis.addEventListener('keydown', refreshAfterUserActivity);
+    return () => {
+      globalThis.removeEventListener('pointerdown', refreshAfterUserActivity);
+      globalThis.removeEventListener('keydown', refreshAfterUserActivity);
+    };
+  }, [command, session, setSession]);
+
   const run = useCallback(
     async (
       name: string,
@@ -1179,16 +1331,45 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     setSheet(null);
   };
 
-  const zones = (rows.posZones ?? []).filter((row) => row.isActive !== false);
-  const allTables = (rows.posTables ?? []).filter(
-    (row) => row.isActive !== false,
+  const zones = sortPosZones(
+    (rows.posZones ?? []).filter(
+      (row) => row.isActive !== false && !isSyntheticPosRecord(row),
+    ),
   );
+  const visibleZoneIds = new Set(zones.map((row) => row.id));
+  const allTables = sortPosTables(
+    (rows.posTables ?? []).filter(
+      (row) =>
+        row.isActive !== false &&
+        !isSyntheticPosRecord(row) &&
+        visibleZoneIds.has(row.zoneId),
+    ),
+  );
+  const visibleTableIds = new Set(allTables.map((row) => row.id));
   const tables = allTables.filter((row) => !zoneId || row.zoneId === zoneId);
-  const orders = rows.posOrders ?? [];
+  const orders = (rows.posOrders ?? []).filter((row) =>
+    visibleTableIds.has(row.tableId) &&
+    !isSyntheticPosRecord(row) &&
+    !isSyntheticPosStaffId(row.ownerStaffId),
+  );
+  const dayCashSummary = summarizePosDayPayments({
+    payments: rows.posPayments ?? [],
+    orders,
+    now,
+  });
   const activeReservations = (rows.posReservations ?? []).filter(
-    (row) => row.status === 'ACTIVE',
+    (row) =>
+      row.status === 'ACTIVE' &&
+      visibleTableIds.has(row.tableId) &&
+      !isSyntheticPosRecord(row),
   );
   const selectedOrder = orders.find((row) => row.id === orderId);
+  const selectedOrderEditable = Boolean(
+    selectedOrder &&
+      session &&
+      (session.staff.role === 'ADMIN' ||
+        selectedOrder.ownerStaffId === session.staff.id),
+  );
   const selectedTable = allTables.find((row) => row.id === tableId);
   const selectedReservation = activeReservations.find(
     (row) => row.tableId === tableId,
@@ -1199,17 +1380,32 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   const lines = (rows.posOrderLines ?? []).filter(
     (row) => row.orderId === orderId,
   );
-  const menu = (rows.posMenuItems ?? []).filter(
-    (row) => row.isActive !== false,
+  const menu = sortPosMenu(
+    (rows.posMenuItems ?? []).filter(
+      (row) => row.isActive !== false && !isSyntheticPosRecord(row),
+    ),
   );
   const stopList = new Set(
     (rows.posStopListEntries ?? [])
       .filter((row) => row.isActive !== false)
       .map((row) => row.menuItemId),
   );
-  const sortedStopListMenu = [...menu].sort(
-    (left, right) => Number(stopList.has(right.id)) - Number(stopList.has(left.id)),
-  );
+  const menuCategories = [
+    'Все',
+    ...Array.from(new Set(menu.map((item) => item.category).filter(Boolean))),
+  ];
+  const stopListItems = menu
+    .filter(
+      (item) =>
+        (stopListCategory === 'Все' || item.category === stopListCategory) &&
+        String(item.name ?? '')
+          .toLowerCase()
+          .includes(stopListSearch.trim().toLowerCase()),
+    )
+    .sort(
+      (left, right) =>
+        Number(stopList.has(right.id)) - Number(stopList.has(left.id)),
+    );
   const methods = (rows.posPaymentMethods ?? [])
     .filter((row) => row.isActive !== false)
     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
@@ -1237,6 +1433,15 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   const remainingMicros = Math.max(
     0,
     totalMicros - prepaidMicros - paidMicros,
+  );
+  const reservationDraftReady = isReservationDraftReady({
+    tableId: reservationTableId,
+    scheduledAt: reservationAt,
+    guestName: reservationName,
+    phone: reservationPhone,
+  });
+  const occupiedTableIds = new Set(
+    orders.filter(isActiveOrder).map((order) => order.tableId),
   );
   const selectedPaymentMethod = methods.find((row) => row.id === paymentMethodId);
   const isCashSelected = selectedPaymentMethod?.methodType === 'CASH';
@@ -1273,10 +1478,12 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   const staffNames = useMemo(
     () =>
       new Map(
-        (rows.posStaffs ?? []).map((staff) => [
+        (rows.posStaffs ?? [])
+          .filter((staff) => !isSyntheticPosRecord(staff))
+          .map((staff) => [
           staff.id,
           String(staff.displayName ?? 'Сотрудник'),
-        ]),
+          ]),
       ),
     [rows.posStaffs],
   );
@@ -1304,12 +1511,17 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
 
   const selectTable = (table: PosRow) => {
     setTableId(table.id);
-    setReservationTableId(table.id);
     setError('');
     const existing = orders.find(
       (row) => row.tableId === table.id && isActiveOrder(row),
     );
     setOrderId(existing?.id ?? null);
+  };
+
+  const openReservationSheet = (targetTableId?: string | null) => {
+    setReservationTableId(targetTableId ?? null);
+    setError('');
+    setSheet('reservation');
   };
 
   const openTable = async (
@@ -1355,7 +1567,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   };
 
   const addGuest = async () => {
-    if (!orderId) return;
+    if (!orderId || !selectedOrderEditable) return;
     const result = await run(
       'addGuest',
       {
@@ -1369,7 +1581,13 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   };
 
   const addLine = (item: PosRow) => {
-    if (!orderId || !selectedGuest || stopList.has(item.id) || orderPrecheck)
+    if (
+      !orderId ||
+      !selectedGuest ||
+      !selectedOrderEditable ||
+      stopList.has(item.id) ||
+      orderPrecheck
+    )
       return;
     void run(
       'addLine',
@@ -1385,7 +1603,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   };
 
   const changeQuantity = (line: PosRow, quantity: number) => {
-    if (orderPrecheck || quantity < 1) return;
+    if (!selectedOrderEditable || orderPrecheck || quantity < 1) return;
     void run(
       'changeLineQuantity',
       { lineId: line.id, quantity },
@@ -1394,8 +1612,8 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   };
 
   const createReservation = async () => {
-    if (!reservationTableId) {
-      setError('Выберите стол для бронирования');
+    if (!reservationDraftReady) {
+      setError('Укажите стол, дату и время, а также имя или телефон гостя');
       return;
     }
     const prepayment = reservationPrepayment
@@ -1550,10 +1768,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
         overdueCount={activeReservations.filter((item) => isOverdueReservation(item, now)).length}
         now={now}
         syncing={syncing}
-        onReservation={() => {
-          setReservationTableId(tableId ?? allTables[0]?.id ?? null);
-          setSheet('reservation');
-        }}
+        onReservation={() => openReservationSheet()}
         onSessionMenu={() => setSheet('session')}
       />
       <div className="mah-pos-shell">
@@ -1567,7 +1782,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
             setTableId(null);
             setOrderId(null);
           }}
-          onReservations={() => setSheet('reservation')}
+          onReservations={() => openReservationSheet()}
         />
         <main className="mah-pos-workspace">
           <TableBoard
@@ -1587,7 +1802,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
             stopList={stopList}
             search={search}
             category={category}
+            orderSelected={Boolean(selectedOrder)}
             selectedGuest={selectedGuest}
+            shiftOpen={Boolean(activeShift)}
+            orderEditable={selectedOrderEditable}
             orderLocked={Boolean(orderPrecheck)}
             busy={busy}
             onSearch={setSearch}
@@ -1600,6 +1818,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
           {selectedOrder ? (
             <OrderPanel
               session={session}
+              orderEditable={selectedOrderEditable}
               order={selectedOrder}
               table={selectedTable}
               guests={guests}
@@ -1646,8 +1865,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
               now={now}
               onOpen={() => void openTable(selectedReservation)}
               onReserve={() => {
-                setReservationTableId(selectedTable.id);
-                setSheet('reservation');
+                openReservationSheet(selectedTable.id);
               }}
             />
           ) : (
@@ -1861,7 +2079,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
       {sheet === 'reservation' && (
         <Sheet
           title="Бронирования"
-          subtitle="Стол обязателен, остальные поля можно пропустить"
+          subtitle="Выберите стол и время. Укажите имя или телефон гостя"
           onClose={() => setSheet(null)}
           wide
         >
@@ -1874,11 +2092,14 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                   className="mah-pos-select"
                   value={reservationTableId ?? ''}
                   onChange={(event) => setReservationTableId(event.target.value)}
+                  required
+                  aria-required="true"
                 >
                   <option value="">Выберите стол</option>
                   {allTables.map((table) => (
                     <option key={table.id} value={table.id}>
-                      {zones.find((zone) => zone.id === table.zoneId)?.name ?? 'Зал'} · Стол {table.number}
+                      {zones.find((zone) => zone.id === table.zoneId)?.name ?? 'Зал'} · {tableDisplayName(table)}
+                      {occupiedTableIds.has(table.id) ? ' · сейчас занят' : ''}
                     </option>
                   ))}
                 </select>
@@ -1889,7 +2110,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                   className="mah-pos-input"
                   value={reservationName}
                   onChange={(event) => setReservationName(event.target.value)}
-                  placeholder="Необязательно"
+                  placeholder="Например, Айдар"
                 />
               </label>
               <label className="mah-pos-field">
@@ -1898,7 +2119,8 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                   className="mah-pos-input"
                   value={reservationPhone}
                   onChange={(event) => setReservationPhone(event.target.value)}
-                  placeholder="Необязательно"
+                  placeholder="+7 700 000 00 00"
+                  inputMode="tel"
                 />
               </label>
               <label className="mah-pos-field">
@@ -1908,6 +2130,8 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                   type="datetime-local"
                   value={reservationAt}
                   onChange={(event) => setReservationAt(event.target.value)}
+                  required
+                  aria-required="true"
                 />
               </label>
               <label className="mah-pos-field">
@@ -1938,10 +2162,13 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                   </select>
                 </label>
               )}
+              <div className="mah-pos-field-hint wide">
+                Для брони нужны стол, дата и время, а также имя или телефон гостя
+              </div>
               <button
                 type="button"
                 className="mah-pos-btn primary wide"
-                disabled={!reservationTableId || busy}
+                disabled={!reservationDraftReady || busy}
                 onClick={() => void createReservation()}
               >
                 ЗАБРОНИРОВАТЬ
@@ -2027,7 +2254,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                   );
                 })
               ) : (
-                <div className="mah-pos-empty-lines">
+                <div className="mah-pos-empty-lines compact">
                   Активных бронирований нет
                 </div>
               )}
@@ -2039,11 +2266,36 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
       {sheet === 'stop-list' && (
         <Sheet
           title="Стоп-лист"
-          subtitle="Изменения проверяются сервером при каждом добавлении блюда"
+          subtitle={
+            stopList.size > 0
+              ? `Нет в наличии: ${stopList.size}`
+              : 'Все блюда доступны'
+          }
           onClose={() => setSheet(null)}
         >
+          <div className="mah-pos-stop-tools">
+            <input
+              className="mah-pos-input"
+              value={stopListSearch}
+              onChange={(event) => setStopListSearch(event.target.value)}
+              placeholder="Найти блюдо"
+              aria-label="Поиск в стоп-листе"
+            />
+            <div className="mah-pos-stop-categories">
+              {menuCategories.map((item) => (
+                <button
+                  type="button"
+                  key={item}
+                  className={`mah-pos-category ${item === stopListCategory ? 'active' : ''}`}
+                  onClick={() => setStopListCategory(item)}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="mah-pos-stop-list">
-            {sortedStopListMenu.map((item) => {
+            {stopListItems.map((item) => {
               const stopped = stopList.has(item.id);
               return (
                 <div
@@ -2052,29 +2304,49 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                 >
                   <div>
                     <strong>{item.name}</strong>
-                    <small>{money(item.price)}</small>
+                    <small>
+                      {item.category} · {money(item.price)}
+                    </small>
                   </div>
                   <button
                     type="button"
-                    className={`mah-pos-btn ${stopped ? 'success' : 'danger'}`}
+                    className={`mah-pos-btn ${stopped ? 'success' : 'ghost'}`}
                     disabled={busy}
-                    onClick={() =>
-                      void run(
-                        stopped
-                          ? 'clearStopListEntry'
-                          : 'addStopListEntry',
-                        { menuItemId: item.id, idempotencyKey: uuid() },
-                        stopped
-                          ? 'Блюдо снова доступно'
-                          : 'Блюдо добавлено в стоп-лист',
-                      )
-                    }
+                    onClick={() => {
+                      if (stopped) {
+                        void run(
+                          'clearStopListEntry',
+                          { menuItemId: item.id, idempotencyKey: uuid() },
+                          'Блюдо снова доступно',
+                        );
+                        return;
+                      }
+                      setPendingAction({
+                        title: `Убрать «${item.name}» из меню?`,
+                        description:
+                          'Блюдо станет недоступно для добавления в новые заказы.',
+                        command: 'addStopListEntry',
+                        payload: {
+                          menuItemId: item.id,
+                          idempotencyKey: uuid(),
+                        },
+                        success: 'Блюдо добавлено в стоп-лист',
+                        returnTo: 'stop-list',
+                        danger: true,
+                      });
+                      setSheet('confirm');
+                    }}
                   >
-                    {stopped ? 'Вернуть' : 'Нет в наличии'}
+                    {stopped ? 'Вернуть в меню' : 'Убрать из меню'}
                   </button>
                 </div>
               );
             })}
+            {stopListItems.length === 0 && (
+              <div className="mah-pos-empty-lines compact">
+                По вашему запросу ничего не найдено
+              </div>
+            )}
           </div>
         </Sheet>
       )}
@@ -2400,6 +2672,37 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
               )}
             </div>
           </div>
+          {session.staff.role === 'ADMIN' && (
+            <div className="mah-pos-sheet-section">
+              <div className="mah-pos-day-cash">
+                <div className="mah-pos-day-cash-head">
+                  <div>
+                    <span>Касса за день</span>
+                    <small>
+                      {new Intl.DateTimeFormat('ru-KZ', {
+                        day: 'numeric',
+                        month: 'long',
+                      }).format(new Date(now))}
+                    </small>
+                  </div>
+                  <strong>{money(dayCashSummary.totalMicros)}</strong>
+                </div>
+                <div className="mah-pos-day-cash-split">
+                  <div>
+                    <span>Наличными</span>
+                    <strong>{money(dayCashSummary.cashMicros)}</strong>
+                  </div>
+                  <div>
+                    <span>Безналичными</span>
+                    <strong>{money(dayCashSummary.cashlessMicros)}</strong>
+                  </div>
+                </div>
+                <small className="mah-pos-day-cash-note">
+                  Успешных оплат: {dayCashSummary.paymentCount}
+                </small>
+              </div>
+            </div>
+          )}
           <div className="mah-pos-form">
             {!activeShift ? (
               <button

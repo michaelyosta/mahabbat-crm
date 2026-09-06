@@ -9,6 +9,7 @@ import { verifyInternalRouteBodySignature } from 'src/logic-functions/utils/maha
 import {
   authenticatePosStaff,
   getAuthenticatedPosContext,
+  refreshPosSessionActivity,
   revokePosSession,
 } from 'src/pos/pos-auth';
 import type { AuthenticatePosStaffPayload } from 'src/pos/pos-auth';
@@ -69,11 +70,30 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
     return response(result.body, result.status);
   }
 
+  // A valid user command is POS activity. Extend the idle deadline before
+  // dispatch so a command made near the old deadline cannot succeed and then
+  // immediately eject the employee on the following data refresh. Background
+  // REST polling goes through the standalone gateway and does not touch it.
+  const activeContext = await refreshPosSessionActivity(
+    client,
+    authenticated.context,
+  );
+
+  if (command === 'refreshPosSession') {
+    return response(
+      {
+        sessionId: activeContext.sessionId,
+        expiresAt: activeContext.expiresAt,
+      },
+      200,
+    );
+  }
+
   const result = await dispatchPosCommand(
     client,
     command,
     parsedPayload.data as Record<string, unknown>,
-    authenticated.context,
+    activeContext,
   );
 
   return response(result.body, result.status);

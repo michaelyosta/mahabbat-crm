@@ -18,6 +18,7 @@ describe('pos permissions', () => {
       'addGuest',
       'addLine',
       'changeLineQuantity',
+      'refreshPosSession',
     ] as const) {
       expect(commandAllowedForRole(command, 'WAITER')).toBe(true);
       expect(commandAllowedForRole(command, 'ADMIN')).toBe(true);

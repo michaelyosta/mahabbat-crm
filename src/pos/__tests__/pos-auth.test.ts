@@ -4,6 +4,8 @@ import {
   authenticatePosStaff,
   getAuthenticatedPosContext,
   hashPosPin,
+  posSessionIdleTtlMs,
+  refreshPosSessionActivity,
   resetPosAuthRateLimiterForTests,
   revokePosSession,
   verifyPosPin,
@@ -118,6 +120,34 @@ describe('POS authentication context', () => {
       expect(context.context.role).toBe('WAITER');
       expect(context.context.terminalId).toBe('POS-1');
     }
+  });
+
+  it('uses a configurable idle timeout and falls back safely', () => {
+    expect(posSessionIdleTtlMs()).toBe(15 * 60 * 1000);
+    expect(posSessionIdleTtlMs('30')).toBe(30 * 60 * 1000);
+    expect(posSessionIdleTtlMs('0')).toBe(15 * 60 * 1000);
+    expect(posSessionIdleTtlMs('not-a-number')).toBe(15 * 60 * 1000);
+  });
+
+  it('restarts the idle countdown after an authenticated POS action', async () => {
+    const db = new FakeAuthDb();
+    db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
+    const login = await authenticatePosStaff(db, { pin: '1234' });
+    const token = (login.body as Record<string, unknown>).sessionToken as string;
+    const authenticated = await getAuthenticatedPosContext(db, token);
+    expect(authenticated.ok).toBe(true);
+    if (!authenticated.ok) return;
+
+    const actionAt = new Date('2026-08-22T12:00:00.000Z');
+    const refreshed = await refreshPosSessionActivity(
+      db,
+      authenticated.context,
+      actionAt,
+      15 * 60 * 1000,
+    );
+
+    expect(refreshed.expiresAt).toBe('2026-08-22T12:15:00.000Z');
+    expect(db.posSessions[0].expiresAt).toBe(refreshed.expiresAt);
   });
 
   it('derives ADMIN from PosStaff and never accepts a client role', async () => {

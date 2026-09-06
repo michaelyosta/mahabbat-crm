@@ -4,8 +4,18 @@ import {
   commandError,
   formatMicrosForInput,
   formatNegativeTimer,
+  isReservationDraftReady,
+  isSyntheticPosRecord,
+  isSyntheticPosStaffId,
+  isSyntheticPosValue,
   isOverdueReservation,
   parseMoneyInputToMicros,
+  posLineQuantityState,
+  sortPosMenu,
+  sortPosTables,
+  sortPosZones,
+  summarizePosDayPayments,
+  tableDisplayName,
   tableVisualState,
 } from 'src/front-components/pos-ui.helpers';
 
@@ -87,5 +97,156 @@ describe('POS UI presentation helpers', () => {
     expect(commandError({ body: { code: 'COMMAND_FORBIDDEN' } })).toBe(
       'Действие доступно только администратору',
     );
+  });
+
+  it('summarizes only successful visible-order payments for the local day', () => {
+    const now = new Date(2026, 7, 26, 12).getTime();
+    const today = new Date(2026, 7, 26, 9).toISOString();
+    const yesterday = new Date(2026, 7, 25, 23, 59).toISOString();
+    const summary = summarizePosDayPayments({
+      now,
+      orders: [{ id: 'review-order' }],
+      payments: [
+        {
+          id: 'cash',
+          orderId: 'review-order',
+          status: 'SUCCESS',
+          createdAt: today,
+          paymentMethodTypeSnapshot: 'CASH',
+          amount: { amountMicros: 12_000_000_000 },
+        },
+        {
+          id: 'card',
+          orderId: 'review-order',
+          status: 'SUCCESS',
+          createdAt: today,
+          paymentMethodTypeSnapshot: 'CARD',
+          amount: { amountMicros: 8_500_000_000 },
+        },
+        {
+          id: 'rejected',
+          orderId: 'review-order',
+          status: 'REJECTED',
+          createdAt: today,
+          paymentMethodTypeSnapshot: 'CASH',
+          amount: { amountMicros: 99_000_000_000 },
+        },
+        {
+          id: 'old',
+          orderId: 'review-order',
+          status: 'SUCCESS',
+          createdAt: yesterday,
+          paymentMethodTypeSnapshot: 'CASH',
+          amount: { amountMicros: 7_000_000_000 },
+        },
+        {
+          id: 'acceptance',
+          orderId: 'hidden-order',
+          status: 'SUCCESS',
+          createdAt: today,
+          paymentMethodTypeSnapshot: 'CASH',
+          amount: { amountMicros: 1_000_000_000 },
+        },
+      ],
+    });
+
+    expect(summary).toEqual({
+      totalMicros: 20_500_000_000,
+      cashMicros: 12_000_000_000,
+      cashlessMicros: 8_500_000_000,
+      paymentCount: 2,
+    });
+  });
+
+  it('keeps acceptance fixtures out of the human POS presentation', () => {
+    expect(isSyntheticPosValue('INV-1787277711610 POS zone')).toBe(true);
+    expect(isSyntheticPosValue('Inventory Acceptance')).toBe(true);
+    expect(isSyntheticPosValue('Missing Recipe')).toBe(true);
+    expect(isSyntheticPosValue('Салат (проверка)')).toBe(true);
+    expect(isSyntheticPosRecord({ id: 'table', layout: 'acceptance-only' })).toBe(
+      true,
+    );
+
+    expect(isSyntheticPosValue('Основной зал')).toBe(false);
+    expect(isSyntheticPosValue('Салат «Цезарь»')).toBe(false);
+    expect(isSyntheticPosValue('Тестовая нарезка')).toBe(true);
+    expect(isSyntheticPosValue('Демо официант')).toBe(true);
+    expect(
+      isSyntheticPosStaffId('a75d336d-ed90-4ee0-abd5-f2326ae4d21f'),
+    ).toBe(true);
+    expect(isSyntheticPosStaffId('review-staff')).toBe(false);
+  });
+
+  it('uses a restaurant-facing table name when one is configured', () => {
+    expect(tableDisplayName({ id: '1', number: '3' })).toBe('Стол 3');
+    expect(tableDisplayName({ id: '2', number: 'VIP 1' })).toBe('VIP 1');
+    expect(
+      tableDisplayName({ id: '3', number: '7', name: 'Стол у окна' }),
+    ).toBe('Стол у окна');
+  });
+
+  it('keeps review navigation and menu in an operational order', () => {
+    expect(
+      sortPosZones([
+        { id: 'terrace', name: 'Летняя терраса' },
+        { id: 'vip', name: 'VIP' },
+        { id: 'main', name: 'Основной зал' },
+      ]).map((row) => row.name),
+    ).toEqual(['Основной зал', 'VIP', 'Летняя терраса']);
+
+    expect(
+      sortPosTables([
+        { id: '10', number: '10' },
+        { id: '2', number: '2' },
+        { id: '1', number: '1' },
+      ]).map((row) => row.number),
+    ).toEqual(['1', '2', '10']);
+
+    expect(
+      sortPosMenu([
+        { id: 'tea', category: 'Напитки', name: 'Чай' },
+        { id: 'plov', category: 'Горячее', name: 'Плов' },
+        { id: 'kebab', category: 'Шашлыки', name: 'Люля-кебаб' },
+      ]).map((row) => row.id),
+    ).toEqual(['kebab', 'plov', 'tea']);
+  });
+
+  it('requires a table, time and guest contact for a review booking', () => {
+    const base = {
+      tableId: 'table-1',
+      scheduledAt: '2026-08-23T19:30',
+      guestName: 'Айдар',
+      phone: '',
+    };
+
+    expect(isReservationDraftReady(base)).toBe(true);
+    expect(isReservationDraftReady({ ...base, guestName: '', phone: '+7 700 000 00 00' })).toBe(true);
+    expect(isReservationDraftReady({ ...base, tableId: '' })).toBe(false);
+    expect(isReservationDraftReady({ ...base, scheduledAt: '' })).toBe(false);
+    expect(isReservationDraftReady({ ...base, guestName: '', phone: '' })).toBe(false);
+  });
+
+  it('keeps sent kitchen quantities honest in the line controls', () => {
+    expect(posLineQuantityState(1, 1)).toEqual({
+      quantity: 1,
+      sentQuantity: 1,
+      unsentQuantity: 0,
+      fullySent: true,
+      canDecrease: false,
+    });
+    expect(posLineQuantityState(2, 1)).toEqual({
+      quantity: 2,
+      sentQuantity: 1,
+      unsentQuantity: 1,
+      fullySent: false,
+      canDecrease: true,
+    });
+    expect(posLineQuantityState(1, 0)).toEqual({
+      quantity: 1,
+      sentQuantity: 0,
+      unsentQuantity: 1,
+      fullySent: false,
+      canDecrease: false,
+    });
   });
 });

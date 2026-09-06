@@ -3,10 +3,10 @@
 FROM node:24-alpine AS web-build
 WORKDIR /app
 
-COPY mahabbat-app/src ./mahabbat-app/src
-COPY mahabbat-app/pos-standalone/web/package.json mahabbat-app/pos-standalone/web/package-lock.json ./mahabbat-app/pos-standalone/web/
-COPY mahabbat-app/pos-standalone/web/index.html mahabbat-app/pos-standalone/web/vite.config.ts ./mahabbat-app/pos-standalone/web/
-COPY mahabbat-app/pos-standalone/web/src ./mahabbat-app/pos-standalone/web/src
+COPY src ./mahabbat-app/src
+COPY pos-standalone/web/package.json pos-standalone/web/package-lock.json ./mahabbat-app/pos-standalone/web/
+COPY pos-standalone/web/index.html pos-standalone/web/vite.config.ts ./mahabbat-app/pos-standalone/web/
+COPY pos-standalone/web/src ./mahabbat-app/pos-standalone/web/src
 
 WORKDIR /app/mahabbat-app/pos-standalone/web
 # standalone web has a bounded, exact npm lock so Docker and local package builds agree
@@ -17,7 +17,7 @@ RUN npm run build
 FROM node:24-alpine AS runtime
 WORKDIR /app
 COPY --from=web-build /app/mahabbat-app/pos-standalone/dist-web ./dist-web
-COPY mahabbat-app/pos-standalone/server ./server
+COPY pos-standalone/server ./server
 ENV NODE_ENV=production
 ENV POS_STATIC_DIR=/app/dist-web
 ENV POS_GATEWAY_PORT=3100

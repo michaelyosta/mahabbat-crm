@@ -1,6 +1,7 @@
 export const POS_COMMANDS = [
   'authenticatePosStaff',
   'logoutPosStaff',
+  'refreshPosSession',
   'openShift',
   'closeShift',
   'openOrder',
@@ -43,6 +44,7 @@ export type PosActor = {
 export const POS_AUTH_COMMANDS = new Set<PosCommand>([
   'authenticatePosStaff',
   'logoutPosStaff',
+  'refreshPosSession',
 ]);
 
 const WAITER_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(

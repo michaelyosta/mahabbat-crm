@@ -354,7 +354,7 @@ const main = async () => {
   if (activeAcceptanceOrders.length > 0) {
     throw new Error('POS Acceptance tables are still occupied after reconciliation.');
   }
-  const menu = menuItems.map((m) => m.id);
+  const menu = menuItems.filter((item) => item.isActive !== false).map((item) => item.id);
 
   check('POS menu fixtures present', menu.length >= 2, `${menu.length} menu items`);
   if (menu.length < 2) throw new Error('POS menu fixtures are missing.');

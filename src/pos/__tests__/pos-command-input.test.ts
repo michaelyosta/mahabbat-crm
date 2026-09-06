@@ -87,6 +87,7 @@ describe('parseCommandPayload', () => {
         cardIdentifier: 'CARD-1',
       }).ok,
     ).toBe(false);
+    expect(parseCommandPayload('refreshPosSession', {}).ok).toBe(true);
   });
 
   it('rejects invalid quantities', () => {

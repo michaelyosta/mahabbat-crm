@@ -7,7 +7,8 @@
  *   MAHABBAT_API_URL=http://localhost:2020 MAHABBAT_API_KEY=<key> node scripts/accept-inventory.mjs
  *
  * The workspace key and generated PINs are process-local and are never printed.
- * The run uses an isolated INV-* namespace and leaves its audit fixtures intact.
+ * The run uses an isolated INV-* namespace. Ledger/order audit records remain
+ * intact, while human-facing POS fixtures are deactivated before exit.
  */
 import { randomUUID, scryptSync } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -68,6 +69,20 @@ const restBatch = async (apiUrl, apiKey, plural, rows) => {
   const body = await parseBody(response);
   if (!response.ok) throw new Error(`POST /rest/batch/${plural} -> ${response.status}`);
   return body;
+};
+
+const restPatch = async (apiUrl, apiKey, plural, recordId, patch) => {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const response = await fetch(`${apiUrl}/rest/${plural}/${recordId}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (response.ok) return;
+    if (response.status !== 429 || attempt === 5) throw new Error(`PATCH /rest/${plural}/${recordId} -> ${response.status}`);
+    const retryAfter = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
+    await delay(Number.isFinite(retryAfter) ? Math.max(1_000, retryAfter * 1_000) : 1_000 * (attempt + 1));
+  }
 };
 
 const pinHash = (pin) => {
@@ -190,8 +205,15 @@ const main = async () => {
   check('server reachable', Boolean(health?.ok), `status=${health?.status ?? 'none'}`);
   if (!health?.ok) throw new Error('server is not reachable');
 
+  const visibilityFixtures = [];
+  const trackVisibilityFixture = (plural, recordId) => visibilityFixtures.push({ plural, recordId });
+
+  try {
+
   const adminCredentials = await ensureStaff(apiUrl, apiKey, 'ADMIN', `${prefix} admin`);
   const waiterCredentials = await ensureStaff(apiUrl, apiKey, 'WAITER', `${prefix} waiter`);
+  trackVisibilityFixture('posStaffs', adminCredentials.staffId);
+  trackVisibilityFixture('posStaffs', waiterCredentials.staffId);
   const admin = await authenticate(apiUrl, apiKey, adminCredentials, `${prefix}-admin`);
   const waiter = await authenticate(apiUrl, apiKey, waiterCredentials, `${prefix}-waiter`);
   check('synthetic staff role contract', admin.role === 'ADMIN' && waiter.role === 'WAITER');
@@ -215,8 +237,10 @@ const main = async () => {
   }
   const menuId = id();
   await restBatch(apiUrl, apiKey, 'posMenuItems', [{ id: menuId, name: `${prefix} Salad`, category: 'Inventory Acceptance', price: { amountMicros: 100_000_000, currencyCode: 'KZT' }, isActive: true }]);
+  trackVisibilityFixture('posMenuItems', menuId);
   const missingMenuId = id();
   await restBatch(apiUrl, apiKey, 'posMenuItems', [{ id: missingMenuId, name: `${prefix} Missing Recipe`, category: 'Inventory Acceptance', price: { amountMicros: 1_000_000, currencyCode: 'KZT' }, isActive: true }]);
+  trackVisibilityFixture('posMenuItems', missingMenuId);
   check('isolated Inventory and POS fixtures created', true, prefix);
 
   const receiptKey = id();
@@ -299,8 +323,11 @@ const main = async () => {
   const tableId = id();
   const cashMethodId = id();
   await restBatch(apiUrl, apiKey, 'posZones', [{ id: zoneId, name: `${prefix} POS zone`, isActive: true }]);
+  trackVisibilityFixture('posZones', zoneId);
   await restBatch(apiUrl, apiKey, 'posTables', [{ id: tableId, number: `${prefix}-1`, zoneId, isActive: true, layout: 'inventory-acceptance' }]);
+  trackVisibilityFixture('posTables', tableId);
   await restBatch(apiUrl, apiKey, 'posPaymentMethods', [{ id: cashMethodId, name: `${prefix} Cash`, methodType: 'CASH', isActive: true, sortOrder: 99 }]);
+  trackVisibilityFixture('posPaymentMethods', cashMethodId);
   check('POS bridge fixtures are isolated', !zones.some((row) => row.id === zoneId) && !tables.some((row) => row.id === tableId) && !methods.some((row) => row.id === cashMethodId));
 
   const normalOrder = await createPaidOrder(apiUrl, apiKey, admin, tableId, menuId, cashMethodId, 10, `${prefix} guest`);
@@ -346,6 +373,19 @@ const main = async () => {
   if (failed.length > 0) {
     console.log(`Failed checks: ${failed.map((row) => row.label).join('; ')}`);
     process.exitCode = 1;
+  }
+  } finally {
+    const cleanupFailures = [];
+    for (const fixture of [...visibilityFixtures].reverse()) {
+      try {
+        await restPatch(apiUrl, apiKey, fixture.plural, fixture.recordId, { isActive: false });
+      } catch (error) {
+        cleanupFailures.push(`${fixture.plural}/${fixture.recordId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (cleanupFailures.length > 0) {
+      throw new Error(`Could not deactivate human-facing acceptance fixtures: ${cleanupFailures.join('; ')}`);
+    }
   }
 };
 

@@ -29,49 +29,79 @@ const money = (tenge) => ({
   currencyCode: CURRENCY,
 });
 
-const ZONES = ['Основной зал', 'Зал у окна', 'Терраса', 'VIP', 'POS Acceptance'];
+const ZONES = [
+  { name: 'Основной зал', isActive: true },
+  { name: 'VIP', isActive: true },
+  { name: 'Летняя терраса', isActive: true },
+  // A known deterministic legacy seed record. Keep it instead of deleting it,
+  // but do not compete with the three review zones.
+  { name: 'Зал у окна', isActive: false },
+  { name: 'POS Acceptance', isActive: true },
+];
 
-
-const zones = ZONES.map((name, i) => ({
+const zones = ZONES.map((zone, i) => ({
   id: idFor('posZone', i),
-  name,
-  isActive: true,
+  ...zone,
 }));
 
 const TABLES = [
-  ['T1', 0], ['T2', 0], ['T3', 0], ['T4', 0],
-  ['T5', 1], ['T6', 1], ['T7', 1],
-  ['T8', 2], ['T9', 2], ['T10', 2],
-  ['T11', 3], ['T12', 3],
-  ['POS-A1', 4], ['POS-A2', 4], ['POS-A3', 4],
+  ['1', 0, 'Стол 1', true],
+  ['2', 0, 'Стол 2', true],
+  ['3', 0, 'Стол 3', true],
+  ['4', 0, 'Стол 4', true],
+  ['5', 0, 'Стол 5', true],
+  ['6', 0, 'Стол 6', true],
+  ['VIP 1', 1, 'VIP 1', true],
+  ['VIP 2', 1, 'VIP 2', true],
+  ['7', 2, 'Стол 7', true],
+  ['8', 2, 'Стол 8', true],
+  ['9', 2, 'Стол 9', true],
+  ['10', 3, 'Стол 10', false],
+  ['POS-A1', 4, null, true],
+  ['POS-A2', 4, null, true],
+  ['POS-A3', 4, null, true],
 ];
 
-const tables = TABLES.map(([number, zoneIndex], i) => ({
+const tables = TABLES.map(([number, zoneIndex, name, isActive], i) => ({
   id: idFor('posTable', i),
   number,
+  ...(name ? { name } : {}),
   zoneId: zones[zoneIndex].id,
-  isActive: true,
+  isActive,
   ...(zoneIndex === 4 ? { layout: 'acceptance-only' } : {}),
 }));
 
 const MENU = [
+  ['Люля-кебаб', 'Шашлыки', 4300],
+  ['Шашлык из баранины', 'Шашлыки', 4800],
+  ['Шашлык из курицы', 'Шашлыки', 3900],
+  ['Стейк из говядины', 'Шашлыки', 6200],
   ['Манты', 'Горячее', 3800],
   ['Плов', 'Горячее', 3500],
   ['Бешбармак', 'Горячее', 5500],
   ['Лагман', 'Горячее', 3200],
-  ['Шашлык из баранины', 'Гриль', 4800],
-  ['Люля-кебаб', 'Гриль', 4300],
+  ['Куырдак', 'Горячее', 4200],
   ['Салат «Цезарь»', 'Салаты', 2900],
   ['Салат «Алматы»', 'Салаты', 2600],
+  ['Ачичук', 'Салаты', 1900],
+  ['Греческий салат', 'Салаты', 2500],
   ['Суп «Сорпа»', 'Супы', 2400],
   ['Кеспе', 'Супы', 2200],
-  ['Баурсаки', 'Выпечка', 1200],
+  ['Чечевичный суп', 'Супы', 2300],
+  ['Борщ', 'Супы', 2500],
+  ['Хумус', 'Закуски', 1800],
+  ['Сырное ассорти', 'Закуски', 3900],
   ['Самса с мясом', 'Выпечка', 1400],
+  ['Баурсаки', 'Выпечка', 1200],
   ['Медовик', 'Десерты', 1700],
+  ['Наполеон', 'Десерты', 1800],
   ['Айран', 'Напитки', 600],
   ['Зелёный чай', 'Напитки', 700],
+  ['Чёрный чай', 'Напитки', 700],
   ['Кофе американо', 'Напитки', 1300],
   ['Морс', 'Напитки', 900],
+  ['Кола', 'Напитки', 800],
+  ['Вода', 'Напитки', 500],
 ];
 
 const menuItems = MENU.map(([name, category, price], i) => ({
@@ -173,7 +203,7 @@ function validate() {
     if (!table.number || tableNumbers.has(table.number)) errors.push(`tables[${i}]: duplicate or empty number`);
     tableNumbers.add(table.number);
     if (!zoneIds.has(table.zoneId)) errors.push(`tables[${i}]: bad zoneId`);
-    if (table.isActive !== true) errors.push(`tables[${i}]: isActive must be true`);
+    if (typeof table.isActive !== 'boolean') errors.push(`tables[${i}]: isActive must be boolean`);
   });
 
   menuItems.forEach((item, i) => {
@@ -312,10 +342,10 @@ async function main() {
   if (!health?.ok) throw new Error(`Twenty server is not reachable at ${apiUrl}/healthz`);
 
   console.log('');
-  await sync(apiUrl, getEnv().apiKey, 'PosZone', 'posZones', zones);
-  await sync(apiUrl, getEnv().apiKey, 'PosTable', 'posTables', tables);
-  await sync(apiUrl, getEnv().apiKey, 'PosMenuItem', 'posMenuItems', menuItems);
-  await sync(apiUrl, getEnv().apiKey, 'PaymentMethod', 'posPaymentMethods', paymentMethods);
+  await sync(apiUrl, getEnv().apiKey, 'PosZone', 'posZones', zones, { reconcile: true });
+  await sync(apiUrl, getEnv().apiKey, 'PosTable', 'posTables', tables, { reconcile: true });
+  await sync(apiUrl, getEnv().apiKey, 'PosMenuItem', 'posMenuItems', menuItems, { reconcile: true });
+  await sync(apiUrl, getEnv().apiKey, 'PaymentMethod', 'posPaymentMethods', paymentMethods, { reconcile: true });
   if (posStaffs.length > 0) {
     await sync(apiUrl, getEnv().apiKey, 'PosStaff', 'posStaffs', posStaffs, { reconcile: true });
   }

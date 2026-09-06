@@ -23,6 +23,148 @@ export type PosTableVisualState =
   | 'precheck'
   | 'payment';
 
+const SYNTHETIC_POS_MARKERS = [
+  /^(?:INV|FIXTURE|TECH|ATOMIC)(?:[-_\s]|$)/i,
+  /\b(?:POS|Inventory)\s+Acceptance\b/i,
+  /\bMissing\s+Recipe\b/i,
+  /(?:^|[\s(])(?:проверка|тест[а-яё]*|демо[а-яё]*|test|demo|acceptance|fixture|synthetic|smoke)(?:[\s)]|$)/i,
+];
+
+const SYNTHETIC_POS_STAFF_IDS = new Set([
+  'a75d336d-ed90-4ee0-abd5-f2326ae4d21f',
+  '4b3a3c52-0ba4-446b-af12-67f87a2f6bd4',
+]);
+
+export const isSyntheticPosValue = (value: unknown): boolean => {
+  const text = String(value ?? '').trim();
+  return text.length > 0 && SYNTHETIC_POS_MARKERS.some((marker) => marker.test(text));
+};
+
+export const isSyntheticPosRecord = (row: PosRow): boolean =>
+  row.layout === 'acceptance-only' ||
+  [
+    row.name,
+    row.number,
+    row.category,
+    row.label,
+    row.guestName,
+    row.displayName,
+    row.notes,
+  ].some(isSyntheticPosValue);
+
+export const isSyntheticPosStaffId = (value: unknown): boolean =>
+  SYNTHETIC_POS_STAFF_IDS.has(String(value ?? ''));
+
+export const tableDisplayName = (table?: PosRow): string => {
+  const explicit = String(table?.name ?? '').trim();
+  if (explicit) return explicit;
+  const number = String(table?.number ?? '').trim();
+  if (!number) return 'Стол';
+  return /^(?:стол|vip)\b/i.test(number) ? number : `Стол ${number}`;
+};
+
+const REVIEW_ZONE_ORDER = ['Основной зал', 'VIP', 'Летняя терраса'];
+const REVIEW_MENU_CATEGORY_ORDER = [
+  'Шашлыки',
+  'Горячее',
+  'Салаты',
+  'Супы',
+  'Закуски',
+  'Напитки',
+  'Десерты',
+  'Выпечка',
+];
+
+const russianNaturalCompare = (left: unknown, right: unknown): number =>
+  String(left ?? '').localeCompare(String(right ?? ''), 'ru', {
+    numeric: true,
+    sensitivity: 'base',
+  });
+
+const preferredRank = (value: unknown, order: string[]): number => {
+  const rank = order.indexOf(String(value ?? ''));
+  return rank === -1 ? order.length : rank;
+};
+
+export const sortPosZones = (rows: PosRow[]): PosRow[] =>
+  [...rows].sort(
+    (left, right) =>
+      preferredRank(left.name, REVIEW_ZONE_ORDER) -
+        preferredRank(right.name, REVIEW_ZONE_ORDER) ||
+      russianNaturalCompare(left.name, right.name),
+  );
+
+export const sortPosTables = (rows: PosRow[]): PosRow[] =>
+  [...rows].sort((left, right) =>
+    russianNaturalCompare(tableDisplayName(left), tableDisplayName(right)),
+  );
+
+export const sortPosMenu = (rows: PosRow[]): PosRow[] =>
+  [...rows].sort(
+    (left, right) =>
+      preferredRank(left.category, REVIEW_MENU_CATEGORY_ORDER) -
+        preferredRank(right.category, REVIEW_MENU_CATEGORY_ORDER) ||
+      russianNaturalCompare(left.name, right.name),
+  );
+
+export const isReservationDraftReady = ({
+  tableId,
+  scheduledAt,
+  guestName,
+  phone,
+}: {
+  tableId?: string | null;
+  scheduledAt?: string | null;
+  guestName?: string | null;
+  phone?: string | null;
+}): boolean => {
+  const hasContact = Boolean(String(guestName ?? '').trim() || String(phone ?? '').trim());
+  const scheduled = String(scheduledAt ?? '').trim();
+
+  return Boolean(
+    String(tableId ?? '').trim() &&
+      scheduled &&
+      Number.isFinite(new Date(scheduled).getTime()) &&
+      hasContact,
+  );
+};
+
+export const posLineQuantityState = (
+  quantityValue: unknown,
+  kitchenSentQuantityValue: unknown,
+): {
+  quantity: number;
+  sentQuantity: number;
+  unsentQuantity: number;
+  fullySent: boolean;
+  canDecrease: boolean;
+} => {
+  const parsedQuantity = Number(quantityValue);
+  const parsedSentQuantity = Number(kitchenSentQuantityValue);
+  const quantity = Math.max(
+    1,
+    Number.isFinite(parsedQuantity) ? Math.trunc(parsedQuantity) : 1,
+  );
+  const sentQuantity = Math.min(
+    quantity,
+    Math.max(
+      0,
+      Number.isFinite(parsedSentQuantity)
+        ? Math.trunc(parsedSentQuantity)
+        : 0,
+    ),
+  );
+  const unsentQuantity = quantity - sentQuantity;
+
+  return {
+    quantity,
+    sentQuantity,
+    unsentQuantity,
+    fullySent: sentQuantity > 0 && unsentQuantity === 0,
+    canDecrease: quantity > Math.max(1, sentQuantity),
+  };
+};
+
 const POS_ERROR_MESSAGES: Record<string, string> = {
   ROUTE_UNAVAILABLE: 'Нет связи с сервером. Проверьте сеть и попробуйте снова',
   COMMAND_FORBIDDEN: 'Действие доступно только администратору',
@@ -104,6 +246,61 @@ export const money = (
   `${new Intl.NumberFormat('ru-KZ', { maximumFractionDigits: 0 }).format(
     Math.round(micros(value) / 1_000_000),
   )} ₸`;
+
+export const summarizePosDayPayments = ({
+  payments,
+  orders,
+  now = Date.now(),
+}: {
+  payments: PosRow[];
+  orders: PosRow[];
+  now?: number;
+}): {
+  totalMicros: number;
+  cashMicros: number;
+  cashlessMicros: number;
+  paymentCount: number;
+} => {
+  const currentDay = new Date(now);
+  const visibleOrderIds = new Set(orders.map((order) => String(order.id)));
+  let cashMicros = 0;
+  let cashlessMicros = 0;
+  let paymentCount = 0;
+
+  for (const payment of payments) {
+    const createdAt = new Date(String(payment.createdAt ?? ''));
+    const amountMicros = micros(payment.amount);
+    const isToday =
+      Number.isFinite(createdAt.getTime()) &&
+      createdAt.getFullYear() === currentDay.getFullYear() &&
+      createdAt.getMonth() === currentDay.getMonth() &&
+      createdAt.getDate() === currentDay.getDate();
+
+    if (
+      payment.status !== 'SUCCESS' ||
+      !visibleOrderIds.has(String(payment.orderId ?? '')) ||
+      !isToday ||
+      !Number.isSafeInteger(amountMicros) ||
+      amountMicros <= 0
+    ) {
+      continue;
+    }
+
+    if (payment.paymentMethodTypeSnapshot === 'CASH') {
+      cashMicros += amountMicros;
+    } else {
+      cashlessMicros += amountMicros;
+    }
+    paymentCount += 1;
+  }
+
+  return {
+    totalMicros: cashMicros + cashlessMicros,
+    cashMicros,
+    cashlessMicros,
+    paymentCount,
+  };
+};
 
 export const dateTime = (value?: string | null): string =>
   value
