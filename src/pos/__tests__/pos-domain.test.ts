@@ -532,6 +532,60 @@ describe('pos domain happy path', () => {
     expect((order.subtotal as { amountMicros: number }).amountMicros).toBe(1_500_000_000);
   });
 
+  it('removes the last unsent unit without closing the table order', async () => {
+    const db = dbWithBaseline();
+    await executeOpenShift(db, { idempotencyKey: key(10) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(11) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(12) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    const added = await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 1, idempotencyKey: key(13) },
+      waiter,
+    );
+    const lineId = (added.body as { lineId: string }).lineId;
+
+    const removed = await dispatchPosCommand(db, 'removeUnsentLine', { lineId }, waiter);
+    const replay = await dispatchPosCommand(db, 'removeUnsentLine', { lineId }, waiter);
+    const line = db.rows.posOrderLines.find((row) => row.id === lineId)!;
+    const order = db.rows.posOrders.find((row) => row.id === orderId)!;
+    const guestRow = db.rows.posOrderGuests.find((row) => row.id === guestId)!;
+
+    expect(removed.status).toBe(201);
+    expect(replay.status).toBe(200);
+    expect(line.status).toBe('VOIDED');
+    expect(line.voidReason).toBe('REMOVED_BEFORE_KITCHEN');
+    expect(order.status).toBe('IN_PROGRESS');
+    expect(order.subtotal).toBeNull();
+    expect(order.total).toBeNull();
+    expect(guestRow.subtotal).toBeNull();
+  });
+
+  it('does not remove a line after it has been sent to the kitchen', async () => {
+    const db = dbWithBaseline();
+    await executeOpenShift(db, { idempotencyKey: key(20) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(21) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(22) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    const added = await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 1, idempotencyKey: key(23) },
+      waiter,
+    );
+    const lineId = (added.body as { lineId: string }).lineId;
+    await executePrintKitchenTicket(db, { orderId, idempotencyKey: key(24) }, waiter);
+
+    const removed = await dispatchPosCommand(db, 'removeUnsentLine', { lineId }, waiter);
+
+    expect(removed.status).toBe(400);
+    expect((removed.body as { code: string }).code).toBe('LINE_ALREADY_SENT');
+    expect(db.rows.posOrderLines.find((row) => row.id === lineId)?.status).toBe('ACTIVE');
+  });
+
   it('closes a shift but leaves orders open and owned', async () => {
     const db = dbWithBaseline();
     const shift = await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);

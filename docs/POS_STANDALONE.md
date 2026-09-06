@@ -229,7 +229,30 @@ docker compose -f packages/twenty-docker/docker-compose.yml -f docker-compose.lo
   (add hosts file on terminals or use LAN IP — never `localhost` on terminals)
 - Gateway env `TWENTY_API_URL=http://server:3000` when running in Docker
 - Kiosk: Windows login > Edge/Chrome auto-start `--kiosk http://pos.mahabbat.local:3100 --fullscreen` (fullscreen is aesthetic only — POS works in normal window too)
-- Responsive: verified 1920×1080, 1366×768. Standalone uses full viewport; no body scroll; no Twenty sidebar/header reserved.
+- Responsive: target viewports are 1920×1080, 1366×768 and restaurant terminals at 1024×768. After a table is selected, the table map collapses and the menu uses the full central workspace; `← Столы` returns to the map.
+
+### Windows touch keyboard on POS terminals
+
+The web page cannot launch `TabTip.exe` directly because Chrome/Edge isolate web
+content from Windows processes. POS text controls therefore use native input
+semantics (`inputMode` and `enterKeyHint`), while Windows owns the keyboard.
+
+Run this once under the same Windows user account that operates each terminal:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/configure-pos-touch-keyboard.ps1
+```
+
+The setup is per-user, idempotent, does not require a custom POS keyboard and
+does not weaken browser security. Verify it without changing the setting:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/configure-pos-touch-keyboard.ps1 -CheckOnly
+```
+
+Restart Edge/Chrome after the first setup. Tapping menu search, stop-list search,
+reservation text fields or payment fields should then open the native Windows
+touch keyboard automatically. Repeat the setup for every Windows terminal user.
 
 ## Browser secret audit
 

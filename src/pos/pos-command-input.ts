@@ -73,6 +73,10 @@ export type ChangeLineQuantityPayload = {
   quantity: number;
 };
 
+export type RemoveUnsentLinePayload = {
+  lineId: string;
+};
+
 export type StopListPayload = {
   menuItemId: string;
   idempotencyKey: string;
@@ -386,6 +390,21 @@ const parseChangeLineQuantity = (
   if (!parsedQuantity.ok) return parsedQuantity;
 
   return { ok: true, data: { lineId, quantity: parsedQuantity.data } };
+};
+
+const parseRemoveUnsentLine = (
+  payload: unknown,
+): ParseResult<RemoveUnsentLinePayload> => {
+  if (typeof payload !== 'object' || payload === null) {
+    return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  }
+
+  const { lineId } = payload as Record<string, unknown>;
+  if (!isUuid(lineId)) {
+    return invalid('INVALID_PAYLOAD', 'lineId must be a UUID');
+  }
+
+  return { ok: true, data: { lineId } };
 };
 
 const parseStopListPayload = (payload: unknown): ParseResult<StopListPayload> => {
@@ -785,6 +804,8 @@ export const parseCommandPayload = <T>(
       return parseAddLine(payload) as unknown as ParseResult<T>;
     case 'changeLineQuantity':
       return parseChangeLineQuantity(payload) as unknown as ParseResult<T>;
+    case 'removeUnsentLine':
+      return parseRemoveUnsentLine(payload) as unknown as ParseResult<T>;
     case 'addStopListEntry':
     case 'clearStopListEntry':
       return parseStopListPayload(payload) as unknown as ParseResult<T>;

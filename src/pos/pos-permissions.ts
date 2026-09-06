@@ -8,6 +8,7 @@ export const POS_COMMANDS = [
   'addGuest',
   'addLine',
   'changeLineQuantity',
+  'removeUnsentLine',
   'addStopListEntry',
   'clearStopListEntry',
   'printKitchenTicket',
