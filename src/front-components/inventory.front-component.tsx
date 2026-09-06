@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { RestApiClient } from 'twenty-client-sdk/rest';
 import { defineFrontComponent } from 'twenty-sdk/define';
 
@@ -6,214 +7,192 @@ import { MAHABBAT_INVENTORY_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER } from 'src/con
 
 const rest = new RestApiClient();
 
+type Row = Record<string, unknown>;
 type Tab = 'balances' | 'receipt' | 'production' | 'transfer' | 'writeoff' | 'counts' | 'recipes' | 'history';
+type ApiEnvelope = { code?: string; message?: string; countId?: string; sessionToken?: string; staff?: unknown; [key: string]: unknown };
+type Session = { sessionToken: string; staff: { id: string; displayName?: string; role: string } };
+type UnitKind = 'MASS' | 'VOLUME' | 'COUNT';
 
 const TABS: Array<{ id: Tab; label: string }> = [
-  { id: 'balances', label: 'Остатки' },
-  { id: 'receipt', label: 'Приход' },
-  { id: 'production', label: 'Производство' },
-  { id: 'transfer', label: 'Перемещение' },
-  { id: 'writeoff', label: 'Списание' },
-  { id: 'counts', label: 'Ревизии' },
-  { id: 'recipes', label: 'Калькуляции' },
-  { id: 'history', label: 'История' },
+  { id: 'balances', label: 'Остатки' }, { id: 'receipt', label: 'Приход' }, { id: 'production', label: 'Производство' },
+  { id: 'transfer', label: 'Перемещение' }, { id: 'writeoff', label: 'Расход' }, { id: 'counts', label: 'Ревизии' },
+  { id: 'recipes', label: 'Калькуляции' }, { id: 'history', label: 'История' },
 ];
+const cardStyle = { border: '1px solid #e5e7eb', borderRadius: 10, padding: 14, background: '#fff' };
+const inputStyle = { width: '100%', boxSizing: 'border-box' as const, padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 7, background: '#fff' };
+const buttonStyle = { padding: '8px 12px', borderRadius: 7, border: '1px solid #cbd5e1', background: '#111827', color: '#fff', cursor: 'pointer', fontWeight: 600 };
+const disabledButtonStyle = { opacity: 0.5, cursor: 'not-allowed' };
+
+const newKey = (): string => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+  const r = Math.floor(Math.random() * 16); const v = c === 'x' ? r : (r & 0x3) | 0x8; return v.toString(16);
+});
+const asArray = (value: unknown, plural: string): Row[] => {
+  if (Array.isArray(value)) return value as Row[];
+  if (!value || typeof value !== 'object') return [];
+  const object = value as Record<string, unknown>;
+  const candidates = [object[plural], object.data, (object.data as Record<string, unknown> | undefined)?.[plural]];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate as Row[];
+    if (candidate && typeof candidate === 'object') {
+      const nested = candidate as Record<string, unknown>;
+      if (Array.isArray(nested.data)) return nested.data as Row[];
+      if (Array.isArray(nested.edges)) return (nested.edges as Array<{ node?: Row }>).map((edge) => edge.node).filter(Boolean) as Row[];
+    }
+  }
+  return [];
+};
+const numberValue = (value: unknown): number => {
+  const parsed = typeof value === 'number' ? value : Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+const parseNumber = (value: string): number => Number(value.replace(',', '.'));
+const isTechnicalFixture = (value: unknown): boolean => /^(?:INV|FIXTURE|TECH|ATOMIC)(?:[-_\s]|$)/i.test(String(value ?? ''));
+const cleanLabel = (value: unknown): string => String(value ?? '').replace(/\s*\((?:проверка|test|demo|acceptance)\)\s*$/i, '').trim();
+const unitKindFor = (item?: Row | null, fallback: UnitKind = 'MASS'): UnitKind => {
+  const explicit = String(item?.unitKind ?? '').toUpperCase();
+  if (explicit === 'MASS' || explicit === 'VOLUME' || explicit === 'COUNT') return explicit;
+  const base = String(item?.baseUnit ?? '').toUpperCase();
+  if (base === 'MILLILITER') return 'VOLUME';
+  if (base === 'PIECE') return 'COUNT';
+  return fallback;
+};
+const unitInputLabel = (item?: Row | null, fallback: UnitKind = 'MASS'): string => unitKindFor(item, fallback) === 'VOLUME' ? 'л' : unitKindFor(item, fallback) === 'COUNT' ? 'шт.' : 'кг';
+const unitPriceLabel = (item?: Row | null, fallback: UnitKind = 'MASS'): string => `₸/${unitKindFor(item, fallback) === 'VOLUME' ? 'л' : unitKindFor(item, fallback) === 'COUNT' ? 'шт.' : 'кг'}`;
+const unitStep = (item?: Row | null, fallback: UnitKind = 'MASS'): string => unitKindFor(item, fallback) === 'COUNT' ? '1' : '0.001';
+const quantityMicros = (value: string, item?: Row | null, fallback: UnitKind = 'MASS'): number => Math.round(parseNumber(value) * (unitKindFor(item, fallback) === 'COUNT' ? 1_000 : 1_000_000));
+const quantityText = (micros: unknown, item?: Row | null, fallback: UnitKind = 'MASS'): string => {
+  const value = numberValue(micros); const kind = unitKindFor(item, fallback);
+  if (kind === 'VOLUME') {
+    const milliliters = value / 1_000; const large = Math.abs(milliliters) >= 1_000;
+    return `${(large ? milliliters / 1_000 : milliliters).toLocaleString('ru-RU', { maximumFractionDigits: 3 })} ${large ? 'л' : 'мл'}`;
+  }
+  if (kind === 'COUNT') return `${(value / 1_000).toLocaleString('ru-RU', { maximumFractionDigits: 3 })} шт.`;
+  const grams = value / 1_000; const large = Math.abs(grams) >= 1_000;
+  return `${(large ? grams / 1_000 : grams).toLocaleString('ru-RU', { maximumFractionDigits: 3 })} ${large ? 'кг' : 'г'}`;
+};
+const priceText = (value: unknown, item?: Row | null, fallback: UnitKind = 'MASS'): string => `${numberValue(value).toLocaleString('ru-RU')} ${unitPriceLabel(item, fallback)}`;
+const totalValueText = (value: unknown): string => `${(numberValue(value) / 1_000).toLocaleString('ru-RU')} ₸`;
+const itemName = (items: Row[], id: string): string => cleanLabel(items.find((item) => String(item.id) === id)?.name) || 'Позиция не найдена';
+const locationName = (locations: Row[], id: string): string => cleanLabel(locations.find((location) => String(location.id) === id)?.name) || 'Точка не найдена';
+const movementLabel = (value: unknown): string => ({
+  RECEIPT: 'Приход', SALE_CONSUMPTION: 'Продажа', PRODUCTION_INPUT: 'Производство: расход ингредиентов',
+  PRODUCTION_OUTPUT: 'Производство: выпуск', WRITE_OFF: 'Расход', TRANSFER_OUT: 'Перемещение: отправлено',
+  TRANSFER_IN: 'Перемещение: принято', INVENTORY_ADJUSTMENT: 'Ревизия: корректировка', PREPARED_VOID_CONSUMPTION: 'Отмена подготовленного заказа',
+}[String(value)] ?? 'Операция');
+const sourceLabel = (value: unknown): string => ({
+  RECEIPT: 'Приход', SALE: 'Продажа', PRODUCTION: 'Производство', TRANSFER: 'Перемещение', REVISION: 'Ревизия',
+  MANUAL: 'Вручную', VOID: 'Отмена заказа',
+}[String(value)] ?? 'Склад');
+const statusLabel = (value: unknown): string => ({ DRAFT: 'Черновик', ACTIVE: 'Активна', POSTED: 'Завершена', FINALIZED: 'Проведена', COMPLETED: 'Проведена' }[String(value)] ?? 'Ревизия');
+const issueTypeLabel = (value: unknown): string => ({ MISSING_RECIPE: 'Не настроена калькуляция', MISSING_LOCATION: 'Не указана точка хранения', INSUFFICIENT_STOCK: 'Недостаточно остатка' }[String(value)] ?? 'Проблема со списанием');
+const messageFor = (value: unknown): string => {
+  const code = typeof value === 'object' && value !== null ? String((value as ApiEnvelope).code ?? '') : '';
+  const map: Record<string, string> = {
+    COMMAND_FORBIDDEN: 'Недостаточно прав администратора.', POS_SESSION_REQUIRED: 'Войдите в склад по PIN администратора.',
+    INVALID_UNIT: 'Неверная единица измерения для этой позиции.', RECIPE_CYCLE: 'Калькуляция создаёт циклическую зависимость.',
+    REVISION_STALE: 'Во время ревизии остатки на этой точке изменились. Обновите данные и начните новую ревизию.', REVISION_IN_PROGRESS: 'Эта ревизия уже обновляется. Подождите и обновите данные.', REVISION_RETRY_REQUIRED: 'Предыдущая попытка не завершилась. Начните новую ревизию для безопасного повторения.', COUNT_STATUS: 'Эта ревизия уже завершена или ещё не начата.', MISSING_RECIPE: 'Для позиции не настроена калькуляция.',
+    INVALID_TRANSFER: 'Нельзя переместить товар в ту же точку хранения.', QUANTITY_OVERFLOW: 'Слишком большое количество.',
+  };
+  if (map[code]) return map[code];
+  if (typeof value === 'object' && value !== null && typeof (value as ApiEnvelope).message === 'string') return String((value as ApiEnvelope).message);
+  return value instanceof Error ? value.message : 'Операция не выполнена. Проверьте данные и повторите попытку.';
+};
+const Field = ({ label, children }: { label: string; children: ReactNode }) => <label style={{ display: 'grid', gap: 5, fontSize: 12, color: '#475467' }}><span>{label}</span>{children}</label>;
+const StockSelect = ({ items, value, onChange, allowEmpty = false }: { items: Row[]; value: string; onChange: (value: string) => void; allowEmpty?: boolean }) => <select value={value} onChange={(event) => onChange(event.target.value)} style={inputStyle}>{allowEmpty && <option value="">Выберите позицию</option>}{items.filter((item) => item.isActive !== false).map((item) => <option key={String(item.id)} value={String(item.id)}>{cleanLabel(item.name)}</option>)}</select>;
+const LocationSelect = ({ locations, value, onChange, allowEmpty = false, disabledId = '' }: { locations: Row[]; value: string; onChange: (value: string) => void; allowEmpty?: boolean; disabledId?: string }) => <select value={value} onChange={(event) => onChange(event.target.value)} style={inputStyle}>{allowEmpty && <option value="">Все точки</option>}{locations.filter((location) => location.isActive !== false).map((location) => <option key={String(location.id)} value={String(location.id)} disabled={String(location.id) === disabledId}>{cleanLabel(location.name)}{String(location.id) === disabledId ? ' — выбрана отправителем' : ''}</option>)}</select>;
 
 const InventoryFrontComponent = () => {
   const [tab, setTab] = useState<Tab>('balances');
-  const [balances, setBalances] = useState<Record<string, unknown>[]>([]);
-  const [movements, setMovements] = useState<Record<string, unknown>[]>([]);
-  const [items, setItems] = useState<Record<string, unknown>[]>([]);
-  const [locations, setLocations] = useState<Record<string, unknown>[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [balances, setBalances] = useState<Row[]>([]); const [movements, setMovements] = useState<Row[]>([]); const [items, setItems] = useState<Row[]>([]); const [locations, setLocations] = useState<Row[]>([]);
+  const [recipes, setRecipes] = useState<Row[]>([]); const [versions, setVersions] = useState<Row[]>([]); const [recipeLines, setRecipeLines] = useState<Row[]>([]); const [counts, setCounts] = useState<Row[]>([]); const [countLines, setCountLines] = useState<Row[]>([]); const [issues, setIssues] = useState<Row[]>([]); const [menuItems, setMenuItems] = useState<Row[]>([]); const [orders, setOrders] = useState<Row[]>([]);
+  const [loading, setLoading] = useState(false); const [pendingCommand, setPendingCommand] = useState<string | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [session, setSession] = useState<Session | null>(null); const [pin, setPin] = useState(''); const [showIssues, setShowIssues] = useState(false);
+  const [search, setSearch] = useState(''); const [balanceLocation, setBalanceLocation] = useState(''); const [balanceType, setBalanceType] = useState('');
+  const [receiptLocation, setReceiptLocation] = useState(''); const [receiptLines, setReceiptLines] = useState([{ stockItemId: '', quantity: '1', unitCost: '800' }]);
+  const [productionItem, setProductionItem] = useState(''); const [productionLocation, setProductionLocation] = useState(''); const [productionQuantity, setProductionQuantity] = useState('1');
+  const [transferItem, setTransferItem] = useState(''); const [transferFrom, setTransferFrom] = useState(''); const [transferTo, setTransferTo] = useState(''); const [transferQuantity, setTransferQuantity] = useState('1');
+  const [writeoffItem, setWriteoffItem] = useState(''); const [writeoffLocation, setWriteoffLocation] = useState(''); const [writeoffQuantity, setWriteoffQuantity] = useState('0.5'); const [writeoffReason, setWriteoffReason] = useState('');
+  const [countLabel, setCountLabel] = useState(''); const [countLocation, setCountLocation] = useState(''); const [selectedCount, setSelectedCount] = useState(''); const [actuals, setActuals] = useState<Record<string, { value: string; resolution: string }>>({});
+  const [recipeKind, setRecipeKind] = useState<'SEMI_FINISHED' | 'MENU_ITEM'>('SEMI_FINISHED'); const [recipeTarget, setRecipeTarget] = useState(''); const [recipeLabel, setRecipeLabel] = useState(''); const [recipeYield, setRecipeYield] = useState('1'); const [recipeLocation, setRecipeLocation] = useState(''); const [recipeIngredientLines, setRecipeIngredientLines] = useState([{ stockItemId: '', quantity: '0.5' }]);
 
+  const loadRows = useCallback(async (plural: string): Promise<Row[]> => asArray(await rest.get(`/rest/${plural}`, { query: { limit: 200 } }), plural), []);
   const load = useCallback(async () => {
     setLoading(true);
-    setError('');
     try {
-      const [b, m, it, loc] = await Promise.all([
-        rest.get('/rest/inventoryStockBalances', { query: { limit: 100 } }).catch(() => ({ data: [] })),
-        rest.get('/rest/inventoryStockMovements', { query: { limit: 100 } }).catch(() => ({ data: [] })),
-        rest.get('/rest/inventoryStockItems', { query: { limit: 100 } }).catch(() => ({ data: [] })),
-        rest.get('/rest/inventoryStockLocations', { query: { limit: 100 } }).catch(() => ({ data: [] })),
-      ]);
-      const asArray = (v: unknown): Record<string, unknown>[] => {
-        if (Array.isArray(v)) return v as Record<string, unknown>[];
-        if (typeof v === 'object' && v !== null && 'data' in (v as Record<string, unknown>)) {
-          const d = (v as { data?: unknown }).data;
-          if (Array.isArray(d)) return d as Record<string, unknown>[];
-          if (d && typeof d === 'object' && 'data' in (d as Record<string, unknown>)) {
-            const inner = (d as { data?: unknown }).data;
-            if (Array.isArray(inner)) return inner as Record<string, unknown>[];
-          }
-        }
-        // RestApiClient returns { data: [...] } or { inventoryStockBalances: { edges: [...] } } depending on endpoint?
-        // fallback: try to extract edges
-        if (typeof v === 'object' && v !== null) {
-          const keys = Object.keys(v as Record<string, unknown>);
-          for (const k of keys) {
-            const val = (v as Record<string, unknown>)[k] as unknown;
-            if (val && typeof val === 'object' && 'edges' in (val as Record<string, unknown>)) {
-              const edges = (val as { edges?: Array<{ node?: Record<string, unknown> }> }).edges ?? [];
-              return edges.map(e => e.node).filter(Boolean) as Record<string, unknown>[];
-            }
-          }
-        }
-        return [];
-      };
-      setBalances(asArray(b));
-      setMovements(asArray(m));
-      setItems(asArray(it));
-      setLocations(asArray(loc));
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+      const [nextBalances, nextMovements, nextItems, nextLocations] = await Promise.all([loadRows('inventoryStockBalances'), loadRows('inventoryStockMovements'), loadRows('inventoryStockItems'), loadRows('inventoryStockLocations')]);
+      const optional = await Promise.all(['inventoryRecipes', 'inventoryRecipeVersions', 'inventoryRecipeLines', 'inventoryCounts', 'inventoryCountLines', 'inventoryConsumptionIssues', 'posMenuItems', 'posOrders'].map((plural) => loadRows(plural).catch(() => [])));
+      setBalances(nextBalances); setMovements(nextMovements); setItems(nextItems); setLocations(nextLocations); setRecipes(optional[0]); setVersions(optional[1]); setRecipeLines(optional[2]); setCounts(optional[3]); setCountLines(optional[4]); setIssues(optional[5]); setMenuItems(optional[6]); setOrders(optional[7]);
+      const firstHumanLocation = nextLocations.find((location) => !isTechnicalFixture(location.name)) ?? nextLocations[0]; if (!receiptLocation && firstHumanLocation?.id) setReceiptLocation(String(firstHumanLocation.id)); if (!countLocation && firstHumanLocation?.id) setCountLocation(String(firstHumanLocation.id)); if (!productionLocation && firstHumanLocation?.id) setProductionLocation(String(firstHumanLocation.id)); if (!transferFrom && firstHumanLocation?.id) setTransferFrom(String(firstHumanLocation.id)); if (!writeoffLocation && firstHumanLocation?.id) setWriteoffLocation(String(firstHumanLocation.id));
+      const firstSemi = nextItems.find((item) => item.itemType === 'SEMI_FINISHED' && !isTechnicalFixture(item.name)); const firstHumanItem = nextItems.find((item) => !isTechnicalFixture(item.name)); if (!productionItem && firstSemi?.id) setProductionItem(String(firstSemi.id)); if (!transferItem && firstHumanItem?.id) setTransferItem(String(firstHumanItem.id)); if (!writeoffItem && firstHumanItem?.id) setWriteoffItem(String(firstHumanItem.id));
+    } catch (value) { setError(messageFor(value)); } finally { setLoading(false); }
+  }, [countLocation, loadRows, productionItem, productionLocation, receiptLocation, transferFrom, transferItem, writeoffItem, writeoffLocation]);
   useEffect(() => { void load(); }, [load]);
 
-  const itemName = useCallback((id: string) => {
-    const it = items.find(r => String(r['id']) === id);
-    return String(it?.['name'] ?? id.slice(0, 8));
-  }, [items]);
+  const runCommand = useCallback(async (command: string, payload: Record<string, unknown>): Promise<ApiEnvelope | null> => {
+    if (!session) { setError('Войдите в склад по PIN администратора.'); return null; }
+    setPendingCommand(command); setError('');
+    try { const result = await rest.post<ApiEnvelope>('/s/inventory/command', { command, payload, sessionToken: session.sessionToken }); await load(); setNotice(command === 'finalizeInventoryCount' ? 'Остатки обновлены' : 'Операция проведена'); return result; } catch (value) { setError(messageFor(value)); return null; } finally { setPendingCommand(null); }
+  }, [load, session]);
+  const login = async () => {
+    if (!/^\d{4,8}$/.test(pin)) { setError('Введите PIN из 4–8 цифр.'); return; } setPendingCommand('login'); setError('');
+    try { const result = await rest.post<ApiEnvelope>('/s/pos/command', { command: 'authenticatePosStaff', payload: { pin, terminalId: 'inventory-backoffice' } }); if (typeof result.sessionToken !== 'string' || !result.staff || typeof result.staff !== 'object') throw new Error('Вход отклонён.'); const staff = result.staff as Row; if (String(staff.role) !== 'ADMIN') throw new Error('Для операций склада нужен PIN администратора.'); setSession({ sessionToken: result.sessionToken, staff: { id: String(staff.id), displayName: String(staff.displayName ?? ''), role: String(staff.role) } }); setPin(''); setNotice('Администратор подтверждён'); } catch (value) { setError(messageFor(value)); } finally { setPendingCommand(null); }
+  };
+  const logout = async () => { if (session) await rest.post('/s/pos/command', { command: 'logoutPosStaff', sessionToken: session.sessionToken, payload: {} }).catch(() => undefined); setSession(null); setNotice(''); };
 
-  const locName = useCallback((id: string) => {
-    const l = locations.find(r => String(r['id']) === id);
-    return String(l?.['name'] ?? id.slice(0, 8));
-  }, [locations]);
+  const humanItems = items.filter((item) => !isTechnicalFixture(item.name)); const humanLocations = locations.filter((location) => !isTechnicalFixture(location.name));
+  const humanBalances = balances.filter((balance) => { const item = items.find((candidate) => String(candidate.id) === String(balance.stockItemId)); const location = locations.find((candidate) => String(candidate.id) === String(balance.locationId)); return !isTechnicalFixture(item?.name) && !isTechnicalFixture(location?.name); });
+  const humanMovements = movements.filter((movement) => { const item = items.find((candidate) => String(candidate.id) === String(movement.stockItemId)); const location = locations.find((candidate) => String(candidate.id) === String(movement.locationId)); return !isTechnicalFixture(item?.name) && !isTechnicalFixture(location?.name); });
+  const filteredBalances = useMemo(() => humanBalances.filter((balance) => { const item = items.find((candidate) => String(candidate.id) === String(balance.stockItemId)); return (!search || cleanLabel(item?.name).toLowerCase().includes(search.toLowerCase())) && (!balanceLocation || String(balance.locationId) === balanceLocation) && (!balanceType || String(item?.itemType) === balanceType); }), [balanceLocation, balanceType, humanBalances, items, search]);
+  const activeSemiItems = humanItems.filter((item) => item.itemType === 'SEMI_FINISHED' && item.isActive !== false); const productionTarget = activeSemiItems.find((item) => String(item.id) === productionItem); const productionRecipe = recipes.find((recipe) => recipe.targetKind === 'SEMI_FINISHED' && String(recipe.targetId) === productionItem); const productionVersion = versions.filter((version) => String(version.recipeId) === String(productionRecipe?.id) && version.status === 'ACTIVE').sort((a, b) => numberValue(b.versionNumber) - numberValue(a.versionNumber))[0]; const productionPreview = recipeLines.filter((line) => String(line.recipeVersionId) === String(productionVersion?.id)).map((line) => ({ stockItemId: String(line.stockItemId), required: numberValue(line.quantityMicros) * quantityMicros(productionQuantity, productionTarget) / numberValue(productionVersion?.yieldQuantityMicros ?? 1) }));
+  const humanCounts = counts.filter((count) => !isTechnicalFixture(locations.find((location) => String(location.id) === String(count.locationId))?.name)); const selectedCountRecord = humanCounts.find((count) => String(count.id) === selectedCount); const selectedCountLines = countLines.filter((line) => String(line.countId) === selectedCount && !isTechnicalFixture(items.find((item) => String(item.id) === String(line.stockItemId))?.name)); const targetOptions = recipeKind === 'SEMI_FINISHED' ? activeSemiItems : menuItems.filter((item) => !isTechnicalFixture(item.name)); const ingredientOptions = humanItems.filter((item) => item.isActive !== false); const transferTarget = humanItems.find((item) => String(item.id) === transferItem); const writeoffTarget = humanItems.find((item) => String(item.id) === writeoffItem); const transferInvalid = !transferItem || !transferFrom || !transferTo || transferFrom === transferTo || quantityMicros(transferQuantity, transferTarget) <= 0; const openIssues = issues.filter((issue) => !['RESOLVED', 'CLOSED', 'DONE'].includes(String(issue.status ?? '').toUpperCase()));
+  const recipeTargetRecord = targetOptions.find((item) => String(item.id) === recipeTarget); const recipeTargetFallback = recipeKind === 'MENU_ITEM' ? 'COUNT' : 'MASS'; const recipeYieldLabel = unitInputLabel(recipeTargetRecord, recipeTargetFallback); const issueDescription = (issue: Row): string => { const dish = menuItems.find((menu) => String(menu.id) === String(issue.menuItemId)); const order = orders.find((candidate) => String(candidate.id) === String(issue.orderId)); const dishLabel = cleanLabel(dish?.name); const orderLabel = cleanLabel(order?.label); const context = [dishLabel && !isTechnicalFixture(dishLabel) && `Блюдо: ${dishLabel}`, orderLabel && !isTechnicalFixture(orderLabel) && `Заказ: ${orderLabel}`].filter(Boolean).join(' · ') || 'Закрытый заказ'; return `${issueTypeLabel(issue.issueType)} — ${context}`; };
+  const revisionProductionPreview = useMemo(() => selectedCountLines.flatMap((line) => {
+    const id = String(line.stockItemId); const actualInput = actuals[id]?.value?.trim() ?? ''; const expected = numberValue(line.expectedQuantityMicros); const item = items.find((candidate) => String(candidate.id) === id);
+    if (!actualInput || actuals[id]?.resolution !== 'UNRECORDED_PRODUCTION') return [];
+    const actual = quantityMicros(actualInput, item); const variance = actual - expected; if (!Number.isSafeInteger(actual) || variance <= 0) return [];
+    const recipe = recipes.find((candidate) => candidate.targetKind === 'SEMI_FINISHED' && String(candidate.targetId) === id); const version = versions.filter((candidate) => String(candidate.recipeId) === String(recipe?.id) && candidate.status === 'ACTIVE').sort((a, b) => numberValue(b.versionNumber) - numberValue(a.versionNumber))[0];
+    if (!version || numberValue(version.yieldQuantityMicros) <= 0) return [];
+    return recipeLines.filter((candidate) => String(candidate.recipeVersionId) === String(version.id)).map((candidate) => ({ outputName: itemName(items, id), outputQuantity: variance, outputItem: item, inputName: itemName(items, String(candidate.stockItemId)), inputQuantity: numberValue(candidate.quantityMicros) * variance / numberValue(version.yieldQuantityMicros), inputItem: items.find((candidateItem) => String(candidateItem.id) === String(candidate.stockItemId)) }));
+  }), [actuals, items, recipeLines, recipes, selectedCountLines, versions]);
 
-  const aggregated = useMemo(() => {
-    const map = new Map<string, { itemId: string; total: number }>();
-    for (const b of balances) {
-      const itemId = String(b['stockItemId'] ?? '');
-      const qty = Number(b['quantityMicros'] ?? 0);
-      const entry = map.get(itemId) ?? { itemId, total: 0 };
-      entry.total += qty;
-      map.set(itemId, entry);
+  const submitReceipt = async () => { const lines = receiptLines.filter((line) => line.stockItemId).map((line) => { const item = humanItems.find((candidate) => String(candidate.id) === line.stockItemId); return { stockItemId: line.stockItemId, quantityMicros: quantityMicros(line.quantity, item), unitCostMicros: Math.round(parseNumber(line.unitCost)) }; }); if (!receiptLocation || lines.length === 0 || lines.some((line) => !Number.isSafeInteger(line.quantityMicros) || line.quantityMicros <= 0 || !Number.isSafeInteger(line.unitCostMicros) || line.unitCostMicros < 0)) { setError('Укажите точку, позицию, положительное количество и цену.'); return; } if (await runCommand('receiveStock', { locationId: receiptLocation, lines, idempotencyKey: newKey(), comment: 'Backoffice приход' })) setReceiptLines([{ stockItemId: '', quantity: '1', unitCost: '800' }]); };
+  const submitProduction = async () => { const quantity = quantityMicros(productionQuantity, productionTarget); if (!productionItem || !productionLocation || !productionVersion || quantity <= 0) { setError(!productionVersion ? 'Для этого полуфабриката сначала сохраните активную калькуляцию.' : 'Укажите полуфабрикат, точку и положительное количество.'); return; } await runCommand('produceSemiFinished', { stockItemId: productionItem, locationId: productionLocation, quantityMicros: quantity, idempotencyKey: newKey() }); };
+  const submitTransfer = async () => { if (transferInvalid) { setError(transferFrom === transferTo ? 'Точка назначения должна отличаться от точки отправления.' : 'Выберите позицию, две разные точки и положительное количество.'); return; } await runCommand('transferStock', { stockItemId: transferItem, sourceLocationId: transferFrom, destLocationId: transferTo, quantityMicros: quantityMicros(transferQuantity, transferTarget), idempotencyKey: newKey() }); };
+  const submitWriteoff = async () => { const quantity = quantityMicros(writeoffQuantity, writeoffTarget); if (!writeoffItem || !writeoffLocation || quantity <= 0 || !writeoffReason.trim()) { setError('Укажите позицию, точку, положительное количество и причину.'); return; } await runCommand('writeOffStock', { stockItemId: writeoffItem, locationId: writeoffLocation, quantityMicros: quantity, reason: writeoffReason.trim(), idempotencyKey: newKey() }); };
+  const publishRecipe = async () => { const target = targetOptions.find((item) => String(item.id) === recipeTarget); const lines = recipeIngredientLines.filter((line) => line.stockItemId).map((line) => { const item = ingredientOptions.find((candidate) => String(candidate.id) === line.stockItemId); return { stockItemId: line.stockItemId, quantityMicros: quantityMicros(line.quantity, item) }; }); const label = recipeLabel.trim() || `${cleanLabel(target?.name ?? target?.label)} — новая версия`; if (!recipeTarget || !recipeLocation || lines.length === 0 || !target) { setError('Выберите блюдо или полуфабрикат, точку и хотя бы один ингредиент.'); return; } await runCommand('upsertRecipe', { label, targetKind: recipeKind, targetId: recipeTarget, defaultLocationId: recipeLocation, lines, yieldQuantityMicros: quantityMicros(recipeYield, recipeKind === 'MENU_ITEM' ? null : target), idempotencyKey: newKey() }); };
+  const beginCount = async () => {
+    if (selectedCountRecord?.status === 'DRAFT') {
+      await runCommand('startInventoryCount', { countId: selectedCount });
+      return;
     }
-    return Array.from(map.values());
-  }, [balances]);
+    if (!countLocation) { setError('Выберите точку для ревизии.'); return; }
+    const defaultLabel = `Ревизия — ${locationName(locations, countLocation)} — ${new Date().toLocaleDateString('ru-RU')}`;
+    const result = await runCommand('createInventoryCount', { locationId: countLocation, label: countLabel.trim() || defaultLabel, idempotencyKey: newKey() });
+    if (result?.countId) {
+      const countId = String(result.countId);
+      setSelectedCount(countId);
+      await runCommand('startInventoryCount', { countId });
+    }
+  };
+  const finalizeCount = async () => { if (!selectedCountRecord || selectedCountRecord.status !== 'ACTIVE') { setError('Сначала начните ревизию.'); return; } const actualValues = selectedCountLines.map((line) => { const id = String(line.stockItemId); const item = items.find((candidate) => String(candidate.id) === id); const entered = actuals[id]?.value?.trim() ?? ''; const actualQuantityMicros = entered ? quantityMicros(entered, item) : null; return { stockItemId: id, actualQuantityMicros, resolution: actualQuantityMicros === null ? 'PENDING' : actuals[id]?.resolution || 'DIRECT_ADJUSTMENT' }; }); await runCommand('finalizeInventoryCount', { countId: selectedCount, actuals: actualValues, idempotencyKey: newKey() }); };
+  const updateReceiptLine = (index: number, patch: Partial<{ stockItemId: string; quantity: string; unitCost: string }>) => setReceiptLines((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
+  const updateRecipeLine = (index: number, patch: Partial<{ stockItemId: string; quantity: string }>) => setRecipeIngredientLines((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
 
-  return (
-    <div style={{ padding: 16, fontFamily: 'Inter, system-ui, sans-serif', color: '#111827' }}>
-      <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Склад</h1>
-      <p style={{ color: '#6b7280', marginBottom: 12 }}>Операционный inventory: остатки по точкам, приход, производство, перемещения, ревизии и калькуляции. Ledger — источник истины.</p>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-        {TABS.map(t => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            style={{
-              padding: '8px 12px',
-              borderRadius: 8,
-              border: tab === t.id ? '2px solid #111827' : '1px solid #e5e7eb',
-              background: tab === t.id ? '#111827' : '#fff',
-              color: tab === t.id ? '#fff' : '#111827',
-              cursor: 'pointer',
-              fontWeight: 600,
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-        <button type="button" onClick={() => void load()} style={{ marginLeft: 'auto', padding: '8px 12px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#f9fafb', cursor: 'pointer' }}>
-          {loading ? 'Загрузка…' : 'Обновить'}
-        </button>
-      </div>
-      {error && <div style={{ padding: 12, background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, color: '#991b1b', marginBottom: 12 }}>{error}</div>}
+  const balanceCost = (balance: Row): string => { const item = items.find((candidate) => String(candidate.id) === String(balance.stockItemId)); return priceText(balance.averageCostMicros, item); };
+  const revisionDifference = (line: Row): { value: number | null; item?: Row } => { const id = String(line.stockItemId); const item = items.find((candidate) => String(candidate.id) === id); const value = actuals[id]?.value?.trim() ?? ''; return { value: value ? quantityMicros(value, item) - numberValue(line.expectedQuantityMicros) : null, item }; };
 
-      {tab === 'balances' && (
-        <div>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Остатки по точкам</h2>
-          <div style={{ overflowX: 'auto', border: '1px solid #e5e7eb', borderRadius: 8 }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-              <thead style={{ background: '#f9fafb' }}>
-                <tr>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid #e5e7eb' }}>№</th>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid #e5e7eb' }}>Позиция</th>
-                  <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid #e5e7eb' }}>Точка</th>
-                  <th style={{ textAlign: 'right', padding: 8, borderBottom: '1px solid #e5e7eb' }}>Кол-во</th>
-                  <th style={{ textAlign: 'right', padding: 8, borderBottom: '1px solid #e5e7eb' }}>Цена</th>
-                  <th style={{ textAlign: 'right', padding: 8, borderBottom: '1px solid #e5e7eb' }}>Стоимость</th>
-                </tr>
-              </thead>
-              <tbody>
-                {balances.length === 0 ? (
-                  <tr><td colSpan={6} style={{ padding: 16, textAlign: 'center', color: '#6b7280' }}>Нет данных — создайте приход</td></tr>
-                ) : balances.map((b, i) => (
-                  <tr key={String(b['id'] ?? i)} style={{ background: Number(b['quantityMicros'] ?? 0) < 0 ? '#fef2f2' : undefined }}>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6' }}>{i + 1}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6' }}>{itemName(String(b['stockItemId'] ?? ''))}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6' }}>{locName(String(b['locationId'] ?? ''))}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6', textAlign: 'right' }}>{(Number(b['quantityMicros'] ?? 0) / 1000).toFixed(1)} {String(b['stockItemId'] ?? '') ? 'г' : ''}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6', textAlign: 'right' }}>{Number(b['averageCostMicros'] ?? 0).toLocaleString()} ₸/кг</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6', textAlign: 'right' }}>{(Number(b['totalValueMicros'] ?? 0) / 1000).toFixed(0)} ₸</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {aggregated.length > 0 && (
-            <div style={{ marginTop: 12, padding: 12, background: '#f9fafb', borderRadius: 8, fontSize: 13 }}>
-              <strong>Всего по всем точкам:</strong>{' '}
-              {aggregated.map(a => `${itemName(a.itemId)} ${(a.total / 1000).toFixed(1)}г`).join(' · ')}
-            </div>
-          )}
-        </div>
-      )}
-
-      {tab === 'history' && (
-        <div>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>История движений</h2>
-          <div style={{ overflowX: 'auto', border: '1px solid #e5e7eb', borderRadius: 8 }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-              <thead style={{ background: '#f9fafb' }}>
-                <tr>
-                  <th style={{ padding: 8, borderBottom: '1px solid #e5e7eb' }}>Дата</th>
-                  <th style={{ padding: 8, borderBottom: '1px solid #e5e7eb' }}>Тип</th>
-                  <th style={{ padding: 8, borderBottom: '1px solid #e5e7eb' }}>Позиция</th>
-                  <th style={{ padding: 8, borderBottom: '1px solid #e5e7eb' }}>Точка</th>
-                  <th style={{ padding: 8, borderBottom: '1px solid #e5e7eb' }}>Кол-во</th>
-                  <th style={{ padding: 8, borderBottom: '1px solid #e5e7eb' }}>Стоимость</th>
-                  <th style={{ padding: 8, borderBottom: '1px solid #e5e7eb' }}>Источник</th>
-                </tr>
-              </thead>
-              <tbody>
-                {movements.length === 0 ? (
-                  <tr><td colSpan={7} style={{ padding: 16, textAlign: 'center', color: '#6b7280' }}>История пуста</td></tr>
-                ) : movements.slice(0, 100).map((m, i) => (
-                  <tr key={String(m['id'] ?? i)}>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6' }}>{String(m['occurredAt'] ?? '').slice(0, 16).replace('T',' ')}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6' }}>{String(m['movementType'] ?? '')}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6' }}>{itemName(String(m['stockItemId'] ?? ''))}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6' }}>{locName(String(m['locationId'] ?? ''))}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6', textAlign: 'right', color: Number(m['quantityDeltaMicros'] ?? 0) < 0 ? '#b91c1c' : '#065f46' }}>{Number(m['quantityDeltaMicros'] ?? 0) >0?'+':''}{(Number(m['quantityDeltaMicros'] ?? 0)/1000).toFixed(1)}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6', textAlign: 'right' }}>{Number(m['totalCostMicros'] ?? 0)/1000}</td>
-                    <td style={{ padding: 8, borderBottom: '1px solid #f3f4f6' }}>{String(m['sourceType'] ?? '')}:{String(m['sourceId'] ?? '').slice(0,8)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {(tab === 'receipt' || tab === 'production' || tab === 'transfer' || tab === 'writeoff' || tab === 'counts' || tab === 'recipes') && (
-        <div style={{ padding: 16, border: '1px dashed #e5e7eb', borderRadius: 8, background: '#fafafa', fontSize: 13, color: '#374151' }}>
-          Раздел <strong>{TABS.find(t=>t.id===tab)?.label}</strong> — операции через <code>/inventory/command</code> (ADMIN). В этой версии доступны через API; формы редактирования калькуляций и массовых операций появятся в следующем слое (см. INVENTORY_DOMAIN.md §56–63).
-          <div style={{ marginTop: 8, color: '#6b7280' }}>Текущий слой доказывает ledger, балансы и партитуру движений; UI-слой сбора форм — следующий шаг после прохождения acceptance.</div>
-        </div>
-      )}
-    </div>
-  );
+  return <div style={{ padding: 16, fontFamily: 'Inter, system-ui, sans-serif', color: '#101828', background: '#f8fafc', minHeight: '100%' }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}><div><h1 style={{ margin: 0, fontSize: 22 }}>Склад</h1><p style={{ margin: '5px 0 14px', color: '#667085' }}>Приход, производство, перемещение, расход и ревизия складских остатков.</p></div><div style={{ ...cardStyle, display: 'flex', alignItems: 'end', gap: 8, padding: 10 }}>{session ? <><span style={{ fontSize: 12, color: '#067647' }}><strong>Администратор подтверждён</strong>{session.staff.displayName ? ` · ${cleanLabel(session.staff.displayName)}` : ''}</span><button type="button" onClick={() => void logout()} style={{ ...buttonStyle, background: '#fff', color: '#344054' }}>Выйти</button></> : <><Field label="PIN администратора"><input aria-label="PIN администратора" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 8))} onKeyDown={(event) => { if (event.key === 'Enter') void login(); }} style={{ ...inputStyle, width: 150 }} placeholder="4–8 цифр" /></Field><button type="button" disabled={pendingCommand === 'login'} onClick={() => void login()} style={{ ...buttonStyle, ...(pendingCommand === 'login' ? disabledButtonStyle : {}) }}>{pendingCommand === 'login' ? 'Вход…' : 'Войти'}</button></>}</div></div>
+    <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', marginBottom: 14 }}>{TABS.map((item) => <button key={item.id} type="button" onClick={() => setTab(item.id)} style={{ ...buttonStyle, background: tab === item.id ? '#111827' : '#fff', color: tab === item.id ? '#fff' : '#344054' }}>{item.label}</button>)}<button type="button" onClick={() => void load()} style={{ ...buttonStyle, marginLeft: 'auto', background: '#fff', color: '#344054' }}>{loading ? 'Загрузка…' : 'Обновить'}</button></div>
+    {error && <div role="alert" style={{ ...cardStyle, marginBottom: 12, color: '#b42318', borderColor: '#fecdca', background: '#fff5f4' }}>{error}</div>}{notice && <div role="status" style={{ ...cardStyle, marginBottom: 12, color: '#067647', borderColor: '#abefc6', background: '#f6fef9' }}>{notice}</div>}
+    {tab === 'balances' && <section style={cardStyle}><h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Остатки</h2><div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 2fr) 1fr 1fr', gap: 8, marginBottom: 10 }}><Field label="Поиск"><input aria-label="Поиск остатков" value={search} onChange={(event) => setSearch(event.target.value)} style={inputStyle} placeholder="Позиция" /></Field><Field label="Точка"><LocationSelect locations={humanLocations} value={balanceLocation} onChange={setBalanceLocation} allowEmpty /></Field><Field label="Тип"><select aria-label="Тип позиции" value={balanceType} onChange={(event) => setBalanceType(event.target.value)} style={inputStyle}><option value="">Все типы</option><option value="RAW_MATERIAL">Сырьё</option><option value="SEMI_FINISHED">Полуфабрикат</option></select></Field></div><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr>{['№', 'Позиция', 'Точка', 'Количество', 'Средняя цена', 'Стоимость', 'Статус'].map((label) => <th key={label} style={{ textAlign: ['Количество', 'Средняя цена', 'Стоимость'].includes(label) ? 'right' : 'left', padding: 8, borderBottom: '1px solid #e5e7eb' }}>{label}</th>)}</tr></thead><tbody>{filteredBalances.length === 0 ? <tr><td colSpan={7} style={{ padding: 18, textAlign: 'center', color: '#667085' }}>Нет данных по выбранному фильтру.</td></tr> : filteredBalances.map((balance, index) => { const item = items.find((candidate) => String(candidate.id) === String(balance.stockItemId)); const negative = numberValue(balance.quantityMicros) < 0; return <tr key={String(balance.id ?? index)} style={{ background: negative ? '#fff5f4' : undefined }}><td style={{ padding: 8 }}>{index + 1}</td><td style={{ padding: 8 }}>{itemName(items, String(balance.stockItemId))}</td><td style={{ padding: 8 }}>{locationName(locations, String(balance.locationId))}</td><td style={{ padding: 8, textAlign: 'right', color: negative ? '#b42318' : undefined }}>{quantityText(balance.quantityMicros, item)}</td><td style={{ padding: 8, textAlign: 'right' }}>{balanceCost(balance)}</td><td style={{ padding: 8, textAlign: 'right' }}>{totalValueText(balance.totalValueMicros)}</td><td style={{ padding: 8, color: negative ? '#b42318' : '#067647' }}>{negative ? 'Недостача' : 'OK'}</td></tr>; })}</tbody></table></div></section>}
+    {tab === 'receipt' && <section style={cardStyle}><h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Приход</h2><div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) 1fr', gap: 8, marginBottom: 12 }}><Field label="Точка"><LocationSelect locations={humanLocations} value={receiptLocation} onChange={setReceiptLocation} /></Field><div style={{ alignSelf: 'end', color: '#667085', fontSize: 12 }}>Выберите позицию: единица количества и цена подставятся по её настройкам.</div></div>{receiptLines.map((line, index) => { const item = humanItems.find((candidate) => String(candidate.id) === line.stockItemId); return <div key={index} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 8, marginBottom: 8, alignItems: 'end' }}><Field label="Позиция"><StockSelect items={humanItems} value={line.stockItemId} onChange={(value) => updateReceiptLine(index, { stockItemId: value })} allowEmpty /></Field><Field label={`Количество, ${unitInputLabel(item)}`}><input aria-label={`Количество прихода ${index + 1}`} type="number" min={unitKindFor(item) === 'COUNT' ? '1' : '0.001'} step={unitStep(item)} value={line.quantity} onChange={(event) => updateReceiptLine(index, { quantity: event.target.value })} style={inputStyle} /></Field><Field label={`Цена, ${unitPriceLabel(item)}`}><input aria-label={`Цена прихода ${index + 1}`} type="number" min="0" step="1" value={line.unitCost} onChange={(event) => updateReceiptLine(index, { unitCost: event.target.value })} style={inputStyle} /></Field><button type="button" disabled={receiptLines.length === 1 || Boolean(pendingCommand)} onClick={() => setReceiptLines((rows) => rows.filter((_, rowIndex) => rowIndex !== index))} style={{ ...buttonStyle, background: '#fff', color: '#b42318' }}>Удалить</button></div>; })}<div style={{ display: 'flex', gap: 8, marginTop: 12 }}><button type="button" disabled={Boolean(pendingCommand)} onClick={() => setReceiptLines((rows) => [...rows, { stockItemId: '', quantity: '1', unitCost: '800' }])} style={{ ...buttonStyle, background: '#fff', color: '#344054' }}>+ строка</button><button type="button" disabled={Boolean(pendingCommand)} onClick={() => void submitReceipt()} style={{ ...buttonStyle, ...(pendingCommand ? disabledButtonStyle : {}) }}>{pendingCommand === 'receiveStock' ? 'Проведение…' : 'ПРОВЕСТИ ПРИХОД'}</button></div></section>}
+    {tab === 'production' && <section style={cardStyle}><h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Производство полуфабриката</h2><div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 8 }}><Field label="Полуфабрикат"><StockSelect items={activeSemiItems} value={productionItem} onChange={setProductionItem} allowEmpty /></Field><Field label={`Количество, ${unitInputLabel(productionTarget)}`}><input aria-label="Количество производства" type="number" min={unitKindFor(productionTarget) === 'COUNT' ? '1' : '0.001'} step={unitStep(productionTarget)} value={productionQuantity} onChange={(event) => setProductionQuantity(event.target.value)} style={inputStyle} /></Field><Field label="Точка"><LocationSelect locations={humanLocations} value={productionLocation} onChange={setProductionLocation} /></Field></div>{!productionVersion && productionTarget && <p style={{ color: '#b54708', fontSize: 12 }}>Для выбранного полуфабриката нет активной калькуляции. Сначала сохраните новую версию в разделе «Калькуляции».</p>}{productionPreview.length > 0 && <div style={{ marginTop: 12, padding: 10, background: '#f8fafc', borderRadius: 7 }}><strong>Перед проведением будет списано:</strong> {productionPreview.map((line) => { const item = items.find((candidate) => String(candidate.id) === line.stockItemId); return `${itemName(items, line.stockItemId)} ${quantityText(line.required, item)}`; }).join(' · ')}<div style={{ marginTop: 5, color: '#667085' }}>Количество рассчитано по активной калькуляции.</div></div>}<button type="button" disabled={Boolean(pendingCommand) || !productionVersion} onClick={() => void submitProduction()} style={{ ...buttonStyle, marginTop: 12, ...(pendingCommand || !productionVersion ? disabledButtonStyle : {}) }}>{pendingCommand === 'produceSemiFinished' ? 'Производство…' : 'ПРОИЗВЕСТИ'}</button></section>}
+    {tab === 'transfer' && <section style={cardStyle}><h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Перемещение</h2><div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', gap: 8 }}><Field label="Позиция"><StockSelect items={humanItems} value={transferItem} onChange={setTransferItem} allowEmpty /></Field><Field label="Откуда"><LocationSelect locations={humanLocations} value={transferFrom} onChange={(value) => { setTransferFrom(value); if (value === transferTo) setTransferTo(''); }} /></Field><Field label="Куда"><LocationSelect locations={humanLocations} value={transferTo} onChange={setTransferTo} disabledId={transferFrom} /></Field><Field label={`Количество, ${unitInputLabel(transferTarget)}`}><input aria-label="Количество перемещения" type="number" min={unitKindFor(transferTarget) === 'COUNT' ? '1' : '0.001'} step={unitStep(transferTarget)} value={transferQuantity} onChange={(event) => setTransferQuantity(event.target.value)} style={inputStyle} /></Field></div>{transferFrom && transferTo && transferFrom === transferTo && <p role="alert" style={{ color: '#b42308', fontSize: 12 }}>Точка назначения должна отличаться от точки отправления.</p>}{transferItem && transferFrom && <p style={{ color: '#667085', fontSize: 12 }}>Теоретический остаток: {quantityText(balances.find((balance) => String(balance.stockItemId) === transferItem && String(balance.locationId) === transferFrom)?.quantityMicros, transferTarget)}</p>}<button type="button" disabled={Boolean(pendingCommand) || transferInvalid} onClick={() => void submitTransfer()} style={{ ...buttonStyle, ...(pendingCommand || transferInvalid ? disabledButtonStyle : {}) }}>{pendingCommand === 'transferStock' ? 'Перемещение…' : 'ПРОВЕСТИ ПЕРЕМЕЩЕНИЕ'}</button></section>}
+    {tab === 'writeoff' && <section style={cardStyle}><h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Расход</h2><div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 8 }}><Field label="Позиция"><StockSelect items={humanItems} value={writeoffItem} onChange={setWriteoffItem} allowEmpty /></Field><Field label="Точка"><LocationSelect locations={humanLocations} value={writeoffLocation} onChange={setWriteoffLocation} /></Field><Field label={`Количество, ${unitInputLabel(writeoffTarget)}`}><input aria-label="Количество расхода" type="number" min={unitKindFor(writeoffTarget) === 'COUNT' ? '1' : '0.001'} step={unitStep(writeoffTarget)} value={writeoffQuantity} onChange={(event) => setWriteoffQuantity(event.target.value)} style={inputStyle} /></Field></div><div style={{ marginTop: 8, maxWidth: 600 }}><Field label="Причина расхода"><input aria-label="Причина расхода" value={writeoffReason} onChange={(event) => setWriteoffReason(event.target.value)} style={inputStyle} placeholder="Например: продукт испорчен" /></Field></div><button type="button" disabled={Boolean(pendingCommand)} onClick={() => void submitWriteoff()} style={{ ...buttonStyle, marginTop: 12, ...(pendingCommand ? disabledButtonStyle : {}) }}>{pendingCommand === 'writeOffStock' ? 'Расход…' : 'ПРОВЕСТИ РАСХОД'}</button></section>}
+    {tab === 'recipes' && <section style={cardStyle}><h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Калькуляции</h2><p style={{ margin: '0 0 12px', color: '#667085', fontSize: 13 }}>Для изменения будущих операций сохраните новую версию. История уже проведённых операций не изменится.</p><div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr 1fr 1fr', gap: 8 }}><Field label="Тип"><select aria-label="Тип калькуляции" value={recipeKind} onChange={(event) => { setRecipeKind(event.target.value as 'SEMI_FINISHED' | 'MENU_ITEM'); setRecipeTarget(''); }} style={inputStyle}><option value="SEMI_FINISHED">Полуфабрикат</option><option value="MENU_ITEM">Блюдо</option></select></Field><Field label={recipeKind === 'MENU_ITEM' ? 'Блюдо' : 'Полуфабрикат'}><select aria-label="Цель калькуляции" value={recipeTarget} onChange={(event) => setRecipeTarget(event.target.value)} style={inputStyle}><option value="">Выберите цель</option>{targetOptions.map((item) => <option key={String(item.id)} value={String(item.id)}>{cleanLabel(item.name ?? item.label)}</option>)}</select></Field><Field label="Название калькуляции"><input aria-label="Название калькуляции" value={recipeLabel} onChange={(event) => setRecipeLabel(event.target.value)} style={inputStyle} placeholder="Например: Огонёк" /></Field><Field label={`Выход, ${recipeYieldLabel}`}><input aria-label="Выход калькуляции" type="number" min={recipeKind === 'MENU_ITEM' ? '1' : '0.001'} step={recipeKind === 'MENU_ITEM' ? '1' : '0.001'} value={recipeYield} onChange={(event) => setRecipeYield(event.target.value)} style={inputStyle} /></Field></div><div style={{ marginTop: 8, maxWidth: 300 }}><Field label="Точка списания"><LocationSelect locations={humanLocations} value={recipeLocation} onChange={setRecipeLocation} /></Field></div><h3 style={{ fontSize: 14, margin: '16px 0 6px' }}>Ингредиенты</h3>{recipeIngredientLines.map((line, index) => { const item = ingredientOptions.find((candidate) => String(candidate.id) === line.stockItemId); return <div key={index} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr auto', gap: 8, marginTop: 8, alignItems: 'end' }}><Field label="Ингредиент"><StockSelect items={ingredientOptions} value={line.stockItemId} onChange={(value) => updateRecipeLine(index, { stockItemId: value })} allowEmpty /></Field><Field label={`Количество, ${unitInputLabel(item)}`}><input aria-label={`Количество ингредиента ${index + 1}`} type="number" min={unitKindFor(item) === 'COUNT' ? '1' : '0.001'} step={unitStep(item)} value={line.quantity} onChange={(event) => updateRecipeLine(index, { quantity: event.target.value })} style={inputStyle} /></Field><button type="button" disabled={Boolean(pendingCommand)} onClick={() => setRecipeIngredientLines((rows) => rows.length === 1 ? rows : rows.filter((_, rowIndex) => rowIndex !== index))} style={{ ...buttonStyle, background: '#fff', color: '#b42318' }}>Удалить</button></div>; })}<div style={{ display: 'flex', gap: 8, marginTop: 12 }}><button type="button" disabled={Boolean(pendingCommand)} onClick={() => setRecipeIngredientLines((rows) => [...rows, { stockItemId: '', quantity: '0.5' }])} style={{ ...buttonStyle, background: '#fff', color: '#344054' }}>+ ингредиент</button><button type="button" disabled={Boolean(pendingCommand)} onClick={() => void publishRecipe()} style={{ ...buttonStyle, ...(pendingCommand ? disabledButtonStyle : {}) }}>{pendingCommand === 'upsertRecipe' ? 'Сохранение…' : 'СОХРАНИТЬ НОВУЮ ВЕРСИЮ'}</button></div></section>}
+    {tab === 'counts' && <section style={cardStyle}><h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Ревизии</h2><p style={{ margin: '0 0 12px', color: '#667085', fontSize: 13 }}>Выберите точку и внесите физически пересчитанные остатки. Пусто — не учитывать; 0 — товара фактически нет.</p><div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr auto', gap: 8, alignItems: 'end' }}><Field label="Название (необязательно)"><input aria-label="Название ревизии" value={countLabel} onChange={(event) => setCountLabel(event.target.value)} style={inputStyle} placeholder="Например: Утренняя ревизия" /></Field><Field label="Точка"><LocationSelect locations={humanLocations} value={countLocation} onChange={setCountLocation} /></Field><button type="button" disabled={Boolean(pendingCommand)} onClick={() => void beginCount()} style={{ ...buttonStyle, ...(pendingCommand ? disabledButtonStyle : {}) }}>{pendingCommand === 'createInventoryCount' || pendingCommand === 'startInventoryCount' ? 'Подготовка…' : 'НАЧАТЬ РЕВИЗИЮ'}</button></div><div style={{ marginTop: 12 }}><Field label="Открытая ревизия"><select aria-label="Выбранная ревизия" value={selectedCount} onChange={(event) => { setSelectedCount(event.target.value); setActuals({}); }} style={{ ...inputStyle, maxWidth: 500 }}><option value="">Выберите ревизию</option>{humanCounts.map((count) => <option key={String(count.id)} value={String(count.id)}>{cleanLabel(count.label)} · {statusLabel(count.status)} · {locationName(locations, String(count.locationId))}</option>)}</select></Field></div>{selectedCountRecord?.status === 'ACTIVE' && <div style={{ marginTop: 14 }}>{revisionProductionPreview.length > 0 && <div style={{ marginBottom: 12, padding: 10, background: '#f8fafc', borderRadius: 7 }}><strong>Проверка последствий</strong>{revisionProductionPreview.map((preview) => <div key={`${preview.outputName}-${preview.inputName}`} style={{ marginTop: 5 }}>Будет произведено: {preview.outputName} +{quantityText(preview.outputQuantity, preview.outputItem)}. Будет списано: {preview.inputName} −{quantityText(preview.inputQuantity, preview.inputItem)}.</div>)}</div>}<div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr>{['Позиция', 'Сколько должно быть', 'Сколько есть', 'Разница', 'Цена', 'Недостача / излишек'].map((label) => <th key={label} style={{ textAlign: label === 'Позиция' ? 'left' : 'right', padding: 8, borderBottom: '1px solid #e5e7eb' }}>{label}</th>)}</tr></thead><tbody>{selectedCountLines.map((line) => { const id = String(line.stockItemId); const item = items.find((candidate) => String(candidate.id) === id); const difference = revisionDifference(line); const balance = balances.find((candidate) => String(candidate.stockItemId) === id && String(candidate.locationId) === String(selectedCountRecord.locationId)); const cost = difference.value === null ? '—' : totalValueText((difference.value * numberValue(balance?.averageCostMicros)) / 1_000); const needsResolution = item?.itemType === 'SEMI_FINISHED' && difference.value !== null && difference.value > 0; return <Fragment key={id}><tr><td style={{ padding: 8 }}><strong>{itemName(items, id)}</strong>{needsResolution && <div style={{ marginTop: 8, padding: 8, background: '#fff8e1', borderRadius: 7 }}><div style={{ fontSize: 12, marginBottom: 5 }}>Откуда появился этот остаток?</div><select aria-label={`Откуда появился остаток ${itemName(items, id)}`} value={actuals[id]?.resolution ?? 'DIRECT_ADJUSTMENT'} onChange={(event) => setActuals((state) => ({ ...state, [id]: { value: state[id]?.value ?? '', resolution: event.target.value } }))} style={inputStyle}><option value="DIRECT_ADJUSTMENT">Просто скорректировать остаток</option><option value="UNRECORDED_PRODUCTION">Произвели, но не внесли</option></select></div>}</td><td style={{ padding: 8, textAlign: 'right' }}>{quantityText(line.expectedQuantityMicros, item)}</td><td style={{ padding: 8, minWidth: 140 }}><input aria-label={`Сколько есть ${itemName(items, id)}`} type="number" min="0" step={unitStep(item)} placeholder={unitInputLabel(item)} value={actuals[id]?.value ?? ''} onChange={(event) => setActuals((state) => ({ ...state, [id]: { value: event.target.value, resolution: state[id]?.resolution ?? 'DIRECT_ADJUSTMENT' } }))} style={inputStyle} /></td><td style={{ padding: 8, textAlign: 'right', color: difference.value !== null && difference.value < 0 ? '#b42318' : '#067647' }}>{difference.value === null ? '—' : `${difference.value > 0 ? '+' : ''}${quantityText(difference.value, difference.item)}`}</td><td style={{ padding: 8, textAlign: 'right' }}>{balance ? priceText(balance.averageCostMicros, item) : '—'}</td><td style={{ padding: 8, textAlign: 'right' }}>{cost}</td></tr></Fragment>; })}</tbody></table></div><button type="button" disabled={Boolean(pendingCommand)} onClick={() => void finalizeCount()} style={{ ...buttonStyle, marginTop: 12, ...(pendingCommand ? disabledButtonStyle : {}) }}>{pendingCommand === 'finalizeInventoryCount' ? 'Обновление…' : 'ОБНОВИТЬ ОСТАТКИ'}</button></div>}</section>}
+    {tab === 'history' && <section style={cardStyle}><h2 style={{ fontSize: 16, margin: '0 0 10px' }}>История</h2>{openIssues.length > 0 && <div style={{ marginBottom: 12, padding: 10, background: '#fff8e1', borderRadius: 7 }}><strong>Есть проблемы со складским списанием: {openIssues.length}</strong><button type="button" onClick={() => setShowIssues((value) => !value)} style={{ ...buttonStyle, marginLeft: 10, padding: '5px 8px', background: '#fff', color: '#344054' }}>{showIssues ? 'Скрыть проблемы' : 'Просмотреть проблемы'}</button>{showIssues && <div style={{ marginTop: 10, display: 'grid', gap: 6 }}>{openIssues.map((issue, index) => <div key={String(issue.id ?? index)}>{issueDescription(issue)}</div>)}</div>}</div>}<div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}><thead><tr>{['Дата', 'Операция', 'Позиция', 'Точка', 'Количество', 'Источник', 'Автор'].map((label) => <th key={label} style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid #e5e7eb' }}>{label}</th>)}</tr></thead><tbody>{humanMovements.slice(0, 200).map((movement, index) => { const item = items.find((candidate) => String(candidate.id) === String(movement.stockItemId)); return <tr key={String(movement.id ?? index)}><td style={{ padding: 8 }}>{String(movement.occurredAt ?? '').slice(0, 16).replace('T', ' ')}</td><td style={{ padding: 8 }}>{movementLabel(movement.movementType)}</td><td style={{ padding: 8 }}>{itemName(items, String(movement.stockItemId))}</td><td style={{ padding: 8 }}>{locationName(locations, String(movement.locationId))}</td><td style={{ padding: 8, color: numberValue(movement.quantityDeltaMicros) < 0 ? '#b42318' : '#067647' }}>{numberValue(movement.quantityDeltaMicros) > 0 ? '+' : ''}{quantityText(movement.quantityDeltaMicros, item)}</td><td style={{ padding: 8 }}>{sourceLabel(movement.sourceType)}</td><td style={{ padding: 8 }}>Администратор</td></tr>; })}</tbody></table></div></section>}
+  </div>;
 };
 
-export default defineFrontComponent({
-  universalIdentifier: MAHABBAT_INVENTORY_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER,
-  name: 'mahabbat-inventory',
-  component: InventoryFrontComponent,
-});
+export default defineFrontComponent({ universalIdentifier: MAHABBAT_INVENTORY_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER, name: 'mahabbat-inventory', component: InventoryFrontComponent });

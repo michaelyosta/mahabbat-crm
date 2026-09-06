@@ -17,7 +17,9 @@ export default defineObject({
   labelPlural: 'Версии калькуляций',
   description: 'Версионированная калькуляция с yield и линями',
   icon: 'IconVersions',
-  labelIdentifierFieldMetadataUniversalIdentifier: INVENTORY_RECIPE_VERSION_NUMBER_FIELD_UNIVERSAL_IDENTIFIER,
+  // Twenty requires a text-compatible label identifier. Version number is an
+  // INT field, so use the durable idempotency key for the list label.
+  labelIdentifierFieldMetadataUniversalIdentifier: INVENTORY_RECIPE_VERSION_IDEMPOTENCY_FIELD_UNIVERSAL_IDENTIFIER,
   fields: [
     { universalIdentifier: INVENTORY_RECIPE_VERSION_RECIPE_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.TEXT, name: 'recipeId', label: 'Калькуляция', icon: 'IconChefHat', isNullable: false, defaultValue: "''" },
     { universalIdentifier: INVENTORY_RECIPE_VERSION_NUMBER_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.NUMBER, name: 'versionNumber', label: 'Версия', icon: 'IconHash', isNullable: false, defaultValue: 1, universalSettings: { dataType: NumberDataType.INT } },

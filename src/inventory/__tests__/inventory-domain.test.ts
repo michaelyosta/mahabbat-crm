@@ -37,6 +37,10 @@ type Kind =
   | 'posOrders';
 
 class FakeDb {
+  failMutationRoot: string | null = null;
+  failMutationAlways = false;
+  beforeMutation: ((root: string) => Promise<void>) | null = null;
+  mutationRoots: string[] = [];
   rows: Record<Kind, Row[]> = {
     inventoryStockLocations: [],
     inventoryStockItems: [],
@@ -75,10 +79,17 @@ class FakeDb {
   async mutation(m: unknown): Promise<unknown> {
     const doc = m as Record<string, unknown>;
     const root = Object.keys(doc)[0];
+    this.mutationRoots.push(root);
+    if (this.beforeMutation) await this.beforeMutation(root);
+    if (this.failMutationRoot === root) {
+      if (!this.failMutationAlways) this.failMutationRoot = null;
+      throw new Error(`injected mutation failure: ${root}`);
+    }
     const op = doc[root] as Record<string, unknown>;
     const args = op.__args as Record<string, unknown>;
     const data = args?.data as Row;
     const id = args?.id as string | undefined;
+    const filter = (args?.filter ?? {}) as Record<string, unknown>;
     // map root to kind
     const createMap: Record<string, Kind> = {
       createInventoryStockLocation: 'inventoryStockLocations',
@@ -93,11 +104,25 @@ class FakeDb {
       createInventoryCount: 'inventoryCounts',
       createInventoryCountLine: 'inventoryCountLines',
     };
+    if (root === 'createInventoryStockMovements') {
+      const records = Array.isArray(data) ? data as unknown as Row[] : [];
+      const created = records.map((record) => {
+        if (record?.idempotencyKey && this.rows.inventoryStockMovements.some((row) => row.idempotencyKey === record.idempotencyKey)) {
+          throw new Error('duplicate movement');
+        }
+        const rec = { ...record, id: record.id ?? `inventoryStockMovements:${++FakeDb.counter}` } as Row;
+        this.rows.inventoryStockMovements.push(rec);
+        return rec;
+      });
+      return { [root]: created };
+    }
     const updateMap: Record<string, Kind> = {
       updateInventoryStockBalance: 'inventoryStockBalances',
+      updateInventoryStockBalances: 'inventoryStockBalances',
       updateInventoryRecipeVersion: 'inventoryRecipeVersions',
       updateInventoryConsumptionRequest: 'inventoryConsumptionRequests',
       updateInventoryCount: 'inventoryCounts',
+      updateInventoryCounts: 'inventoryCounts',
       updateInventoryCountLine: 'inventoryCountLines',
     };
     if (createMap[root]) {
@@ -115,10 +140,16 @@ class FakeDb {
     }
     if (updateMap[root]) {
       const kind = updateMap[root];
-      const idx = this.rows[kind].findIndex(r => r.id === id);
-      if (idx === -1) return { [root]: null };
-      this.rows[kind][idx] = { ...this.rows[kind][idx], ...data };
-      return { [root]: { ...this.rows[kind][idx] } };
+      const matches = id
+        ? this.rows[kind].filter(r => r.id === id)
+        : this.find(kind, filter);
+      if (matches.length === 0) return { [root]: root.endsWith('Balances') ? [] : null };
+      const updated = matches.map(match => {
+        const idx = this.rows[kind].findIndex(r => r.id === match.id);
+        this.rows[kind][idx] = { ...this.rows[kind][idx], ...data };
+        return { ...this.rows[kind][idx] };
+      });
+      return { [root]: root.endsWith('Balances') || root.endsWith('Counts') ? updated : updated[0] };
     }
     // generic id-based mutation fallback
     if (root.startsWith('update')) throw new Error(`Unsupported update ${root}`);
@@ -343,6 +374,148 @@ describe('revision', () => {
     const res = await executeFinalizeCount(db as any, { countId: cid, actuals: [{ stockItemId: it, actualQuantityMicros: kgToMicros(5) }], idempotencyKey: 'fins' }, admin);
     expect(res.status).toBe(400);
     expect((res.body as { code: string }).code).toBe('REVISION_STALE');
+    expect(db.rows.inventoryStockMovements.filter((movement) => movement.sourceId === 'fins').length).toBe(0);
+    expect((db.rows.inventoryCounts.find((count) => count.id === cid) as Row).status).toBe('ACTIVE');
+  });
+
+  it('prevalidates every row before any revision movement', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const items = await Promise.all(['A', 'B', 'C', 'D', 'Cucumber'].map((name) => itemId(db, name)));
+    await executeReceiveStock(db as any, { locationId: k, lines: items.map((stockItemId) => ({ stockItemId, quantityMicros: kgToMicros(5), unitCostMicros: 900 })), idempotencyKey: 'preflight-receipt' }, admin);
+    const countResult = await executeCreateCount(db as any, { label: 'Preflight', locationId: k, idempotencyKey: 'preflight-count' }, admin);
+    const countId = (countResult.body as { countId: string }).countId;
+    await executeStartCount(db as any, { countId }, admin);
+    const beforeBalances = db.rows.inventoryStockBalances.map((balance) => ({ id: balance.id, quantityMicros: balance.quantityMicros, version: balance.version }));
+    const beforeMovements = db.rows.inventoryStockMovements.length;
+    const result = await executeFinalizeCount(db as any, {
+      countId,
+      actuals: items.map((stockItemId, index) => ({ stockItemId, actualQuantityMicros: index === 4 ? -1 : null })),
+      idempotencyKey: 'preflight-finalize',
+    }, admin);
+    expect(result.status).toBe(400);
+    expect((result.body as { code: string }).code).toBe('INVALID_QTY');
+    expect(db.rows.inventoryStockMovements.length).toBe(beforeMovements);
+    expect(db.rows.inventoryStockBalances.map((balance) => ({ id: balance.id, quantityMicros: balance.quantityMicros, version: balance.version }))).toEqual(beforeBalances);
+    expect((db.rows.inventoryCounts.find((count) => count.id === countId) as Row).status).toBe('ACTIVE');
+  });
+
+  it('reproduces the +1g failure boundary and retries without a partial movement', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const cucumber = await itemId(db, 'Cucumber');
+    const other = await itemId(db, 'Other');
+    await executeReceiveStock(db as any, { locationId: k, lines: [{ stockItemId: cucumber, quantityMicros: kgToMicros(5), unitCostMicros: 900 }, { stockItemId: other, quantityMicros: kgToMicros(5), unitCostMicros: 900 }], idempotencyKey: 'one-gram-receipt' }, admin);
+    const countResult = await executeCreateCount(db as any, { label: 'One gram', locationId: k, idempotencyKey: 'one-gram-count' }, admin);
+    const countId = (countResult.body as { countId: string }).countId;
+    await executeStartCount(db as any, { countId }, admin);
+    const before = db.rows.inventoryStockBalances.map((balance) => ({ id: balance.id, quantityMicros: balance.quantityMicros, version: balance.version }));
+    db.failMutationRoot = 'createInventoryStockMovements';
+    await expect(executeFinalizeCount(db as any, { countId, actuals: [{ stockItemId: cucumber, actualQuantityMicros: kgToMicros(5) + 1 }, { stockItemId: other, actualQuantityMicros: null }], idempotencyKey: 'one-gram-finalize' }, admin)).rejects.toThrow();
+    expect(db.rows.inventoryStockMovements.filter((movement) => movement.sourceId === 'one-gram-finalize').length).toBe(0);
+    expect(db.rows.inventoryStockBalances.map((balance) => ({ id: balance.id, quantityMicros: balance.quantityMicros, version: balance.version }))).toEqual(before);
+    expect((db.rows.inventoryCounts.find((count) => count.id === countId) as Row).status).toBe('ACTIVE');
+    const retry = await executeFinalizeCount(db as any, { countId, actuals: [{ stockItemId: cucumber, actualQuantityMicros: kgToMicros(5) + 1 }, { stockItemId: other, actualQuantityMicros: null }], idempotencyKey: 'one-gram-finalize' }, admin);
+    expect(retry.status).toBe(201);
+    expect(db.rows.inventoryStockMovements.filter((movement) => movement.sourceId === 'one-gram-finalize').length).toBe(1);
+    expect((db.rows.inventoryStockBalances.find((balance) => balance.stockItemId === cucumber) as Row).quantityMicros).toBe(kgToMicros(5) + 1);
+  });
+
+  it('keeps NULL untouched while explicit ZERO posts an adjustment', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const untouched = await itemId(db, 'Untouched');
+    const zeroed = await itemId(db, 'Zeroed');
+    await executeReceiveStock(db as any, { locationId: k, lines: [{ stockItemId: untouched, quantityMicros: kgToMicros(10), unitCostMicros: 900 }, { stockItemId: zeroed, quantityMicros: kgToMicros(10), unitCostMicros: 900 }], idempotencyKey: 'null-zero-receipt' }, admin);
+    const countResult = await executeCreateCount(db as any, { label: 'Null zero', locationId: k, idempotencyKey: 'null-zero-count' }, admin);
+    const countId = (countResult.body as { countId: string }).countId;
+    await executeStartCount(db as any, { countId }, admin);
+    const result = await executeFinalizeCount(db as any, { countId, actuals: [{ stockItemId: untouched, actualQuantityMicros: null }, { stockItemId: zeroed, actualQuantityMicros: 0 }], idempotencyKey: 'null-zero-finalize' }, admin);
+    expect(result.status).toBe(201);
+    expect((db.rows.inventoryStockBalances.find((balance) => balance.stockItemId === untouched) as Row).quantityMicros).toBe(kgToMicros(10));
+    expect((db.rows.inventoryStockBalances.find((balance) => balance.stockItemId === zeroed) as Row).quantityMicros).toBe(0);
+    expect(db.rows.inventoryStockMovements.filter((movement) => movement.sourceId === 'null-zero-finalize').length).toBe(1);
+  });
+
+  it('keeps unrecorded semi-finished production all-or-nothing and retryable', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const tomato = await itemId(db, 'TomAtomic');
+    const onion = await itemId(db, 'OnionAtomic');
+    const ogonek = await itemId(db, 'OgAtomic', 'SEMI_FINISHED');
+    await executeReceiveStock(db as any, { locationId: k, lines: [{ stockItemId: tomato, quantityMicros: kgToMicros(5), unitCostMicros: 900 }, { stockItemId: onion, quantityMicros: kgToMicros(5), unitCostMicros: 700 }], idempotencyKey: 'semi-atomic-receipt' }, admin);
+    await executeUpsertRecipe(db as any, { label: 'Ogatomic', targetKind: 'SEMI_FINISHED', targetId: ogonek, lines: [{ stockItemId: tomato, quantityMicros: 500_000 }, { stockItemId: onion, quantityMicros: 500_000 }], yieldQuantityMicros: 1_000_000, idempotencyKey: 'semi-atomic-recipe' }, admin);
+    const countResult = await executeCreateCount(db as any, { label: 'Semi atomic', locationId: k, idempotencyKey: 'semi-atomic-count' }, admin);
+    const countId = (countResult.body as { countId: string }).countId;
+    await executeStartCount(db as any, { countId }, admin);
+    const before = db.rows.inventoryStockBalances.map((balance) => ({ id: balance.id, quantityMicros: balance.quantityMicros, version: balance.version }));
+    db.failMutationRoot = 'createInventoryStockMovements';
+    await expect(executeFinalizeCount(db as any, { countId, actuals: [{ stockItemId: ogonek, actualQuantityMicros: kgToMicros(1), resolution: 'UNRECORDED_PRODUCTION' }], idempotencyKey: 'semi-atomic-finalize' }, admin)).rejects.toThrow();
+    expect(db.rows.inventoryStockMovements.filter((movement) => movement.sourceId === 'semi-atomic-finalize').length).toBe(0);
+    expect(db.rows.inventoryStockBalances.map((balance) => ({ id: balance.id, quantityMicros: balance.quantityMicros, version: balance.version }))).toEqual(before);
+    const retry = await executeFinalizeCount(db as any, { countId, actuals: [{ stockItemId: ogonek, actualQuantityMicros: kgToMicros(1), resolution: 'UNRECORDED_PRODUCTION' }], idempotencyKey: 'semi-atomic-finalize' }, admin);
+    expect(retry.status).toBe(201);
+    expect(db.rows.inventoryStockMovements.filter((movement) => movement.sourceId === 'semi-atomic-finalize').length).toBe(3);
+    expect((db.rows.inventoryStockBalances.find((balance) => balance.stockItemId === ogonek) as Row).quantityMicros).toBe(kgToMicros(1));
+    expect((db.rows.inventoryStockBalances.find((balance) => balance.stockItemId === tomato) as Row).quantityMicros).toBe(kgToMicros(5) - 500_000);
+    expect((db.rows.inventoryStockBalances.find((balance) => balance.stockItemId === onion) as Row).quantityMicros).toBe(kgToMicros(5) - 500_000);
+  });
+
+  it('serializes concurrent finalizers and keeps one movement set', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const item = await itemId(db, 'Concurrent');
+    await executeReceiveStock(db as any, { locationId: k, lines: [{ stockItemId: item, quantityMicros: kgToMicros(5), unitCostMicros: 900 }], idempotencyKey: 'concurrent-receipt' }, admin);
+    const countResult = await executeCreateCount(db as any, { label: 'Concurrent', locationId: k, idempotencyKey: 'concurrent-count' }, admin);
+    const countId = (countResult.body as { countId: string }).countId;
+    await executeStartCount(db as any, { countId }, admin);
+    const [first, second] = await Promise.all([
+      executeFinalizeCount(db as any, { countId, actuals: [{ stockItemId: item, actualQuantityMicros: kgToMicros(4) }], idempotencyKey: 'concurrent-a' }, admin),
+      executeFinalizeCount(db as any, { countId, actuals: [{ stockItemId: item, actualQuantityMicros: kgToMicros(4) }], idempotencyKey: 'concurrent-b' }, admin),
+    ]);
+    expect([first.status, second.status].some((status) => status === 201)).toBe(true);
+    expect(db.rows.inventoryStockMovements.filter((movement) => movement.sourceId === 'concurrent-a' || movement.sourceId === 'concurrent-b').length).toBe(1);
+    expect((db.rows.inventoryStockBalances.find((balance) => balance.stockItemId === item) as Row).quantityMicros).toBe(kgToMicros(4));
+  });
+
+  it('blocks an external location movement after a revision claims the posting boundary', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const item = await itemId(db, 'ExternalRace');
+    await executeReceiveStock(db as any, { locationId: k, lines: [{ stockItemId: item, quantityMicros: kgToMicros(5), unitCostMicros: 900 }], idempotencyKey: 'external-race-receipt' }, admin);
+    const countResult = await executeCreateCount(db as any, { label: 'External race', locationId: k, idempotencyKey: 'external-race-count' }, admin);
+    const countId = (countResult.body as { countId: string }).countId;
+    await executeStartCount(db as any, { countId }, admin);
+
+    let claimReached!: () => void;
+    let releasePosting!: () => void;
+    const claimed = new Promise<void>((resolve) => { claimReached = resolve; });
+    const release = new Promise<void>((resolve) => { releasePosting = resolve; });
+    db.beforeMutation = async (root) => {
+      if (root === 'createInventoryStockMovements') {
+        claimReached();
+        await release;
+      }
+    };
+
+    const finalizePromise = executeFinalizeCount(db as any, {
+      countId,
+      actuals: [{ stockItemId: item, actualQuantityMicros: kgToMicros(4) }],
+      idempotencyKey: 'external-race-finalize',
+    }, admin);
+    await claimed;
+    const external = await executeReceiveStock(db as any, {
+      locationId: k,
+      lines: [{ stockItemId: item, quantityMicros: kgToMicros(1), unitCostMicros: 900 }],
+      idempotencyKey: 'external-race-after-claim',
+    }, admin);
+    expect(external.status).toBe(400);
+    expect((external.body as { code: string }).code).toBe('REVISION_IN_PROGRESS');
+    releasePosting();
+    const finalized = await finalizePromise;
+    expect(finalized.status).toBe(201);
+    expect(db.rows.inventoryStockMovements.filter((movement) => movement.sourceId === 'external-race-finalize').length).toBe(1);
+    expect(db.rows.inventoryStockMovements.filter((movement) => movement.sourceId === 'external-race-after-claim').length).toBe(0);
   });
 });
 

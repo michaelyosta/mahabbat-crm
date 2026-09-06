@@ -471,3 +471,45 @@ Twenty core или POS domain. Внутри доступного canvas закр
 overlay. Поэтому закрытие sheets не привязано к клику по фону, а выполняется
 только явной кнопкой `×`; это сохраняет надёжный payment/touch workflow. Эта
 UI-деталь не меняет server authorization, financial rules или command API.
+
+## 2026-08-20 — Inventory pilot: ledger-first App boundary
+
+Решение: складские остатки строятся вокруг append-only
+`inventoryStockMovements` и проверяемой `inventoryStockBalances`, а не вокруг
+generic Twenty CRUD или frontend-local state. Every write passes through the
+signed Inventory command gateway; the resolver derives the actor from the
+authenticated POS session, rejects client audit overrides, and limits
+stock-changing commands to ADMIN. CAS balance updates and idempotency keys are
+required because receipts, production, POS consumption and retries can arrive
+concurrently.
+
+The live disposable proof is 48/48 on `:2020`; the browser surface on `:3000`
+shows the real `Склад` page, PIN gate and eight forms/tabs. The initial
+self-hosted failure was recorded as a deployment/runtime blocker rather than
+weakening the command contract or hiding the failure. For the recovery, the
+server executor's stale generated SDK was identified by its timestamp, hash
+and missing `inventoryStockLocations` member; the persisted App SDK and raw
+GraphQL schema were current. Recreating only the stateless server rebuilt the
+runtime layer. `yarn verify-runtime-api-parity` is now the cheap post-deploy
+guard. Twenty core modifications remain `0`; the final `:3000` acceptance is
+48/48 and reconciliation is zero mismatches.
+
+## 2026-08-21 — Freeze Inventory pilot for human product review
+
+Решение: остановить расширение Inventory domain после доказанного runtime
+recovery. Baseline интегрирован fast-forward в Mahabbat `main`, а
+`inventory-pilot-ready-v1` является annotated checkpoint перед реальной
+проверкой сотрудником. Ledger, balances, quantities, MWA, recipes, revisions,
+transfers, POS close consumption, idempotency и reconciliation не меняются без
+реального P0/P1 feedback или подтверждённого business requirement.
+
+Для deployment зафиксирована последовательность metadata apply → SDK
+regeneration → stateless executor refresh → `verify-runtime-api-parity` →
+minimal write → acceptance → reconciliation. PostgreSQL, Redis, CRM/POS data
+и production metadata находятся за stateful boundary и не очищаются.
+
+Human review получает additive synthetic namespace через
+`scripts/seed-inventory-human-review.mjs`; generic destructive reset намеренно
+не добавляется. Следующий product gate — наблюдаемый сотрудником путь
+Приход → Производство → Перемещение → Расход → Ревизия, а не новый automated
+domain scope.

@@ -123,3 +123,44 @@ the page document does not become the POS scroll surface. This is a bounded
 presentation adaptation: no server/domain rules, permissions or command
 payloads changed. A 12-second read polling interval is the bounded shared-state
 refresh mechanism; the server remains authoritative.
+
+## Inventory ledger and backoffice boundary
+
+Inventory writes are not generic CRUD mutations. The `Склад` front component
+authenticates a short-lived POS staff session by PIN, reads balances,
+movements, items and locations through the REST data plane, and sends
+mutations to the signed `/inventory/command` gateway. The server resolver
+derives the staff actor from the session; client-provided actor, role and
+audit fields are rejected. `WAITER` is read-only for Inventory commands;
+master-data and stock-changing commands require `ADMIN`.
+
+`inventoryStockMovements` is the append-only ledger. `inventoryStockBalances`
+is a materialised projection guarded by a version predicate and bounded retry,
+then checked by `scripts/reconcile-inventory.mjs`. Movement idempotency keys
+and the guarded balance update make retries and same-key races converge;
+receipt costing uses fixed-point micro-units and a moving weighted average.
+Recipe versions are effective-dated, and POS close creates a non-blocking
+consumption request whose processor records sale movements or an auditable
+issue (`MISSING_RECIPE`, `INSUFFICIENT_STOCK`, or location/recipe failure).
+
+The domain and metadata are App-only; Twenty core source modifications remain
+`0`. Both the disposable `:2020` and self-hosted `:3000` command/runtime
+proofs are 48/48 PASS. The previous `:3000` failure was isolated to a stale
+generated SDK layer in the server's LOCAL logic-function executor: raw GraphQL
+had the Inventory schema, while the loaded `CoreApiClient` artifact did not.
+Recreating only that stateless server runtime rebuilt the SDK from the current
+App-generated ZIP. `scripts/verify-runtime-api-parity.mjs` guards the exact
+runtime artifact; persistent data is not part of the recovery sequence.
+
+## Current product boundary — pilot freeze
+
+Mahabbat CRM / Backoffice contains Customers, Orders, Loyalty, Reservations
+and Inventory. Operational POS contains Tables, Orders, Kitchen, Precheck and
+Payments. The only critical Inventory integration is:
+
+`CLOSED Order → InventoryConsumptionRequest → stock consumption`
+
+Standalone POS remains a separate runtime concern for the operational cashier;
+Inventory remains the backoffice warehouse surface inside CRM. The pilot is
+frozen at `inventory-pilot-ready-v1`; human review may change presentation
+copy or workflow only when a real P0/P1 finding justifies it.

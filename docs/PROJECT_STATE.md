@@ -378,6 +378,31 @@ are PASS on both runtime targets, including the real `Касса` UI flow on
 self-hosted `:3000`. The next phase is human review and bounded
 hardware/printer/fiscal-payment discovery; do not start it automatically.
 
+## Inventory live pilot checkpoint — 2026-08-20
+
+- Inventory is implemented as an App-only ledger/projection boundary. The
+  command gateway and resolver are in
+  `src/logic-functions/inventory-command.logic-function.ts` and
+  `src/logic-functions/inventory-command.resolver.logic-function.ts`; the
+  dispatcher is `src/inventory/inventory-dispatch.ts`.
+- The disposable `:2020` target completed the live acceptance harness at
+  **48/48 PASS**. It proved the ADMIN-only command surface, server-owned actor
+  context, fixed-point quantities, receipts/MWA, production, recipes,
+  transfer, write-off, revisions, POS sale consumption, retry idempotency,
+  issue creation and reconciliation.
+- The self-hosted `:3000` metadata apply and clean replan completed. Forensic
+  inspection found that the server LOCAL logic-function executor held a stale
+  generated SDK layer whose `CoreApiClient` lacked `inventoryStockLocations`,
+  while raw GraphQL and the persisted current App SDK had it. Recreating only
+  the stateless server rebuilt the layer; `yarn verify-runtime-api-parity`
+  checks this artifact after deployment.
+- The recovered `:3000` API harness is **48/48 PASS**. Browser smoke performed
+  a real receipt write and verified blank revision actual = no movement and
+  zero revision actual = adjustment to zero. Final reconciliation reported
+  zero mismatches. Local gates are typecheck PASS, lint PASS with zero
+  warnings/errors, and 262/262 unit tests PASS. Twenty core source
+  modifications remain 0.
+
 ## P0 loyalty write boundary status
 
 - P0 loyalty write boundary status: the controlled flow is `LoyaltyAdjustmentRequest -> database-event processor -> LoyaltyLedgerEntry`.
@@ -474,3 +499,23 @@ hardware/printer/fiscal-payment discovery; do not start it automatically.
 - Local gates: lint/typecheck pass; unit tests are 236/236. The unchanged
   78-check live API harness passed on both `:2020` and `:3000`; both Linux SDK
   replans are clean. Twenty core modifications remain 0.
+
+## Inventory pilot freeze and human-review readiness — 2026-08-21
+
+- `codex/inventory-live-pilot` was fast-forward integrated into the Mahabbat
+  `main` baseline at `3bdeafb`; the linked Standalone POS worktree remained
+  untouched with its owner changes preserved.
+- Current integrated proof: typecheck, lint, unit 262/262, POS API 78/78,
+  Inventory `:3000` 48/48, final reconciliation `balances=96 movements=297
+  mismatches=0`, CRM smoke, and runtime parity guard all pass. Twenty core
+  modifications remain 0.
+- `inventory-pilot-ready-v1` is the annotated frozen software checkpoint.
+  Inventory domain semantics and the CLOSED Order consumption contract are
+  frozen until real staff feedback or a confirmed bug/requirement.
+- Deployment invariant is documented: metadata apply → SDK regeneration →
+  stateless executor refresh → runtime parity guard → minimal write → full
+  acceptance → reconciliation. Stateful PostgreSQL/Redis/customer/POS data is
+  never part of a runtime refresh.
+- `docs/INVENTORY_HUMAN_REVIEW.md` and the additive namespace seed prepare the
+  next step: a human product review of Остатки, Приход, Производство,
+  Перемещение, Расход, Ревизия, История and Калькуляции.

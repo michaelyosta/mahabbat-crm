@@ -21,6 +21,8 @@
     "seed:demo:dry": "node scripts/seed-demo.mjs --dry-run",
     "seed:pos": "node scripts/seed-pos.mjs",
     "seed:pos:dry": "node scripts/seed-pos.mjs --dry-run",
+    "seed:inventory:review": "node scripts/seed-inventory-human-review.mjs",
+    "verify-runtime-api-parity": "node scripts/verify-runtime-api-parity.mjs",
     "identity:smoke": "node scripts/identity-import-smoke.mjs",
     "aggregate-sales:smoke": "node scripts/aggregate-sales-smoke.mjs",
     "pos:gateway": "node pos-standalone/server/gateway.mjs",

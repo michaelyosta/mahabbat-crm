@@ -29,7 +29,37 @@ import { POS_OPERATIONAL_EVENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-oper
 import { POS_PRINTER_DEVICE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-printer-device.object';
 import { POS_PRODUCTION_STATION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-production-station.object';
 import { POS_PRINT_JOB_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-print-job.object';
+import { INVENTORY_STOCK_LOCATION_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-stock-location.object';
+import { INVENTORY_STOCK_ITEM_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-stock-item.object';
+import { INVENTORY_STOCK_BALANCE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-stock-balance.object';
+import { INVENTORY_STOCK_MOVEMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-stock-movement.object';
+import { INVENTORY_RECIPE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-recipe.object';
+import { INVENTORY_RECIPE_VERSION_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-recipe-version.object';
+import { INVENTORY_RECIPE_LINE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-recipe-line.object';
+import { INVENTORY_CONSUMPTION_REQUEST_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-consumption-request.object';
+import { INVENTORY_CONSUMPTION_ISSUE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-consumption-issue.object';
+import { INVENTORY_COUNT_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-count.object';
+import { INVENTORY_COUNT_LINE_UNIVERSAL_IDENTIFIER } from 'src/objects/inventory-count-line.object';
 
+const inventoryReadOnlyPermissions = [
+  INVENTORY_STOCK_LOCATION_UNIVERSAL_IDENTIFIER,
+  INVENTORY_STOCK_ITEM_UNIVERSAL_IDENTIFIER,
+  INVENTORY_STOCK_BALANCE_UNIVERSAL_IDENTIFIER,
+  INVENTORY_STOCK_MOVEMENT_UNIVERSAL_IDENTIFIER,
+  INVENTORY_RECIPE_UNIVERSAL_IDENTIFIER,
+  INVENTORY_RECIPE_VERSION_UNIVERSAL_IDENTIFIER,
+  INVENTORY_RECIPE_LINE_UNIVERSAL_IDENTIFIER,
+  INVENTORY_CONSUMPTION_REQUEST_UNIVERSAL_IDENTIFIER,
+  INVENTORY_CONSUMPTION_ISSUE_UNIVERSAL_IDENTIFIER,
+  INVENTORY_COUNT_UNIVERSAL_IDENTIFIER,
+  INVENTORY_COUNT_LINE_UNIVERSAL_IDENTIFIER,
+].map((objectUniversalIdentifier) => ({
+  objectUniversalIdentifier,
+  canReadObjectRecords: true,
+  canUpdateObjectRecords: false,
+  canSoftDeleteObjectRecords: false,
+  canDestroyObjectRecords: false,
+}));
 export default defineRole({
   universalIdentifier: MAHABBAT_STAFF_ROLE_UNIVERSAL_IDENTIFIER,
   label: 'Mahabbat Staff',
@@ -44,6 +74,7 @@ export default defineRole({
   canBeAssignedToAgents: false,
   canBeAssignedToApiKeys: false,
   objectPermissions: [
+    ...inventoryReadOnlyPermissions,
     {
       objectUniversalIdentifier:
         STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS.person.universalIdentifier,
