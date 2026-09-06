@@ -40,6 +40,12 @@ const check = (label, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` (${detail})` : ''}`);
 };
 
+// Optional pacing around the application API throttle (same pattern as
+// MAHABBAT_INVENTORY_COMMAND_DELAY_MS in accept-inventory.mjs). Default 0:
+// no behavior change unless explicitly set, e.g. MAHABBAT_POS_COMMAND_DELAY_MS=250.
+const commandDelayMs = Math.max(0, Number.parseInt(process.env.MAHABBAT_POS_COMMAND_DELAY_MS ?? '0', 10) || 0);
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const restGet = async (apiUrl, apiKey, plural) => {
   const records = [];
   let cursor = null;
@@ -73,6 +79,7 @@ const deleteRecord = async (apiUrl, apiKey, plural, id) => {
 };
 
 const postCommand = async (apiUrl, apiKey, command, session, payload) => {
+  if (commandDelayMs > 0) await delay(commandDelayMs);
   const envelope = { command, payload };
   if (session?.sessionToken) envelope.sessionToken = session.sessionToken;
   const res = await fetch(`${apiUrl}/s/pos/command`, {
