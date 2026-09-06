@@ -86,3 +86,6 @@ fixtures/**/*.csv
 
 # python adapter checks
 /scripts/__pycache__/
+
+# local design prototypes (untracked reference mockups, never commit)
+/prototypes/
