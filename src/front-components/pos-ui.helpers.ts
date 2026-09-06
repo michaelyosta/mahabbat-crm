@@ -107,6 +107,23 @@ export const sortPosMenu = (rows: PosRow[]): PosRow[] =>
       russianNaturalCompare(left.name, right.name),
   );
 
+export const filterPosMenu = (
+  rows: PosRow[],
+  searchValue: string,
+  category: string,
+): PosRow[] => {
+  const search = searchValue.trim().toLocaleLowerCase('ru');
+
+  return rows.filter((item) => {
+    const matchesSearch = String(item.name ?? '')
+      .toLocaleLowerCase('ru')
+      .includes(search);
+
+    if (search) return matchesSearch;
+    return category === 'Все' || item.category === category;
+  });
+};
+
 export const isReservationDraftReady = ({
   tableId,
   scheduledAt,
@@ -161,9 +178,23 @@ export const posLineQuantityState = (
     sentQuantity,
     unsentQuantity,
     fullySent: sentQuantity > 0 && unsentQuantity === 0,
-    canDecrease: quantity > Math.max(1, sentQuantity),
+    canDecrease: unsentQuantity > 0,
   };
 };
+
+export const findMergeablePosLine = (
+  lines: PosRow[],
+  guestId: string,
+  menuItemId: string,
+): PosRow | undefined =>
+  [...lines]
+    .reverse()
+    .find(
+      (line) =>
+        line.status === 'ACTIVE' &&
+        line.guestId === guestId &&
+        line.menuItemId === menuItemId,
+    );
 
 const POS_ERROR_MESSAGES: Record<string, string> = {
   ROUTE_UNAVAILABLE: 'Нет связи с сервером. Проверьте сеть и попробуйте снова',

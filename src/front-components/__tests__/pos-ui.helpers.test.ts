@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   commandError,
+  filterPosMenu,
+  findMergeablePosLine,
   formatMicrosForInput,
   formatNegativeTimer,
   isReservationDraftReady,
@@ -211,6 +213,24 @@ describe('POS UI presentation helpers', () => {
     ).toEqual(['kebab', 'plov', 'tea']);
   });
 
+  it('searches the whole menu instead of the selected category', () => {
+    const menu = [
+      { id: 'plov', category: 'Горячее', name: 'Плов' },
+      { id: 'tea', category: 'Напитки', name: 'Чёрный чай' },
+      { id: 'salad', category: 'Салаты', name: 'Ачичук' },
+    ];
+
+    expect(filterPosMenu(menu, '', 'Горячее').map((item) => item.id)).toEqual([
+      'plov',
+    ]);
+    expect(
+      filterPosMenu(menu, 'чай', 'Горячее').map((item) => item.id),
+    ).toEqual(['tea']);
+    expect(filterPosMenu(menu, '  ПЛОВ  ', 'Салаты').map((item) => item.id)).toEqual([
+      'plov',
+    ]);
+  });
+
   it('requires a table, time and guest contact for a review booking', () => {
     const base = {
       tableId: 'table-1',
@@ -246,7 +266,19 @@ describe('POS UI presentation helpers', () => {
       sentQuantity: 0,
       unsentQuantity: 1,
       fullySent: false,
-      canDecrease: false,
+      canDecrease: true,
     });
+  });
+
+  it('merges repeated menu taps into the latest active line for the selected guest', () => {
+    const lines = [
+      { id: 'old', status: 'ACTIVE', guestId: 'guest-1', menuItemId: 'item-1' },
+      { id: 'other-guest', status: 'ACTIVE', guestId: 'guest-2', menuItemId: 'item-1' },
+      { id: 'voided', status: 'VOIDED', guestId: 'guest-1', menuItemId: 'item-1' },
+      { id: 'latest', status: 'ACTIVE', guestId: 'guest-1', menuItemId: 'item-1' },
+    ];
+
+    expect(findMergeablePosLine(lines, 'guest-1', 'item-1')?.id).toBe('latest');
+    expect(findMergeablePosLine(lines, 'guest-1', 'item-2')).toBeUndefined();
   });
 });

@@ -1053,12 +1053,13 @@ const updateLinesTotals = async (
     const guestSubtotal =
       guestLines.length === 0 ? null : microsToCurrency(guestSubtotalMicros);
     const current = normalizeCurrency(guest.subtotal);
+    const needsGuestSubtotalUpdate =
+      guestSubtotal === null
+        ? guest.subtotal != null
+        : current.amountMicros !== guestSubtotal.amountMicros ||
+          current.currencyCode !== guestSubtotal.currencyCode;
 
-    if (
-      guestSubtotal !== null &&
-      (current.amountMicros !== guestSubtotal.amountMicros ||
-        current.currencyCode !== guestSubtotal.currencyCode)
-    ) {
+    if (needsGuestSubtotalUpdate) {
       await client.mutation({
         updatePosOrderGuest: {
           __args: { id: guest.id, data: { subtotal: guestSubtotal } },
@@ -1615,6 +1616,68 @@ export const executeChangeLineQuantity = async (
   await updateLinesTotals(client, order);
 
   return okResult(200, { lineId: line.id, quantity: payload.quantity });
+};
+
+export const executeRemoveUnsentLine = async (
+  client: CoreApiClientLike,
+  payload: { lineId: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const line = await findLineById(client, payload.lineId);
+
+  if (!line) {
+    return errorResult('LINE_NOT_FOUND', 'Line does not exist.');
+  }
+
+  if (
+    line.status === 'VOIDED' &&
+    line.voidReason === 'REMOVED_BEFORE_KITCHEN'
+  ) {
+    return okResult(200, { lineId: line.id, removed: true, replay: true });
+  }
+
+  if (line.status !== 'ACTIVE') {
+    return errorResult('LINE_NOT_EDITABLE', 'Voided lines cannot be removed.');
+  }
+
+  if ((line.kitchenSentQuantity ?? 0) > 0) {
+    return errorResult(
+      'LINE_ALREADY_SENT',
+      'A sent line requires the administrative kitchen correction flow.',
+    );
+  }
+
+  if (!line.orderId) {
+    return errorResult('LINE_NOT_EDITABLE', 'Line is not attached to an order.');
+  }
+
+  const order = await findOrderById(client, line.orderId);
+  if (!order) {
+    return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+  }
+
+  const editableIssue = assertOrderEditableForActor(order, actor);
+  if (editableIssue) return editableIssue;
+
+  await client.mutation({
+    updatePosOrderLine: {
+      __args: {
+        id: line.id,
+        data: {
+          status: 'VOIDED',
+          voidedAt: new Date().toISOString(),
+          voidedByStaffId: actor.staffId,
+          voidPreparedState: 'NOT_PREPARED',
+          voidReason: 'REMOVED_BEFORE_KITCHEN',
+        },
+      },
+      id: true,
+    },
+  });
+
+  await updateLinesTotals(client, order);
+
+  return okResult(201, { lineId: line.id, removed: true });
 };
 
 export const executeAddStopListEntry = async (
@@ -3158,6 +3221,12 @@ export const dispatchPosCommand = async (
       return executeChangeLineQuantity(
         client,
         { lineId: payload.lineId as string, quantity: payload.quantity as number },
+        actor,
+      );
+    case 'removeUnsentLine':
+      return executeRemoveUnsentLine(
+        client,
+        { lineId: payload.lineId as string },
         actor,
       );
     case 'addStopListEntry':

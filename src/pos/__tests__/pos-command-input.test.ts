@@ -132,6 +132,11 @@ describe('parseCommandPayload', () => {
     ).toBe(false);
   });
 
+  it('validates removal of an unsent order line', () => {
+    expect(parseCommandPayload('removeUnsentLine', { lineId: STAFF }).ok).toBe(true);
+    expect(parseCommandPayload('removeUnsentLine', { lineId: 'not-a-uuid' }).ok).toBe(false);
+  });
+
   it('rejects blank guest names', () => {
     expect(
       parseCommandPayload('addGuest', {
