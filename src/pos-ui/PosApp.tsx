@@ -1207,6 +1207,9 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
       .filter((row) => row.isActive !== false)
       .map((row) => row.menuItemId),
   );
+  const sortedStopListMenu = [...menu].sort(
+    (left, right) => Number(stopList.has(right.id)) - Number(stopList.has(left.id)),
+  );
   const methods = (rows.posPaymentMethods ?? [])
     .filter((row) => row.isActive !== false)
     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
@@ -2040,7 +2043,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
           onClose={() => setSheet(null)}
         >
           <div className="mah-pos-stop-list">
-            {menu.map((item) => {
+            {sortedStopListMenu.map((item) => {
               const stopped = stopList.has(item.id);
               return (
                 <div
