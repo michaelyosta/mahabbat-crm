@@ -1,4 +1,6 @@
 /// <reference types="vite/client" />
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import runtimeObject from 'src/objects/mahabbat-runtime-state.object';
 import defaultRole from 'src/default-role';
@@ -36,4 +38,18 @@ describe('manifest invariants', () => {
     }
     expect(defaultRole.config.objectPermissions?.find(p => p.objectUniversalIdentifier === RUNTIME_STATE_ID)?.canUpdateObjectRecords).toBe(true);
   });
+});
+
+
+it('all literal UUIDs in production sources use the supported v4 format', () => {
+  const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(entry =>
+    entry.isDirectory() ? entry.name === '__tests__' ? [] : walk(join(dir, entry.name))
+      : /\.tsx?$/.test(entry.name) && !/\.test\./.test(entry.name) ? [join(dir, entry.name)] : []);
+  const invalid: string[] = [];
+  for (const file of walk('src')) {
+    for (const uuid of readFileSync(file, 'utf8').match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi) ?? []) {
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(uuid)) invalid.push(`${file}: ${uuid}`);
+    }
+  }
+  expect(invalid).toEqual([]);
 });

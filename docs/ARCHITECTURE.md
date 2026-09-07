@@ -194,3 +194,8 @@ Deploy the new runtime-state object, its unique index and function permissions
 before enabling these handlers. Refresh the generated SDK/runtime using the
 existing deployment procedure. Do not clear runtime states as a login workaround:
 receipt manifests are permanent idempotency records, not disposable cache.
+
+The print resolver identifier is now `d4f3e7fb-8c05-4e26-8d94-5a0b1f3e7d44`.
+Its previous value used an invalid UUID variant and prevented App installation.
+If `PRINT_GATEWAY_RESOLVER_ID` is explicitly set in deployment, update that
+value with the gateway rollout; the built-in default already uses the corrected ID.
