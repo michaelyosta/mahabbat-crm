@@ -1,3 +1,5 @@
+import { reserveLoginAttempt, releaseLoginAttempt } from 'src/pos/pos-login-budget';
+import { queryAll } from 'src/server/query-all';
 import {
   createHash,
   randomBytes,
@@ -20,13 +22,7 @@ const PIN_SCRYPT_MAX_MEMORY = 32 * 1024 * 1024;
 const PIN_SALT_BYTES = 16;
 const DEFAULT_SESSION_IDLE_MINUTES = 15;
 const MAX_SESSION_IDLE_MINUTES = 24 * 60;
-const MAX_LOGIN_FAILURES = 5;
-const LOCKOUT_MS = 60 * 1000;
 const MAX_STAFF_ROWS = 1000;
-
-type Connection<T> = {
-  edges?: Array<{ node?: T | null } | null>;
-};
 
 export const posSessionIdleTtlMs = (
   configuredMinutes = process.env.MAHABBAT_POS_SESSION_IDLE_MINUTES,
@@ -68,11 +64,6 @@ type PosSessionRecord = {
   terminalId?: string | null;
 };
 
-type LoginRateState = {
-  failures: number;
-  lockedUntil: number;
-};
-
 export type AuthenticatePosStaffPayload = {
   pin?: string;
   cardIdentifier?: string;
@@ -93,7 +84,6 @@ export type PosAuthResult = {
   body: unknown;
 };
 
-const loginRateStates = new Map<string, LoginRateState>();
 
 const response = (status: number, body: unknown): PosAuthResult => ({
   status,
@@ -224,16 +214,7 @@ const queryRecords = async <T>(
   fields: Record<string, unknown>,
   first = MAX_STAFF_ROWS,
 ): Promise<T[]> => {
-  const result = (await client.query({
-    [root]: {
-      __args: { filter, first },
-      edges: { node: fields },
-    },
-  })) as Record<string, Connection<T> | undefined>;
-
-  return result[root]?.edges
-    ?.map((edge) => edge?.node)
-    .filter((node): node is T => Boolean(node)) ?? [];
+  return queryAll<T>(client, root, { filter, first }, fields);
 };
 
 const STAFF_FIELDS = {
@@ -288,39 +269,6 @@ const updateStaffLoginState = async (
   });
 };
 
-const rateKey = (payload: AuthenticatePosStaffPayload): string =>
-  payload.cardIdentifier
-    ? `card:${payload.cardIdentifier}`
-    : `pin:${payload.terminalId ?? 'default'}`;
-
-const checkRateLimit = (key: string): PosAuthResult | null => {
-  const state = loginRateStates.get(key);
-  if (!state || state.lockedUntil <= Date.now()) return null;
-
-  return response(429, {
-    code: 'POS_LOGIN_RATE_LIMITED',
-    message: 'Слишком много попыток входа. Повторите позже.',
-    retryAfterSeconds: Math.ceil((state.lockedUntil - Date.now()) / 1000),
-  });
-};
-
-const recordFailure = (key: string): void => {
-  const previous = loginRateStates.get(key);
-  const failures = (previous?.failures ?? 0) + 1;
-  loginRateStates.set(key, {
-    failures,
-    lockedUntil: failures >= MAX_LOGIN_FAILURES ? Date.now() + LOCKOUT_MS : 0,
-  });
-};
-
-const clearFailures = (key: string): void => {
-  loginRateStates.delete(key);
-};
-
-export const resetPosAuthRateLimiterForTests = (): void => {
-  loginRateStates.clear();
-};
-
 const staffIsUsable = (staff: PosStaffRecord): PosAuthResult | null => {
   if (staff.isActive === false) {
     return response(403, {
@@ -361,13 +309,16 @@ export const authenticatePosStaff = async (
     });
   }
 
-  const ratePayload = {
-    cardIdentifier: cardIdentifier ?? undefined,
-    terminalId: terminalId ?? undefined,
-  };
-  const key = rateKey(ratePayload);
-  const rateLimited = checkRateLimit(key);
-  if (rateLimited) return rateLimited;
+  let reservation;
+  try {
+    reservation = await reserveLoginAttempt(client);
+  } catch {
+    return response(503, { code: 'POS_LOGIN_UNAVAILABLE', message: 'Вход временно недоступен. Повторите позже.' });
+  }
+  if (!reservation.ok) return response(429, {
+    code: 'POS_LOGIN_RATE_LIMITED', message: 'Слишком много попыток входа. Повторите позже.',
+    retryAfterSeconds: reservation.retryAfterSeconds,
+  });
 
   const staff = await queryRecords<PosStaffRecord>(
     client,
@@ -393,13 +344,11 @@ export const authenticatePosStaff = async (
       candidate = matches[0];
       inactiveCandidate = candidate.isActive === false;
     } else {
-      recordFailure(key);
       return invalidCredentials();
     }
   }
 
   if (!candidate) {
-    recordFailure(key);
     return invalidCredentials();
   }
 
@@ -411,11 +360,9 @@ export const authenticatePosStaff = async (
   if (unusable) return unusable;
 
   if (cardIdentifier && !candidate.cardIdentifier) {
-    recordFailure(key);
     return invalidCredentials();
   }
 
-  clearFailures(key);
   if ((candidate.failedLoginCount ?? 0) !== 0 || candidate.lockedUntil) {
     await updateStaffLoginState(client, candidate, 0, null);
   }
@@ -457,6 +404,8 @@ export const authenticatePosStaff = async (
       message: 'Не удалось создать POS-сессию.',
     });
   }
+
+  await releaseLoginAttempt(client, reservation.windowStartedAt).catch(() => undefined);
 
   return response(201, {
     sessionId,

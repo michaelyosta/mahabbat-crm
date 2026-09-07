@@ -1,7 +1,9 @@
+import { queryAll } from 'src/server/query-all';
+import { readRuntimeState } from 'src/server/runtime-state';
 import { createHash } from 'node:crypto';
 
 import type { CoreApiClientLike } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
-import { divideRoundHalfUp, scaledQuantityMicros } from 'src/inventory/inventory-units';
+import { scaledQuantityMicros } from 'src/inventory/inventory-units';
 import { computeNewWeightedAverage, computeProductionUnitCost, quantityCostTotal } from 'src/inventory/inventory-costing';
 import type { InventoryCommand } from 'src/inventory/inventory-command-input';
 
@@ -47,14 +49,9 @@ type RevisionPostingPlan = {
   affectedItemIds: string[];
 };
 
-type Connection<T> = { edges?: Array<{ node?: T | null } | null>; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null };
-
 const queryConnection = async <T extends Existing>(
   client: CoreApiClientLike, root: string, args: Record<string, unknown>, fields: Record<string, boolean | Record<string, boolean>>,
-): Promise<T[]> => {
-  const result = (await client.query({ [root]: { __args: { first: 200, ...args }, edges: { node: fields }, pageInfo: { hasNextPage: true, endCursor: true } } })) as Record<string, Connection<T>>;
-  return (result[root]?.edges ?? []).map(e => e?.node).filter((n): n is T => Boolean(n));
-};
+): Promise<T[]> => queryAll<T>(client, root, args, fields);
 
 // === field selections (mirror object definitions; use minimal) ===
 const LOC_FIELDS = { id: true, name: true, isActive: true, sortOrder: true };
@@ -106,58 +103,6 @@ const ensureBalance = async (c: CoreApiClientLike, itemId: string, locId: string
   return (await findBalance(c, itemId, locId)) as BalanceRecord;
 };
 
-const updateBalance = async (c: CoreApiClientLike, bal: BalanceRecord, deltaMicros: number, unitCostMicros?: number | null, sourceType?: string) => {
-  const itemId = bal.stockItemId;
-  const locationId = bal.locationId;
-  if (!itemId || !locationId) throw new Error('BALANCE_CONTEXT_MISSING');
-
-  // Ledger inserts are append-only and commute, but the materialised projection
-  // still needs a guarded update. A retry re-reads the latest version, so two
-  // different commands cannot overwrite each other's quantity/cost calculation.
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const current = (await findBalance(c, itemId, locationId)) ?? bal;
-    const oldQty = current.quantityMicros ?? 0;
-    const oldAvg = current.averageCostMicros ?? 0;
-    const newQty = oldQty + deltaMicros;
-    let newAvg = oldAvg;
-    if (sourceType === 'RECEIPT' && deltaMicros > 0 && unitCostMicros != null) {
-      newAvg = oldQty > 0 && newQty !== 0
-        ? computeNewWeightedAverage(oldQty, oldAvg, deltaMicros, unitCostMicros)
-        : unitCostMicros;
-    } else if (sourceType === 'PRODUCTION' && deltaMicros > 0 && unitCostMicros != null) {
-      newAvg = oldQty <= 0 || newQty <= 0
-        ? unitCostMicros
-        : divideRoundHalfUp(oldQty * oldAvg + deltaMicros * unitCostMicros, newQty);
-    } else if (sourceType === 'RECONCILIATION' && unitCostMicros != null) {
-      newAvg = unitCostMicros;
-    }
-    const newTotal = newQty === 0 ? 0 : quantityCostTotal(newQty, newAvg);
-    const expectedVersion = current.version ?? 0;
-    try {
-      const result = await c.mutation({
-        updateInventoryStockBalances: {
-          __args: {
-            filter: { id: { eq: current.id }, version: { eq: expectedVersion } },
-            data: {
-              quantityMicros: newQty,
-              averageCostMicros: newAvg,
-              totalValueMicros: newTotal,
-              version: expectedVersion + 1,
-            },
-          },
-          id: true,
-        },
-      });
-      if (mutationUpdatedRows(result, 'updateInventoryStockBalances') > 0) return;
-    } catch {
-      // A concurrent write can surface as a unique/optimistic conflict. Re-read
-      // and retry; the bounded failure is reported to the command caller.
-    }
-    if (attempt < 7) await waitForBalanceRetry(attempt);
-  }
-  throw new Error('BALANCE_CONFLICT');
-};
-
 // === ledger append ===
 type AppendedMovement = MovementRecord & { created: boolean };
 
@@ -192,22 +137,32 @@ const appendMovement = async (
 };
 
 const reconcileBalanceProjection = async (c: CoreApiClientLike, itemId: string, locationId: string): Promise<void> => {
-  const movements = await queryConnection<MovementRecord>(c, 'inventoryStockMovements', { filter: { stockItemId: { eq: itemId }, locationId: { eq: locationId } }, first: 500 }, MOV_FIELDS);
-  movements.sort((a, b) => `${a.occurredAt ?? ''}:${a.id}`.localeCompare(`${b.occurredAt ?? ''}:${b.id}`));
-  let quantityMicros = 0;
-  let averageCostMicros = 0;
-  for (const movement of movements) {
-    const delta = movement.quantityDeltaMicros ?? 0;
-    if (delta > 0 && movement.unitCostMicros != null) {
-      averageCostMicros = quantityMicros > 0
-        ? computeNewWeightedAverage(quantityMicros, averageCostMicros, delta, movement.unitCostMicros)
-        : movement.unitCostMicros;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    // Read the version BEFORE the ledger snapshot. If another reconciler writes
+    // while we read, retry the whole snapshot instead of adding a stale delta.
+    const balance = await ensureBalance(c, itemId, locationId);
+    const movements = await queryConnection<MovementRecord>(c, 'inventoryStockMovements', { filter: { stockItemId: { eq: itemId }, locationId: { eq: locationId } }, first: 500 }, MOV_FIELDS);
+    movements.sort((a, b) => `${a.occurredAt ?? ''}:${a.id}`.localeCompare(`${b.occurredAt ?? ''}:${b.id}`));
+    let quantityMicros = 0;
+    let averageCostMicros = 0;
+    for (const movement of movements) {
+      const delta = movement.quantityDeltaMicros ?? 0;
+      if (delta > 0 && movement.unitCostMicros != null) {
+        averageCostMicros = quantityMicros > 0
+          ? computeNewWeightedAverage(quantityMicros, averageCostMicros, delta, movement.unitCostMicros)
+          : movement.unitCostMicros;
+      }
+      quantityMicros += delta;
+      if (quantityMicros === 0) averageCostMicros = 0;
     }
-    quantityMicros += delta;
-    if (quantityMicros === 0) averageCostMicros = 0;
+    const result = await c.mutation({ updateInventoryStockBalances: {
+      __args: { filter: { id: { eq: balance.id }, version: { eq: balance.version ?? 0 } },
+        data: { quantityMicros, averageCostMicros, totalValueMicros: quantityCostTotal(quantityMicros, averageCostMicros), version: (balance.version ?? 0) + 1 } }, id: true,
+    } });
+    if (mutationUpdatedRows(result, 'updateInventoryStockBalances') > 0) return;
+    await waitForBalanceRetry(attempt);
   }
-  const balance = await ensureBalance(c, itemId, locationId);
-  await updateBalance(c, balance, quantityMicros - (balance.quantityMicros ?? 0), averageCostMicros, 'RECONCILIATION');
+  throw new Error('BALANCE_CONFLICT');
 };
 
 const applyMovementToProjection = async (
@@ -293,29 +248,52 @@ export const executeReceiveStock = async (
   if (loc.isActive === false) return error('LOCATION_INACTIVE', 'Точка неактивна.');
   const revisionLock = await rejectMovementDuringRevision(c, [payload.locationId]);
   if (revisionLock) return revisionLock;
-  // idempotency: check movements with sourceId == idempotencyKey already exists
-  const existingGroup = await findMovementsBySource(c, payload.idempotencyKey);
-  if (existingGroup.length > 0) return ok(200, { receiptId: payload.idempotencyKey, lineCount: existingGroup.length, replay: true });
-  const now = new Date().toISOString();
-  let created = 0;
+  if (payload.lines.length === 0) return error('INVALID_QTY', 'Приход должен содержать позиции.');
+  const items = new Set<string>();
+  // Validate the entire document before creating any movement.
   for (const line of payload.lines) {
     if (!Number.isSafeInteger(line.quantityMicros) || line.quantityMicros <= 0) return error('INVALID_QTY', 'Количество должно быть положительным.');
     if (!Number.isSafeInteger(line.unitCostMicros) || line.unitCostMicros < 0) return error('INVALID_COST', 'Цена неверна.');
+    if (items.has(line.stockItemId)) return error('DUPLICATE_ITEM', 'Позиция повторяется в приходе.');
+    items.add(line.stockItemId);
     const item = await findItemById(c, line.stockItemId);
     if (!item) return error('ITEM_NOT_FOUND', 'Позиция не найдена.');
+    if (item.isActive === false) return error('ITEM_INACTIVE', 'Позиция неактивна.');
+    quantityCostTotal(line.quantityMicros, line.unitCostMicros);
+  }
+  const canonical = {
+    locationId: payload.locationId, actorStaffId: actor.staffId, comment: payload.comment ?? null,
+    lines: payload.lines.map(({ stockItemId, quantityMicros, unitCostMicros }) => ({ stockItemId, quantityMicros, unitCostMicros }))
+      .sort((a, b) => a.stockItemId.localeCompare(b.stockItemId)),
+  };
+  const fingerprint = createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+  const manifest = await readRuntimeState(c, `inventory-receipt:${payload.idempotencyKey}`, { fingerprint });
+  if (JSON.parse(manifest.value).fingerprint !== fingerprint) return error('IDEMPOTENCY_CONFLICT', 'Ключ прихода уже используется другим документом.');
+  const existingGroup = await findMovementsBySource(c, payload.idempotencyKey);
+  for (const movement of existingGroup) {
+    const line = payload.lines.find(row => row.stockItemId === movement.stockItemId);
+    if (!line || movement.movementType !== 'RECEIPT' || movement.locationId !== payload.locationId ||
+        movement.quantityDeltaMicros !== line.quantityMicros || movement.unitCostMicros !== line.unitCostMicros ||
+        movement.actorStaffId !== actor.staffId || (movement.reason ?? null) !== (payload.comment ?? null)) {
+      return error('IDEMPOTENCY_CONFLICT', 'Сохранённые строки не соответствуют приходу.');
+    }
+  }
+  const now = new Date().toISOString();
+  let created = 0;
+  for (const line of payload.lines) {
     const bal = await ensureBalance(c, line.stockItemId, payload.locationId);
-    const totalCost = quantityCostTotal(line.quantityMicros, line.unitCostMicros);
-    const movKey = `${payload.idempotencyKey}:${line.stockItemId}:${payload.locationId}`;
     const mov = await appendMovement(c, {
       movementType: 'RECEIPT', stockItemId: line.stockItemId, locationId: payload.locationId,
-      quantityDeltaMicros: line.quantityMicros, unitCostMicros: line.unitCostMicros, totalCostMicros: totalCost,
-      sourceType: 'RECEIPT', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: movKey, reason: payload.comment ?? null,
+      quantityDeltaMicros: line.quantityMicros, unitCostMicros: line.unitCostMicros, totalCostMicros: quantityCostTotal(line.quantityMicros, line.unitCostMicros),
+      sourceType: 'RECEIPT', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now,
+      idempotencyKey: `${payload.idempotencyKey}:${line.stockItemId}:${payload.locationId}`, reason: payload.comment ?? null,
     });
-    if (!mov) return error('CONFLICT', 'Приход не проведён.');
+    if (!mov) return error('CONFLICT', 'Приход не завершён. Повторите тот же документ.');
+    // Even an existing movement may need projection repair after a lost response.
     await applyMovementToProjection(c, mov, line.stockItemId, payload.locationId, bal, line.quantityMicros, line.unitCostMicros, 'RECEIPT');
-    created += 1;
+    if (mov.created) created += 1;
   }
-  return ok(201, { receiptId: payload.idempotencyKey, lineCount: created });
+  return ok(created > 0 ? 201 : 200, { receiptId: payload.idempotencyKey, lineCount: payload.lines.length, replay: created === 0 });
 };
 
 // WriteOff
@@ -587,10 +565,8 @@ const findEffectiveRecipeVersion = async (c: CoreApiClientLike, menuItemId: stri
 
 // === Consumption processor (like loyalty) ===
 export const processConsumptionRequest = async (c: CoreApiClientLike, orderId: string, posOrderLines: Array<{ id: string; menuItemId: string; quantity: number; status: string; voidPreparedState?: string | null; createdAt?: string }>): Promise<InventoryResult> => {
-  // check existing movements for this order
-  const existingMovs = await findMovementsBySource(c, orderId);
-  if (existingMovs.length > 0) return ok(200, { orderId, alreadyApplied: true });
   const req = await findConsumptionByOrder(c, orderId);
+  if (req?.status === 'APPLIED') return ok(200, { orderId, alreadyApplied: true });
   if (!req) {
     // create PENDING request if not exists (as POS would)
     try {

@@ -447,3 +447,21 @@
   C5 persona returned rows=120, sum=900 (reload-stable, matching the two
   earlier passes and the PostgreSQL `sum(amount)=900`). `:3000` was not written
   and its seeded `staff@local.test`/demo fixtures were left untouched.
+
+
+## September 2026 audit regressions
+
+Added executable checks for ledger replay beyond 500 movements, POS prechecks
+with 105 lines, incomplete receipts and conflicting replays, concurrent projection
+writes, login budget sharing across clients/terminal IDs/concurrent requests,
+recovery beyond 50 closed orders, poison-record progress, pending receipt reloads,
+server-only state permissions and duplicate manifest identifiers.
+
+CI now also runs standalone gateway tests, printing tests and the POS web build.
+The previous main integration failure was caused by two index-field identifiers
+colliding with kitchen-ticket-line field identifiers. Only the index-field IDs
+were replaced; existing object/field IDs and stored operational data are retained.
+
+Historical PASS counts above describe their dated checkpoints; the PR's current
+CI run is the source of truth for this revision. Physical printer and authenticated
+browser acceptance still require the actual deployment environment.

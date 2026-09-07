@@ -84,7 +84,7 @@ refund or bank-terminal semantics. Slice 5 reservations keep overdue as derived
 state, while prepayments are immutable and applied exactly once into remaining.
 Slice 6 voids lines without deletion and records transfer/void actors in the
 audit object; physical printer routing remains an adapter boundary.
-Physical printer routing is not claimed. The
+Ethernet ESC/POS routing is implemented by the standalone print gateway; physical device acceptance remains deployment-specific. The
 complete boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
 `docs/POS_DOMAIN.md`. Twenty v2.29.0's App event still does not expose a member
 identity, so outer route authentication and the Mahabbat POS session are
@@ -164,3 +164,33 @@ Standalone POS remains a separate runtime concern for the operational cashier;
 Inventory remains the backoffice warehouse surface inside CRM. The pilot is
 frozen at `inventory-pilot-ready-v1`; human review may change presentation
 copy or workflow only when a real P0/P1 finding justifies it.
+
+
+## Audit hardening — September 2026
+
+- Domain connection reads follow all cursors. Missing/repeating cursors fail the
+  operation instead of writing totals from a partial page. This applies to POS
+  totals, precheck snapshots, consumption lines and Inventory ledger replay.
+- Inventory projection writes use a version captured before reading the ledger;
+  conflicts restart the complete read rather than applying a stale delta.
+- Receipts validate all lines first and bind an idempotency key to a persisted
+  document fingerprint. Retrying resumes missing movements and repairs projections.
+  Backoffice keeps a pending receipt/key across retries (and reloads when browser
+  session storage is available). Changed payloads and duplicate item lines fail.
+- `mahabbatRuntimeStates` is a server-only custom object. Its unique key and
+  optimistic version protect receipt manifests, a workspace-wide login budget
+  and recovery cursors. Browser Staff/Waiter/Demo roles have no access.
+- Login attempts reserve capacity in the database before credential verification.
+  Five failed/in-flight attempts exhaust a 60-second window across all terminals
+  and resolver processes. Success releases only its own reservation. Database
+  errors deny login; process restarts and client terminal/card changes do not
+  reset the budget. This global budget can temporarily block legitimate staff
+  during an attack; upstream network admission controls remain useful.
+- Recovery uses durable round-robin cursors and bounded batches for closed orders
+  and pending requests. A failing record is revisited on a later sweep, while
+  later records continue to make progress.
+
+Deploy the new runtime-state object, its unique index and function permissions
+before enabling these handlers. Refresh the generated SDK/runtime using the
+existing deployment procedure. Do not clear runtime states as a login workaround:
+receipt manifests are permanent idempotency records, not disposable cache.

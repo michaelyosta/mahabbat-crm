@@ -1,3 +1,4 @@
+import { queryAll } from 'src/server/query-all';
 import { CoreApiClient } from 'twenty-client-sdk/core';
 import { defineLogicFunction } from 'twenty-sdk/define';
 import type { DatabaseEventPayload, ObjectRecordCreateEvent, ObjectRecordUpdateEvent } from 'twenty-sdk/logic-function';
@@ -6,16 +7,10 @@ import { processConsumptionRequest } from 'src/inventory/inventory-dispatch';
 type RequestRecord = { id?: string; orderId?: string; status?: string; idempotencyKey?: string };
 type Event = DatabaseEventPayload<ObjectRecordCreateEvent<RequestRecord> | ObjectRecordUpdateEvent<RequestRecord>>;
 
-const findLinesForOrder = async (client: { query: (q: unknown) => Promise<unknown> }, orderId: string) => {
-  const res = (await client.query({
-    posOrderLines: {
-      __args: { filter: { orderId: { eq: orderId } }, first: 100 },
-      edges: { node: { id: true, menuItemId: true, quantity: true, status: true, voidPreparedState: true, createdAt: true } },
-      pageInfo: { hasNextPage: true, endCursor: true },
-    },
-  })) as { posOrderLines?: { edges?: Array<{ node?: { id: string; menuItemId: string; quantity: number; status: string; voidPreparedState?: string | null; createdAt?: string } | null }> } };
-  return (res.posOrderLines?.edges ?? []).map(e => e?.node).filter(Boolean) as Array<{ id: string; menuItemId: string; quantity: number; status: string; voidPreparedState?: string | null; createdAt?: string }>;
-};
+type OrderLine = { id: string; menuItemId: string; quantity: number; status: string; voidPreparedState?: string | null; createdAt?: string };
+const findLinesForOrder = (client: { query: (q: unknown) => Promise<unknown>; mutation: (m: unknown) => Promise<unknown> }, orderId: string) =>
+  queryAll<OrderLine>(client, 'posOrderLines', { filter: { orderId: { eq: orderId } }, first: 100 },
+    { id: true, menuItemId: true, quantity: true, status: true, voidPreparedState: true, createdAt: true });
 
 export const processInventoryRequest = async (client: InstanceType<typeof CoreApiClient> | { query: (q: unknown)=>Promise<unknown>; mutation: (m: unknown)=>Promise<unknown> }, orderId: string) => {
   const lines = await findLinesForOrder(client as never, orderId);

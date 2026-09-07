@@ -14,12 +14,12 @@ export default defineIndex({
   isUnique: true,
   fields: [
     {
-      universalIdentifier: '8d2b3f45-6c78-4e90-9f12-3456789abce9',
+      universalIdentifier: '2a0203ca-2c0a-4ccc-9612-2b939cf6e35a',
       fieldUniversalIdentifier:
         POS_KITCHEN_TICKET_LINE_TICKET_FIELD_UNIVERSAL_IDENTIFIER,
     },
     {
-      universalIdentifier: '8d2b3f45-6c78-4e90-9f12-3456789abcea',
+      universalIdentifier: '34535a04-16ae-41df-93a9-3d8843492bfd',
       fieldUniversalIdentifier:
         POS_KITCHEN_TICKET_LINE_ORDER_LINE_FIELD_UNIVERSAL_IDENTIFIER,
     },

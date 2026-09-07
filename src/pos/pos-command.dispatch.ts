@@ -1,3 +1,4 @@
+import { queryAll } from 'src/server/query-all';
 import { createHash, randomUUID } from 'crypto';
 
 import { type CoreApiClientLike } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
@@ -534,22 +535,7 @@ const queryConnection = async <T extends ExistingRecord>(
   args: Record<string, unknown>,
   nodeFields: NodeSelection,
 ): Promise<T[]> => {
-  const result = (await client.query({
-    [root]: {
-      __args: { first: 100, ...args },
-      edges: { node: nodeFields },
-      pageInfo: { hasNextPage: true, endCursor: true },
-    },
-  })) as Record<string, Connection<T>>;
-
-  return (result[root]?.edges ?? [])
-    .map((edge) => edge?.node)
-    .filter((node): node is T => Boolean(node));
-};
-
-type Connection<T> = {
-  edges?: Array<{ node?: T | null } | null>;
-  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+  return queryAll<T>(client, root, args, nodeFields);
 };
 
 const findShiftById = async (

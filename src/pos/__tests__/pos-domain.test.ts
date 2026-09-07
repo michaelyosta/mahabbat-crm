@@ -188,12 +188,14 @@ class FakePosDb {
     const filter = (args?.filter ?? {}) as Record<string, unknown>;
     const limit = typeof args?.first === 'number' ? args.first : 100;
 
-    const filtered = this.findConnections(kind, filter).slice(0, limit);
+    const all = this.findConnections(kind, filter);
+    const start = Number(args.after ?? 0);
+    const filtered = all.slice(start, start + limit);
 
     return Promise.resolve({
       [root]: {
         edges: filtered.map((row) => ({ node: { ...row } })),
-        pageInfo: { hasNextPage: false, endCursor: null },
+        pageInfo: { hasNextPage: start + limit < all.length, endCursor: String(start + filtered.length) },
       },
     });
   }
@@ -1282,4 +1284,23 @@ describe('pos domain concurrency races', () => {
       'IDEMPOTENCY_CONFLICT',
     );
   });
+});
+
+
+it('includes all 105 order lines in the precheck total and snapshot', async () => {
+  const db = dbWithBaseline();
+  await executeOpenShift(db, { idempotencyKey: key(9001) }, waiter);
+  const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(9002) }, waiter);
+  const orderId = (opened.body as { orderId: string }).orderId;
+  const guest = db.seed('posOrderGuests', { id: 'large-guest', orderId, displayNumber: 'Гость 1', ordinal: 1 });
+  for (let i = 0; i < 105; i += 1) db.seed('posOrderLines', {
+    id: `large-line-${i}`, orderId, guestId: guest.id, menuItemId: MENU_A,
+    unitPrice: { amountMicros: 1_000_000, currencyCode: 'KZT' }, quantity: 1,
+    sentQuantity: 1, status: 'ACTIVE', itemNameSnapshot: 'Тест',
+  });
+  db.rows.posOrders.find(r => r.id === orderId)!.status = 'OPEN';
+  const precheck = await executeCreatePrecheck(db, { orderId, idempotencyKey: key(9003) }, waiter);
+  expect(precheck.status).toBe(201);
+  expect(db.rows.posOrders.find(r => r.id === orderId)!.total).toEqual({ amountMicros: 105_000_000, currencyCode: 'KZT' });
+  expect(JSON.parse(db.rows.posPrechecks[0].guestItemsSnapshot as string)[0].lines).toHaveLength(105);
 });

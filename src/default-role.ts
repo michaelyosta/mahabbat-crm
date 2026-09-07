@@ -1,3 +1,4 @@
+import { RUNTIME_STATE_ID } from 'src/objects/mahabbat-runtime-state.object';
 import {
   defineApplicationRole,
   STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS,
@@ -58,6 +59,7 @@ export default defineApplicationRole({
   canBeAssignedToAgents: false,
   canBeAssignedToApiKeys: false,
   objectPermissions: [
+    { objectUniversalIdentifier: RUNTIME_STATE_ID, canReadObjectRecords: true, canUpdateObjectRecords: true, canSoftDeleteObjectRecords: false, canDestroyObjectRecords: false },
     {
       objectUniversalIdentifier:
         STANDARD_OBJECT_UNIVERSAL_IDENTIFIERS.person.universalIdentifier,
