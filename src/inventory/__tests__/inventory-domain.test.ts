@@ -1,3 +1,4 @@
+import { FakeRuntimeState } from 'src/server/__tests__/fake-runtime-state';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -37,6 +38,7 @@ type Kind =
   | 'posOrders';
 
 class FakeDb {
+  readonly runtime = new FakeRuntimeState();
   failMutationRoot: string | null = null;
   failMutationAlways = false;
   beforeMutation: ((root: string) => Promise<void>) | null = null;
@@ -68,13 +70,16 @@ class FakeDb {
     const doc = q as Record<string, unknown>;
     const root = Object.keys(doc)[0];
     const op = doc[root] as Record<string, unknown>;
+    if (root === 'mahabbatRuntimeStates') return this.runtime.query(op);
     const args = op.__args as Record<string, unknown>;
     const filter = (args?.filter ?? {}) as Record<string, unknown>;
     const first = typeof args?.first === 'number' ? args.first : 100;
     const kind = root as Kind;
     if (!(kind in this.rows)) return { [root]: { edges: [], pageInfo: { hasNextPage: false, endCursor: null } } };
-    const filtered = this.find(kind, filter).slice(0, first);
-    return { [root]: { edges: filtered.map(r => ({ node: { ...r } })), pageInfo: { hasNextPage: false, endCursor: null } } };
+    const all = this.find(kind, filter);
+    const start = Number(args.after ?? 0);
+    const filtered = all.slice(start, start + first);
+    return { [root]: { edges: filtered.map(r => ({ node: { ...r } })), pageInfo: { hasNextPage: start + first < all.length, endCursor: String(start + filtered.length) } } };
   }
   async mutation(m: unknown): Promise<unknown> {
     const doc = m as Record<string, unknown>;
@@ -86,6 +91,7 @@ class FakeDb {
       throw new Error(`injected mutation failure: ${root}`);
     }
     const op = doc[root] as Record<string, unknown>;
+    if (root === 'createMahabbatRuntimeState' || root === 'updateMahabbatRuntimeStates') return this.runtime.mutation(root, op);
     const args = op.__args as Record<string, unknown>;
     const data = args?.data as Row;
     const id = args?.id as string | undefined;
@@ -578,4 +584,51 @@ describe('cost deterministic', () => {
     const res = await executeProduceSemi(db as any, { stockItemId: s, quantityMicros: kgToMicros(1), locationId: k, idempotencyKey: 'costprod' }, admin);
     expect((res.body as { unitCostMicros: number }).unitCostMicros).toBe(900); // (0.5*800+0.5*1000)/1 =900
   });
+});
+
+
+describe('audit: receipt completeness and full ledger', () => {
+  it('rebuilds more than 500 movements without truncating the balance', async () => {
+    const db = new FakeDb(); const loc = await locId(db, 'Кухня'); const item = await itemId(db, 'Томаты');
+    for (let i = 0; i < 501; i += 1) db.seed('inventoryStockMovements', { id: `old-${i}`, stockItemId: item, locationId: loc, quantityDeltaMicros: 1000, unitCostMicros: 1000, occurredAt: '2026-01-01', sourceId: `old-${i}` });
+    const result = await executeReceiveStock(db, { locationId: loc, idempotencyKey: 'large', lines: [{ stockItemId: item, quantityMicros: 1000, unitCostMicros: 1000 }] }, admin);
+    expect(result.status).toBe(201);
+    expect(db.rows.inventoryStockBalances[0].quantityMicros).toBe(502_000);
+  });
+  it('validates all receipt lines before writing the first movement', async () => {
+    const db = new FakeDb(); const loc = await locId(db, 'Кухня'); const item = await itemId(db, 'Томаты');
+    const result = await executeReceiveStock(db, { locationId: loc, idempotencyKey: 'invalid', lines: [{ stockItemId: item, quantityMicros: 1000, unitCostMicros: 1000 }, { stockItemId: 'missing', quantityMicros: 1000, unitCostMicros: 1000 }] }, admin);
+    expect(result.status).toBe(400); expect(db.rows.inventoryStockMovements).toHaveLength(0);
+  });
+  it('resumes missing lines after a mid-document failure and rejects changed replay', async () => {
+    const db = new FakeDb(); const loc = await locId(db, 'Кухня'); const a = await itemId(db, 'Томаты'); const b = await itemId(db, 'Огурцы');
+    const payload = { locationId: loc, idempotencyKey: 'partial', lines: [a, b].map(stockItemId => ({ stockItemId, quantityMicros: 1000, unitCostMicros: 1000 })) };
+    let creates = 0;
+    db.beforeMutation = async root => { if (root === 'createInventoryStockMovement' && ++creates === 2) throw new Error('lost connection'); };
+    expect((await executeReceiveStock(db, payload, admin)).status).toBe(400);
+    expect(db.rows.inventoryStockMovements).toHaveLength(1);
+    db.beforeMutation = null;
+    const changed = { ...payload, lines: [{ ...payload.lines[0], quantityMicros: 999 }, payload.lines[1]] };
+    expect((await executeReceiveStock(db, changed, admin)).body).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    expect((await executeReceiveStock(db, payload, admin)).status).toBe(201);
+    expect(db.rows.inventoryStockMovements).toHaveLength(2);
+    expect(db.rows.inventoryStockBalances.map(r => r.quantityMicros)).toEqual([1000, 1000]);
+    expect((await executeReceiveStock(db, payload, admin)).body).toMatchObject({ replay: true, lineCount: 2 });
+  });
+});
+
+
+it('retries the ledger snapshot when a competing projection advances the version', async () => {
+  const db = new FakeDb(); const loc = await locId(db, 'Кухня'); const item = await itemId(db, 'Томаты');
+  let injected = false;
+  db.beforeMutation = async root => {
+    if (root !== 'updateInventoryStockBalances' || injected) return;
+    injected = true;
+    db.seed('inventoryStockMovements', { id: 'concurrent', stockItemId: item, locationId: loc, quantityDeltaMicros: 2000, unitCostMicros: 1000, occurredAt: '2026-01-01', sourceId: 'concurrent' });
+    const balance = db.rows.inventoryStockBalances[0];
+    balance.quantityMicros = 3000; balance.version = Number(balance.version) + 1;
+  };
+  const result = await executeReceiveStock(db, { locationId: loc, idempotencyKey: 'race', lines: [{ stockItemId: item, quantityMicros: 1000, unitCostMicros: 1000 }] }, admin);
+  expect(result.status).toBe(201);
+  expect(db.rows.inventoryStockBalances[0].quantityMicros).toBe(3000);
 });

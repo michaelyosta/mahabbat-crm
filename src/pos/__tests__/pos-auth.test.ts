@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { FakeRuntimeState } from 'src/server/__tests__/fake-runtime-state';
+import { reserveLoginAttempt } from 'src/pos/pos-login-budget';
+import { describe, expect, it } from 'vitest';
 
 import {
   authenticatePosStaff,
@@ -6,7 +8,6 @@ import {
   hashPosPin,
   posSessionIdleTtlMs,
   refreshPosSessionActivity,
-  resetPosAuthRateLimiterForTests,
   revokePosSession,
   verifyPosPin,
 } from 'src/pos/pos-auth';
@@ -19,6 +20,7 @@ const INACTIVE = '10000000-0000-4000-8000-000000000003';
 type Row = Record<string, unknown> & { id: string };
 
 class FakeAuthDb implements CoreApiClientLike {
+  constructor(readonly runtime = new FakeRuntimeState()) {}
   readonly posStaffs: Row[] = [];
   readonly posSessions: Row[] = [];
   private sequence = 1;
@@ -26,6 +28,7 @@ class FakeAuthDb implements CoreApiClientLike {
   async query(document: unknown): Promise<unknown> {
     const root = Object.keys(document as Record<string, unknown>)[0];
     const operation = (document as Record<string, Record<string, unknown>>)[root];
+    if (root === 'mahabbatRuntimeStates') return this.runtime.query(operation);
     const args = (operation.__args ?? {}) as Record<string, unknown>;
     const filter = (args.filter ?? {}) as Record<string, unknown>;
     const rows = root === 'posStaffs' ? this.posStaffs : this.posSessions;
@@ -46,6 +49,7 @@ class FakeAuthDb implements CoreApiClientLike {
   async mutation(document: unknown): Promise<unknown> {
     const root = Object.keys(document as Record<string, unknown>)[0];
     const operation = (document as Record<string, Record<string, unknown>>)[root];
+    if (root === 'createMahabbatRuntimeState' || root === 'updateMahabbatRuntimeStates') return this.runtime.mutation(root, operation);
     const args = (operation.__args ?? {}) as Record<string, unknown>;
     const data = (args.data ?? {}) as Row;
 
@@ -92,7 +96,6 @@ const staffRow = async (
 });
 
 describe('POS authentication context', () => {
-  beforeEach(() => resetPosAuthRateLimiterForTests());
 
   it('hashes PINs without retaining plaintext and verifies them', async () => {
     const encoded = await hashPosPin('1234');
@@ -177,7 +180,7 @@ describe('POS authentication context', () => {
     expect((await authenticatePosStaff(db, { pin: '9999' })).status).toBe(401);
     expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-X' })).status).toBe(403);
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(401);
     }
     expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(429);
@@ -214,5 +217,34 @@ describe('POS authentication context', () => {
 
     expect((await revokePosSession(db, context.context)).status).toBe(200);
     expect((await getAuthenticatedPosContext(db, token)).ok).toBe(false);
+  });
+});
+
+
+describe('durable login budget', () => {
+  it('blocks changed terminals, changed cards and a fresh resolver client', async () => {
+    const shared = new FakeRuntimeState();
+    for (let i = 0; i < 5; i += 1) {
+      const client = new FakeAuthDb(shared);
+      expect((await authenticatePosStaff(client, { pin: '9999', terminalId: `terminal-${i}` })).status).toBe(401);
+    }
+    expect((await authenticatePosStaff(new FakeAuthDb(shared), { pin: '9999', terminalId: 'new' })).status).toBe(429);
+    expect((await authenticatePosStaff(new FakeAuthDb(shared), { cardIdentifier: 'new-card' })).status).toBe(429);
+  });
+  it('reserves at most five concurrent attempts and recovers after the window', async () => {
+    const shared = new FakeRuntimeState();
+    const results = await Promise.all(Array.from({ length: 12 }, () => reserveLoginAttempt(new FakeAuthDb(shared), 1000)));
+    expect(results.filter(r => r.ok)).toHaveLength(5);
+    expect((await reserveLoginAttempt(new FakeAuthDb(shared), 60_999)).ok).toBe(false);
+    expect((await reserveLoginAttempt(new FakeAuthDb(shared), 61_000)).ok).toBe(true);
+  });
+  it('fails closed when the shared budget cannot be read', async () => {
+    const client = { query: async () => { throw new Error('offline'); }, mutation: async () => ({}) };
+    expect((await authenticatePosStaff(client, { pin: '1234' })).status).toBe(503);
+  });
+  it('successful logins release their own reservations', async () => {
+    const db = new FakeAuthDb();
+    db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
+    for (let i = 0; i < 7; i += 1) expect((await authenticatePosStaff(db, { pin: '1234' })).status).toBe(201);
   });
 });
