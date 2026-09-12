@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import test from 'node:test';
 
-import { classifyTransportError, encodeCyrillic, renderKitchen, renderPrecheck } from '../escpos.mjs';
+import { classifyTransportError, encodeCyrillic, renderKitchen, renderPrecheck, renderTestPrint } from '../escpos.mjs';
 import { createPrinterSimulator } from '../printer-simulator.mjs';
 import { RawTcpPrinterTransport } from '../printer-transport.mjs';
+import { parseSystemPrinterRows } from '../windows-printer-provider.mjs';
 
 const sendTo = async (address, bytes, timeoutMs = 500) => new Promise((resolve, reject) => {
   const socket = net.createConnection(address);
@@ -37,6 +38,29 @@ test('ESC/POS renderer keeps Cyrillic readable and marks a cancellation', () => 
   assert.notEqual(bytes.indexOf(Buffer.from('?')), 0, 'output should not be a blank replacement document');
   const decoded = encodeCyrillic('НЕ ГОТОВИТЬ ОТМЕНА ₸', 'CP866');
   assert.ok(decoded.length > 10);
+});
+
+test('ESC/POS renderer creates a non-fiscal Windows test document', () => {
+  const bytes = renderTestPrint({ printerLabel: 'Принтер кухни', createdAt: '2026-09-13T00:00:00.000Z' }, { paperWidth: '80', encodingProfile: 'CP866', cutSupport: false });
+  const decoded = bytes.toString('latin1');
+  assert.match(decoded, /1234567890/);
+  assert.ok(bytes.length > 20);
+});
+
+test('Windows discovery parser keeps queue identity and reports unknown compatibility', () => {
+  const rows = parseSystemPrinterRows(JSON.stringify({ Name: 'Microsoft Print to PDF', DriverName: 'Microsoft Print To PDF', PortName: 'PORTPROMPT:', PrinterStatus: 'Normal', Default: false }), '2026-09-13T00:00:00.000Z');
+  assert.deepEqual(rows[0], {
+    id: 'windows:Microsoft Print to PDF',
+    name: 'Microsoft Print to PDF',
+    systemQueueName: 'Microsoft Print to PDF',
+    driverName: 'Microsoft Print To PDF',
+    portName: 'PORTPROMPT:',
+    isDefault: false,
+    status: 'CONNECTED',
+    isAvailable: true,
+    capabilityStatus: 'UNKNOWN',
+    lastSeen: '2026-09-13T00:00:00.000Z',
+  });
 });
 
 test('precheck renderer is explicitly non-fiscal and contains guest totals', () => {

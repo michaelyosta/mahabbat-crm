@@ -29,6 +29,7 @@ export const POS_COMMANDS = [
   'upsertProductionStation',
   'setMenuItemProductionStation',
   'retryPrintJob',
+  'testPrinterDevice',
 ] as const;
 
 export type PosCommand = (typeof POS_COMMANDS)[number];
@@ -60,7 +61,8 @@ const WAITER_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(
       command !== 'upsertPrinterDevice' &&
       command !== 'upsertProductionStation' &&
       command !== 'setMenuItemProductionStation' &&
-      command !== 'retryPrintJob',
+      command !== 'retryPrintJob' &&
+      command !== 'testPrinterDevice',
   ),
 );
 

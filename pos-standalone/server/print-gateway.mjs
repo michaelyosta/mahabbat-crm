@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 
 import { EscPosRenderer } from './escpos.mjs';
 import { RawTcpPrinterTransport } from './printer-transport.mjs';
+import { listWindowsPrinters, WindowsSpoolerPrinterTransport } from './windows-printer-provider.mjs';
 
 const PORT = Number(process.env.PRINT_GATEWAY_PORT ?? 3110);
 const HOST = process.env.PRINT_GATEWAY_HOST ?? '127.0.0.1';
@@ -16,6 +17,7 @@ const CONNECT_TIMEOUT_MS = Math.max(500, Number(process.env.PRINT_GATEWAY_CONNEC
 const AUTO_RETRY_LIMIT = Math.max(0, Math.min(3, Number(process.env.PRINT_GATEWAY_AUTO_RETRY_LIMIT ?? 2)));
 
 const renderer = new EscPosRenderer();
+const windowsTransport = new WindowsSpoolerPrinterTransport();
 let polling = false;
 let lastPollAt = null;
 let lastError = null;
@@ -32,6 +34,14 @@ const jsonResponse = (res, status, body) => {
 };
 
 const signBody = (body) => createHmac('sha256', INTERNAL_SECRET).update(JSON.stringify(body), 'utf8').digest('hex');
+
+const verifyAgentRequest = ({ method, path, body, signature }) => {
+  if (!INTERNAL_SECRET || typeof signature !== 'string') return false;
+  const expected = signBody({ method, path, body });
+  const provided = Buffer.from(signature, 'utf8');
+  const expectedBuffer = Buffer.from(expected, 'utf8');
+  return provided.length === expectedBuffer.length && timingSafeEqual(provided, expectedBuffer);
+};
 
 const resolverCall = async (body) => {
   if (!TWENTY_API_URL || !INTERNAL_SECRET) throw new Error('print gateway is not configured');
@@ -105,7 +115,9 @@ const printJob = async (job) => {
     return;
   }
 
-  const transport = new RawTcpPrinterTransport({ connectTimeoutMs: CONNECT_TIMEOUT_MS });
+  const transport = printer.connectionType === 'WINDOWS_SPOOLER'
+    ? windowsTransport
+    : new RawTcpPrinterTransport({ connectTimeoutMs: CONNECT_TIMEOUT_MS });
   let lastTransportError = null;
   for (let attempt = 0; attempt <= AUTO_RETRY_LIMIT; attempt += 1) {
     try {
@@ -143,7 +155,21 @@ const pollOnce = async () => {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   if (req.method === 'GET' && url.pathname === '/health') {
-    jsonResponse(res, 200, { status: 'ok', service: 'print-gateway', gatewayId: GATEWAY_ID, lastPollAt, dispatchedCount, lastError });
+    jsonResponse(res, 200, { status: 'ok', service: 'print-gateway', gatewayId: GATEWAY_ID, systemPrinterProvider: 'WINDOWS_SPOOLER', lastPollAt, dispatchedCount, lastError });
+    return;
+  }
+  if (req.method === 'GET' && url.pathname === '/system-printers') {
+    const body = null;
+    if (!verifyAgentRequest({ method: req.method, path: url.pathname, body, signature: req.headers['x-mahabbat-signature'] })) {
+      jsonResponse(res, 403, { code: 'INVALID_SIGNATURE', message: 'Invalid print gateway signature.' });
+      return;
+    }
+    try {
+      const printers = await listWindowsPrinters();
+      jsonResponse(res, 200, { provider: 'WINDOWS_SPOOLER', discoveredAt: new Date().toISOString(), printers });
+    } catch (error) {
+      jsonResponse(res, 503, { code: error?.code ?? 'WINDOWS_SPOOLER_UNAVAILABLE', message: 'Windows printer discovery is unavailable.' });
+    }
     return;
   }
   if (req.method !== 'GET') {

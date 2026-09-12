@@ -166,8 +166,10 @@ export type TransferOrderLinesToGuestPayload = {
 export type UpsertPrinterDevicePayload = {
   printerDeviceId?: string;
   label: string;
+  connectionType?: 'ETHERNET_RAW_TCP' | 'WINDOWS_SPOOLER';
   host: string;
   port: number;
+  systemQueueName?: string | null;
   isActive: boolean;
   isPrecheckPrinter: boolean;
   paperWidth: '58' | '80';
@@ -191,6 +193,11 @@ export type SetMenuItemProductionStationPayload = {
 
 export type RetryPrintJobPayload = {
   printJobId: string;
+  idempotencyKey: string;
+};
+
+export type TestPrinterDevicePayload = {
+  printerDeviceId: string;
   idempotencyKey: string;
 };
 
@@ -661,18 +668,22 @@ const parsePrinterDevicePayload = (payload: unknown): ParseResult<UpsertPrinterD
   const value = payload as Record<string, unknown>;
   const label = parseBoundedLabel(value.label, 'label');
   if (!label.ok) return label;
-  const host = parsePrinterHost(value.host);
+  const connectionType = value.connectionType === undefined ? 'ETHERNET_RAW_TCP' : value.connectionType;
+  if (connectionType !== 'ETHERNET_RAW_TCP' && connectionType !== 'WINDOWS_SPOOLER') return invalid('INVALID_PAYLOAD', 'connectionType is invalid');
+  const host = connectionType === 'WINDOWS_SPOOLER' ? { ok: true as const, data: 'windows-spooler' } : parsePrinterHost(value.host);
   if (!host.ok) return host;
   if (value.printerDeviceId !== undefined && !isUuid(value.printerDeviceId)) return invalid('INVALID_PAYLOAD', 'printerDeviceId must be a UUID');
-  if (typeof value.port !== 'number' || !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) return invalid('INVALID_PAYLOAD', 'port must be an integer between 1 and 65535');
+  if (connectionType === 'ETHERNET_RAW_TCP' && (typeof value.port !== 'number' || !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535)) return invalid('INVALID_PAYLOAD', 'port must be an integer between 1 and 65535');
+  if (connectionType === 'WINDOWS_SPOOLER' && (typeof value.systemQueueName !== 'string' || !value.systemQueueName.trim() || value.systemQueueName.trim().length > 255 || /[\u0000-\u001f\u007f]/.test(value.systemQueueName))) return invalid('INVALID_PAYLOAD', 'systemQueueName is required for a Windows printer');
   if (typeof value.isActive !== 'boolean' || typeof value.isPrecheckPrinter !== 'boolean' || typeof value.cutSupport !== 'boolean') return invalid('INVALID_PAYLOAD', 'printer boolean flags are required');
   if (value.paperWidth !== '58' && value.paperWidth !== '80') return invalid('INVALID_PAYLOAD', 'paperWidth must be 58 or 80');
   if (value.encodingProfile !== 'CP866' && value.encodingProfile !== 'WINDOWS1251' && value.encodingProfile !== 'UTF8') return invalid('INVALID_PAYLOAD', 'encodingProfile is invalid');
   if (value.escPosCodePage !== undefined && value.escPosCodePage !== null && (!Number.isSafeInteger(value.escPosCodePage) || Number(value.escPosCodePage) < 0 || Number(value.escPosCodePage) > 255)) return invalid('INVALID_PAYLOAD', 'escPosCodePage must be between 0 and 255');
   return { ok: true, data: {
     ...(typeof value.printerDeviceId === 'string' ? { printerDeviceId: value.printerDeviceId } : {}),
-    label: label.data, host: host.data, port: value.port, isActive: value.isActive,
-    isPrecheckPrinter: value.isPrecheckPrinter, paperWidth: value.paperWidth,
+    label: label.data, connectionType, host: host.data, port: connectionType === 'WINDOWS_SPOOLER' ? 9100 : value.port as number,
+    systemQueueName: connectionType === 'WINDOWS_SPOOLER' ? String(value.systemQueueName).trim() : null,
+    isActive: value.isActive, isPrecheckPrinter: value.isPrecheckPrinter, paperWidth: value.paperWidth,
     encodingProfile: value.encodingProfile, escPosCodePage: value.escPosCodePage === null ? null : value.escPosCodePage as number | undefined,
     cutSupport: value.cutSupport,
   } };
@@ -709,6 +720,15 @@ const parseRetryPrintJobPayload = (payload: unknown): ParseResult<RetryPrintJobP
   const key = parseIdempotencyKey(value.idempotencyKey);
   if (!key.ok) return key;
   return { ok: true, data: { printJobId: value.printJobId, idempotencyKey: key.data } };
+};
+
+const parseTestPrinterDevicePayload = (payload: unknown): ParseResult<TestPrinterDevicePayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const value = payload as Record<string, unknown>;
+  if (!isUuid(value.printerDeviceId)) return invalid('INVALID_PAYLOAD', 'printerDeviceId must be a UUID');
+  const key = parseIdempotencyKey(value.idempotencyKey);
+  if (!key.ok) return key;
+  return { ok: true, data: { printerDeviceId: value.printerDeviceId, idempotencyKey: key.data } };
 };
 
 export const parsePosCommandEnvelope = (
@@ -844,5 +864,7 @@ export const parseCommandPayload = <T>(
       return parseSetMenuItemProductionStationPayload(payload) as unknown as ParseResult<T>;
     case 'retryPrintJob':
       return parseRetryPrintJobPayload(payload) as unknown as ParseResult<T>;
+    case 'testPrinterDevice':
+      return parseTestPrinterDevicePayload(payload) as unknown as ParseResult<T>;
   }
 };

@@ -85,6 +85,7 @@ export default defineObject({
       options: [
         { id: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c61', value: 'KITCHEN_TICKET', label: 'Кухонная фиша', position: 0, color: 'blue' },
         { id: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c62', value: 'PRECHECK', label: 'Пречек', position: 1, color: 'orange' },
+        { id: 'c54eb7f4-acdd-4e37-9cc7-6d3ed6d90c61', value: 'TEST_PRINT', label: 'Тестовая печать', position: 2, color: 'gray' },
       ],
     },
     {
@@ -124,6 +125,7 @@ export default defineObject({
         { id: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c63', value: 'KITCHEN_NEW', label: 'Кухня · новое', position: 0, color: 'blue' },
         { id: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c64', value: 'KITCHEN_CANCEL', label: 'Кухня · отмена', position: 1, color: 'red' },
         { id: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c65', value: 'PRECHECK', label: 'Пречек', position: 2, color: 'orange' },
+        { id: '857dc8a3-010a-4c91-a679-7f0edd9cf88f', value: 'TEST_PRINT', label: 'Тестовая печать', position: 3, color: 'gray' },
       ],
     },
     { universalIdentifier: POS_PRINT_JOB_STATUS_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.SELECT, name: 'status', label: 'Статус', description: 'Состояние доставки; SENT не означает подтверждённую бумагу', icon: 'IconStatusChange', isNullable: false, defaultValue: "'QUEUED'", isUIEditable: false, options: statusOptions },

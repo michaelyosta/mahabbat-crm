@@ -54,12 +54,27 @@ const error = (code: string, message: string, status = 400) =>
 const asGatewayJob = async (
   client: Parameters<typeof updatePrintJob>[0],
   job: PrintJobRecord,
-): Promise<Record<string, unknown>> => ({
-  ...job,
-  printer: job.printerDeviceId
+): Promise<Record<string, unknown>> => {
+  const livePrinter = job.printerDeviceId
     ? await _internal.findPrinter(client, job.printerDeviceId)
-    : null,
-});
+    : null;
+  let snapshot: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(job.payloadSnapshot ?? '{}') as Record<string, unknown>;
+    if (parsed.printerSnapshot && typeof parsed.printerSnapshot === 'object') {
+      snapshot = parsed.printerSnapshot as Record<string, unknown>;
+    }
+  } catch {
+    snapshot = null;
+  }
+  return {
+    ...job,
+    // New jobs carry an immutable destination/profile snapshot. The live
+    // record is only the fallback for historical jobs created before this
+    // snapshot existed.
+    printer: snapshot && livePrinter ? { ...livePrinter, ...snapshot, id: livePrinter.id } : livePrinter,
+  };
+};
 
 const claim = async (
   client: Parameters<typeof updatePrintJob>[0],
@@ -145,7 +160,9 @@ const report = async (
     confirmedAt: outcome === 'CONFIRMED' ? new Date().toISOString() : null,
   });
   if (!next) return error('CONFLICT', 'Print job could not be updated.', 409);
-  if (next.sourceType && next.sourceId) await refreshSourcePrintStatus(client, next.sourceType as 'KITCHEN_TICKET' | 'PRECHECK', next.sourceId);
+  if ((next.sourceType === 'KITCHEN_TICKET' || next.sourceType === 'PRECHECK') && next.sourceId) {
+    await refreshSourcePrintStatus(client, next.sourceType, next.sourceId);
+  }
   return response({ jobId: next.id, status: next.status });
 };
 

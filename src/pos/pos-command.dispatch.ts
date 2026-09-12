@@ -26,6 +26,7 @@ import {
   findStation,
   enqueueKitchenPrintJobs,
   enqueuePrecheckPrintJob,
+  enqueueTestPrintJob,
   type KitchenQueueLine,
   type PrecheckQueueSnapshot,
 } from 'src/printing/print-queue';
@@ -1224,6 +1225,11 @@ const PRINTING_PRINTER_FIELDS: NodeSelection = {
   connectionType: true,
   host: true,
   port: true,
+  systemQueueName: true,
+  systemPrinterName: true,
+  systemDriverName: true,
+  systemPortName: true,
+  capabilityStatus: true,
   isActive: true,
   isPrecheckPrinter: true,
   paperWidth: true,
@@ -1248,8 +1254,10 @@ export const executeUpsertPrinterDevice = async (
   payload: {
     printerDeviceId?: string;
     label: string;
+    connectionType: 'ETHERNET_RAW_TCP' | 'WINDOWS_SPOOLER';
     host: string;
     port: number;
+    systemQueueName?: string | null;
     isActive: boolean;
     isPrecheckPrinter: boolean;
     paperWidth: '58' | '80';
@@ -1259,15 +1267,17 @@ export const executeUpsertPrinterDevice = async (
   },
   actor: PosActor,
 ): Promise<CommandResult> => {
-  if (!payload.label.trim() || !validPrinterHost(payload.host) || !Number.isInteger(payload.port) || payload.port < 1 || payload.port > 65535) {
+  if (!payload.label.trim() || (payload.connectionType === 'ETHERNET_RAW_TCP' && (!validPrinterHost(payload.host) || !Number.isInteger(payload.port) || payload.port < 1 || payload.port > 65535)) || (payload.connectionType === 'WINDOWS_SPOOLER' && (!payload.systemQueueName || !payload.systemQueueName.trim()))) {
     return errorResult('PRINT_CONFIG_INVALID', 'Параметры принтера некорректны.');
   }
   const updatedAt = new Date().toISOString();
   const data = {
     label: payload.label.trim(),
-    connectionType: 'ETHERNET_RAW_TCP',
-    host: payload.host.trim(),
-    port: payload.port,
+    connectionType: payload.connectionType,
+    host: payload.connectionType === 'WINDOWS_SPOOLER' ? 'windows-spooler' : payload.host.trim(),
+    port: payload.connectionType === 'WINDOWS_SPOOLER' ? 9100 : payload.port,
+    systemQueueName: payload.connectionType === 'WINDOWS_SPOOLER' ? payload.systemQueueName?.trim() : null,
+    capabilityStatus: payload.connectionType === 'WINDOWS_SPOOLER' ? 'UNKNOWN' : null,
     isActive: payload.isActive,
     isPrecheckPrinter: payload.isPrecheckPrinter,
     paperWidth: payload.paperWidth,
@@ -1288,7 +1298,7 @@ export const executeUpsertPrinterDevice = async (
     await createOperationalEvent(client, {
       eventType: 'PRINTER_DEVICE_CONFIGURED',
       actorStaffId: actor.staffId,
-      details: { printerDeviceId: printer.id, host: data.host, port: data.port, isActive: data.isActive, isPrecheckPrinter: data.isPrecheckPrinter },
+      details: { printerDeviceId: printer.id, connectionType: data.connectionType, systemQueueName: data.systemQueueName ?? null, isActive: data.isActive, isPrecheckPrinter: data.isPrecheckPrinter },
       idempotencyKey: `printer-config:${printer.id}:${updatedAt}`,
     });
     return okResult(payload.printerDeviceId ? 200 : 201, { printerDeviceId: printer.id, status: 'CONFIGURED' });
@@ -1327,6 +1337,22 @@ export const executeUpsertProductionStation = async (
   } catch {
     return errorResult('CONFLICT', 'Станцию не удалось сохранить.');
   }
+};
+
+export const executeTestPrinterDevice = async (
+  client: CoreApiClientLike,
+  payload: { printerDeviceId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const result = await enqueueTestPrintJob(client, payload.printerDeviceId, payload.idempotencyKey);
+  if (result.status >= 400) return result;
+  await createOperationalEvent(client, {
+    eventType: 'PRINTER_TEST_PRINT_REQUESTED',
+    actorStaffId: actor.staffId,
+    details: { printerDeviceId: payload.printerDeviceId, printJobId: (result.body as { printJobId?: string }).printJobId ?? null },
+    idempotencyKey: `printer-test:${payload.printerDeviceId}:${payload.idempotencyKey}`,
+  });
+  return result;
 };
 
 export const executeSetMenuItemProductionStation = async (
@@ -3674,8 +3700,10 @@ export const dispatchPosCommand = async (
       return executeUpsertPrinterDevice(client, {
         printerDeviceId: payload.printerDeviceId as string | undefined,
         label: payload.label as string,
+        connectionType: (payload.connectionType as 'ETHERNET_RAW_TCP' | 'WINDOWS_SPOOLER' | undefined) ?? 'ETHERNET_RAW_TCP',
         host: payload.host as string,
         port: payload.port as number,
+        systemQueueName: payload.systemQueueName as string | null | undefined,
         isActive: payload.isActive as boolean,
         isPrecheckPrinter: payload.isPrecheckPrinter as boolean,
         paperWidth: payload.paperWidth as '58' | '80',
@@ -3701,6 +3729,11 @@ export const dispatchPosCommand = async (
         printJobId: payload.printJobId as string,
         idempotencyKey: payload.idempotencyKey as string,
       }, actor.staffId);
+    case 'testPrinterDevice':
+      return executeTestPrinterDevice(client, {
+        printerDeviceId: payload.printerDeviceId as string,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
     case 'authenticatePosStaff':
     case 'logoutPosStaff':
     case 'refreshPosSession':

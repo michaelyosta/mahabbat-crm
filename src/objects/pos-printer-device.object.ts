@@ -10,6 +10,16 @@ export const POS_PRINTER_DEVICE_HOST_FIELD_UNIVERSAL_IDENTIFIER =
   'a1f0c4d8-5e72-4b93-9a61-2d7f8c0e4b14';
 export const POS_PRINTER_DEVICE_PORT_FIELD_UNIVERSAL_IDENTIFIER =
   'a1f0c4d8-5e72-4b93-9a61-2d7f8c0e4b15';
+export const POS_PRINTER_DEVICE_SYSTEM_QUEUE_NAME_FIELD_UNIVERSAL_IDENTIFIER =
+  '6caab906-97be-4554-aad0-b61e8a5d6018';
+export const POS_PRINTER_DEVICE_SYSTEM_PRINTER_NAME_FIELD_UNIVERSAL_IDENTIFIER =
+  'ddcb17d1-52fc-450f-b76c-776087d157ac';
+export const POS_PRINTER_DEVICE_SYSTEM_DRIVER_NAME_FIELD_UNIVERSAL_IDENTIFIER =
+  'd1af189d-da76-4006-bf06-aaebf8681c90';
+export const POS_PRINTER_DEVICE_SYSTEM_PORT_NAME_FIELD_UNIVERSAL_IDENTIFIER =
+  '90e3db9a-04c0-49c2-b84c-221a37c3a127';
+export const POS_PRINTER_DEVICE_CAPABILITY_STATUS_FIELD_UNIVERSAL_IDENTIFIER =
+  '91e50edf-b160-4499-a9e0-aba7641bbcdf';
 export const POS_PRINTER_DEVICE_IS_ACTIVE_FIELD_UNIVERSAL_IDENTIFIER =
   'a1f0c4d8-5e72-4b93-9a61-2d7f8c0e4b16';
 export const POS_PRINTER_DEVICE_IS_PRECHECK_PRINTER_FIELD_UNIVERSAL_IDENTIFIER =
@@ -71,6 +81,7 @@ export default defineObject({
       defaultValue: "'ETHERNET_RAW_TCP'",
       options: [
         { id: 'a1f0c4d8-5e72-4b93-9a61-2d7f8c0e4b31', value: 'ETHERNET_RAW_TCP', label: 'Ethernet', position: 0, color: 'blue' },
+        { id: 'e27818dd-6e34-4c7a-acf7-45b435e6ea60', value: 'WINDOWS_SPOOLER', label: 'Системный принтер Windows', position: 1, color: 'green' },
       ],
     },
     {
@@ -93,6 +104,66 @@ export default defineObject({
       isNullable: false,
       defaultValue: 9100,
       universalSettings: { dataType: NumberDataType.INT },
+    },
+    {
+      universalIdentifier: POS_PRINTER_DEVICE_SYSTEM_QUEUE_NAME_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'systemQueueName',
+      label: 'Системное имя принтера',
+      description: 'Стабильное имя очереди Windows; выбирается из обнаруженных устройств',
+      icon: 'IconPrinter',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
+    },
+    {
+      universalIdentifier: POS_PRINTER_DEVICE_SYSTEM_PRINTER_NAME_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'systemPrinterName',
+      label: 'Имя устройства Windows',
+      description: 'Снимок имени устройства, показанный пользователю',
+      icon: 'IconTag',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
+    },
+    {
+      universalIdentifier: POS_PRINTER_DEVICE_SYSTEM_DRIVER_NAME_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'systemDriverName',
+      label: 'Драйвер Windows',
+      description: 'Техническая диагностика, полученная от Windows',
+      icon: 'IconSettings',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
+    },
+    {
+      universalIdentifier: POS_PRINTER_DEVICE_SYSTEM_PORT_NAME_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'systemPortName',
+      label: 'Порт Windows',
+      description: 'Техническая диагностика очереди Windows',
+      icon: 'IconNetwork',
+      isNullable: true,
+      defaultValue: null,
+      isUIEditable: false,
+    },
+    {
+      universalIdentifier: POS_PRINTER_DEVICE_CAPABILITY_STATUS_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.SELECT,
+      name: 'capabilityStatus',
+      label: 'Совместимость',
+      description: 'Совместимость с ESC/POS; Windows не всегда предоставляет эту информацию',
+      icon: 'IconQuestionMark',
+      isNullable: false,
+      defaultValue: "'UNKNOWN'",
+      isUIEditable: false,
+      options: [
+        { id: '161a03c8-325a-4252-ab2d-95ac3b39407c', value: 'SUPPORTED', label: 'Поддерживается', position: 0, color: 'green' },
+        { id: 'd1b9735e-f049-4ecc-88da-975727cfde68', value: 'UNKNOWN', label: 'Не проверена', position: 1, color: 'yellow' },
+        { id: '7f56969c-229a-4a25-b075-e43cc2b8e714', value: 'UNSUPPORTED', label: 'Не поддерживается', position: 2, color: 'red' },
+      ],
     },
     {
       universalIdentifier: POS_PRINTER_DEVICE_IS_ACTIVE_FIELD_UNIVERSAL_IDENTIFIER,

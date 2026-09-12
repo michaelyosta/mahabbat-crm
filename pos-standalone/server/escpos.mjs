@@ -179,9 +179,23 @@ export const renderPrecheck = (snapshot, profile = {}) => {
   return writer.finish();
 };
 
+export const renderTestPrint = (snapshot, profile = {}) => {
+  const writer = initWriter(profile);
+  const width = writer.width;
+  writer.align('center').bold(true).double(true).line('МАХАББАТ').double(false).bold(false);
+  writer.line('ТЕСТ ПРИНТЕРА').line('='.repeat(width));
+  writer.align('left').line('Русский текст').line('КУХНЯ').line('БАР').line('МАНГАЛ').line('ПРЕЧЕК');
+  writer.line('1234567890').line('12 500 ₸');
+  writer.line(`Принтер: ${fit(snapshot.printerLabel ?? '—', width - 9)}`);
+  writer.line(`Время: ${new Date(snapshot.createdAt ?? Date.now()).toLocaleString('ru-RU')}`);
+  writer.align('center').line('='.repeat(width));
+  return writer.finish();
+};
+
 export class EscPosRenderer {
   render(job) {
     const snapshot = typeof job.payloadSnapshot === 'string' ? JSON.parse(job.payloadSnapshot) : job.payloadSnapshot;
+    if (job.documentType === 'TEST_PRINT') return renderTestPrint(snapshot, job.profile);
     return job.documentType === 'PRECHECK' ? renderPrecheck(snapshot, job.profile) : renderKitchen(snapshot, job.profile);
   }
 }

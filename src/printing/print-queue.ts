@@ -12,6 +12,11 @@ export type PrinterDeviceRecord = ExistingRecord & {
   connectionType?: string | null;
   host?: string | null;
   port?: number | null;
+  systemQueueName?: string | null;
+  systemPrinterName?: string | null;
+  systemDriverName?: string | null;
+  systemPortName?: string | null;
+  capabilityStatus?: string | null;
   isActive?: boolean | null;
   isPrecheckPrinter?: boolean | null;
   paperWidth?: string | null;
@@ -94,6 +99,11 @@ const PRINTER_FIELDS: NodeSelection = {
   connectionType: true,
   host: true,
   port: true,
+  systemQueueName: true,
+  systemPrinterName: true,
+  systemDriverName: true,
+  systemPortName: true,
+  capabilityStatus: true,
   isActive: true,
   isPrecheckPrinter: true,
   paperWidth: true,
@@ -254,6 +264,26 @@ export const refreshSourcePrintStatus = async (
 
 const serializeSnapshot = (value: unknown): string => JSON.stringify(value);
 
+export const printerDestinationSnapshot = (printer: PrinterDeviceRecord | null | undefined) =>
+  printer
+    ? {
+        id: printer.id,
+        label: printer.label ?? null,
+        connectionType: printer.connectionType ?? null,
+        host: printer.host ?? null,
+        port: printer.port ?? null,
+        systemQueueName: printer.systemQueueName ?? null,
+        systemPrinterName: printer.systemPrinterName ?? null,
+        systemDriverName: printer.systemDriverName ?? null,
+        systemPortName: printer.systemPortName ?? null,
+        capabilityStatus: printer.capabilityStatus ?? 'UNKNOWN',
+        paperWidth: printer.paperWidth ?? '80',
+        encodingProfile: printer.encodingProfile ?? 'CP866',
+        escPosCodePage: printer.escPosCodePage ?? null,
+        cutSupport: printer.cutSupport !== false,
+      }
+    : null;
+
 const createOrGetPrintJob = async (
   client: CoreApiClientLike,
   data: Record<string, unknown>,
@@ -396,6 +426,7 @@ export const enqueueKitchenPrintJobs = async (
           action: line.action,
         })),
       })),
+      printerSnapshot: printerDestinationSnapshot(group.printer),
     };
     const job = await createOrGetPrintJob(client, {
       label: `${input.ticketType === 'CANCELLATION' ? 'Отмена' : 'Кухня'} · ${group.stationName} · Стол ${context.tableNumber}`,
@@ -464,7 +495,7 @@ export const enqueuePrecheckPrintJob = async (
     productionStationId: null,
     documentType: 'PRECHECK',
     status: missing ? 'FAILED' : 'QUEUED',
-    payloadSnapshot: serializeSnapshot({ version: 1, ...snapshot, documentType: 'PRECHECK', isReprint: Boolean(options?.reprintOfJobId), routeErrorCode: missing ? 'PRECHECK_PRINTER_NOT_CONFIGURED' : null, routeErrorMessage: missing ? 'Не выбран принтер пречеков.' : null }),
+    payloadSnapshot: serializeSnapshot({ version: 1, ...snapshot, documentType: 'PRECHECK', isReprint: Boolean(options?.reprintOfJobId), printerSnapshot: printerDestinationSnapshot(printer), routeErrorCode: missing ? 'PRECHECK_PRINTER_NOT_CONFIGURED' : null, routeErrorMessage: missing ? 'Не выбран принтер пречеков.' : null }),
     attemptCount: 0,
     lastErrorCode: missing ? 'PRECHECK_PRINTER_NOT_CONFIGURED' : null,
     lastErrorMessage: missing ? 'Не выбран принтер пречеков.' : null,
@@ -477,6 +508,45 @@ export const enqueuePrecheckPrintJob = async (
   }, key);
   await refreshSourcePrintStatus(client, 'PRECHECK', snapshot.precheckId);
   return job;
+};
+
+export const enqueueTestPrintJob = async (
+  client: CoreApiClientLike,
+  printerDeviceId: string,
+  idempotencyKey: string,
+): Promise<{ status: number; body: unknown }> => {
+  const printer = await findPrinter(client, printerDeviceId);
+  if (!printer) return { status: 404, body: { code: 'PRINTER_NOT_FOUND', message: 'Принтер не найден.' } };
+  if (printer.isActive === false) return { status: 409, body: { code: 'PRINTER_INACTIVE', message: 'Принтер отключён.' } };
+  if (printer.connectionType === 'WINDOWS_SPOOLER' && !printer.systemQueueName) {
+    return { status: 409, body: { code: 'SYSTEM_PRINTER_NOT_BOUND', message: 'Системный принтер не выбран.' } };
+  }
+  const createdAt = new Date().toISOString();
+  const key = `TEST_PRINT:${printer.id}:${idempotencyKey}`;
+  const job = await createOrGetPrintJob(client, {
+    label: `Тестовая печать · ${printer.label ?? 'Принтер'}`,
+    sourceType: 'TEST_PRINT',
+    sourceId: printer.id,
+    printerDeviceId: printer.id,
+    productionStationId: null,
+    documentType: 'TEST_PRINT',
+    status: 'QUEUED',
+    payloadSnapshot: serializeSnapshot({
+      version: 1,
+      sourceType: 'TEST_PRINT',
+      sourceId: printer.id,
+      documentType: 'TEST_PRINT',
+      printerSnapshot: printerDestinationSnapshot(printer),
+      printerLabel: printer.label ?? 'Принтер',
+      createdAt,
+    }),
+    attemptCount: 0,
+    lastErrorCode: null,
+    lastErrorMessage: null,
+    createdAt,
+  }, key);
+  if (!job) return { status: 409, body: { code: 'CONFLICT', message: 'Тестовое задание не создано.' } };
+  return { status: 201, body: { printJobId: job.id, status: job.status, documentType: 'TEST_PRINT' } };
 };
 
 export const executeRetryPrintJob = async (
@@ -602,7 +672,9 @@ export const markGatewayRestartUnknown = async (
     });
     if (next) {
       updated.push(next);
-      if (next.sourceType && next.sourceId) await refreshSourcePrintStatus(client, next.sourceType as 'KITCHEN_TICKET' | 'PRECHECK', next.sourceId);
+      if ((next.sourceType === 'KITCHEN_TICKET' || next.sourceType === 'PRECHECK') && next.sourceId) {
+        await refreshSourcePrintStatus(client, next.sourceType, next.sourceId);
+      }
     }
   }
   return updated;
