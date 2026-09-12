@@ -10,7 +10,7 @@ export default defineIndex({
   objectUniversalIdentifier: POS_PRINT_JOB_UNIVERSAL_IDENTIFIER,
   fields: [
     {
-      universalIdentifier: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c4b',
+      universalIdentifier: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c4c',
       fieldUniversalIdentifier: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c3c',
     },
   ],
