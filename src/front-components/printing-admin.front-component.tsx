@@ -49,8 +49,10 @@ const unwrapRows = (value: unknown, root: string): Row[] => {
   if (Array.isArray(value)) return value.filter((row): row is Row => Boolean(row && typeof row === 'object' && 'id' in row));
   if (!value || typeof value !== 'object') return [];
   const record = value as Record<string, unknown>;
+  const nestedData = record.data && typeof record.data === 'object' ? record.data as Record<string, unknown> : null;
   if (Array.isArray(record.data)) return record.data.filter((row): row is Row => Boolean(row && typeof row === 'object' && 'id' in row));
-  const node = record[root];
+  const node = record[root] ?? nestedData?.[root];
+  if (Array.isArray(node)) return node.filter((row): row is Row => Boolean(row && typeof row === 'object' && 'id' in row));
   if (node && typeof node === 'object') {
     const edges = (node as { edges?: Array<{ node?: Row | null } | null> }).edges;
     if (Array.isArray(edges)) return edges.map((edge) => edge?.node).filter((row): row is Row => Boolean(row?.id));
