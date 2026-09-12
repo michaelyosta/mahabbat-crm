@@ -534,9 +534,14 @@ const queryConnection = async <T extends ExistingRecord>(
   args: Record<string, unknown>,
   nodeFields: NodeSelection,
 ): Promise<T[]> => {
+  // Callers provide the standard Twenty connection arguments (`filter`, `first`).
+  // Keep accepting a raw filter as well, but do not nest `filter` inside `filter`.
+  // Twenty rejects that shape at runtime with:
+  // "Filter for field ... must have exactly one operator".
+  const connectionArgs = 'filter' in args ? args : { filter: args };
   const result = (await client.query({
     [root]: {
-      __args: { first: 100, ...args },
+      __args: { first: 100, ...connectionArgs },
       edges: { node: nodeFields },
       pageInfo: { hasNextPage: true, endCursor: true },
     },
@@ -2017,12 +2022,30 @@ const repairKitchenTicket = async (
   ticket: KitchenTicketRecord,
   actor: PosActor,
 ): Promise<void> => {
+  if (!ticket.orderId) return;
+  const tickets = await findKitchenTicketsByOrder(client, ticket.orderId);
+  const newItemsTickets = tickets.filter(
+    (candidate) => candidate.ticketType === 'NEW_ITEMS',
+  );
+  const allNewItemLines = (
+    await Promise.all(
+      newItemsTickets.map((candidate) =>
+        findKitchenTicketLines(client, candidate.id),
+      ),
+    )
+  ).flat();
   const ticketLines = await findKitchenTicketLines(client, ticket.id);
   for (const ticketLine of ticketLines) {
     if (!ticketLine.orderLineId) continue;
     const line = await findLineById(client, ticketLine.orderLineId);
     if (!line) continue;
-    const sent = Math.max(line.kitchenSentQuantity ?? 0, ticketLine.quantity ?? 0);
+    const sent = allNewItemLines
+      .filter(
+        (candidate) =>
+          candidate.orderLineId === ticketLine.orderLineId &&
+          candidate.action === 'ADD',
+      )
+      .reduce((sum, candidate) => sum + (candidate.quantity ?? 0), 0);
     if (sent !== (line.kitchenSentQuantity ?? 0)) {
       await client.mutation({
         updatePosOrderLine: {

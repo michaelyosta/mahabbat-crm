@@ -198,6 +198,7 @@ export const findMergeablePosLine = (
 
 const POS_ERROR_MESSAGES: Record<string, string> = {
   ROUTE_UNAVAILABLE: 'Нет связи с сервером. Проверьте сеть и попробуйте снова',
+  INVALID_POS_CREDENTIALS: 'Неверный PIN. Попробуйте ещё раз',
   COMMAND_FORBIDDEN: 'Действие доступно только администратору',
   INVALID_STAFF: 'Сотрудник не найден или отключён',
   SHIFT_REQUIRED: 'Сначала откройте смену',
