@@ -112,7 +112,8 @@ const runPowerShell = ({ script, input = '', env = {}, timeoutMs = 15_000 } = {}
 });
 
 const asBoolean = (value) => value === true || String(value ?? '').toLowerCase() === 'true';
-const unavailableStatuses = new Set(['offline', 'error', 'notavailable', 'unknown']);
+const unavailableStatuses = new Set(['offline', 'error', 'notavailable', 'unavailable', 'paused']);
+const connectedStatuses = new Set(['normal', 'idle', 'printing', 'warmingup', 'processing', 'pending']);
 
 export const parseSystemPrinterRows = (value, lastSeen = new Date().toISOString()) => {
   let parsed = value;
@@ -127,7 +128,9 @@ export const parseSystemPrinterRows = (value, lastSeen = new Date().toISOString(
     const rawStatus = String(row.PrinterStatus ?? row.status ?? '').trim();
     const normalizedStatus = rawStatus.toLowerCase().replace(/[ _-]/g, '');
     const workOffline = asBoolean(row.WorkOffline ?? row.workOffline);
-    const isAvailable = !workOffline && !unavailableStatuses.has(normalizedStatus);
+    const isUnavailable = workOffline || unavailableStatuses.has(normalizedStatus);
+    const isAvailable = !isUnavailable && connectedStatuses.has(normalizedStatus);
+    const status = isUnavailable ? 'UNAVAILABLE' : isAvailable ? 'CONNECTED' : 'UNKNOWN';
     return [{
       id: `windows:${name}`,
       name,
@@ -135,7 +138,7 @@ export const parseSystemPrinterRows = (value, lastSeen = new Date().toISOString(
       driverName: String(row.DriverName ?? row.driverName ?? '').trim() || null,
       portName: String(row.PortName ?? row.portName ?? '').trim() || null,
       isDefault: asBoolean(row.Default ?? row.isDefault),
-      status: isAvailable ? 'CONNECTED' : rawStatus ? 'UNAVAILABLE' : 'UNKNOWN',
+      status,
       isAvailable,
       capabilityStatus: 'UNKNOWN',
       lastSeen,

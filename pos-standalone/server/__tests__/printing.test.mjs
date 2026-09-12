@@ -63,6 +63,12 @@ test('Windows discovery parser keeps queue identity and reports unknown compatib
   });
 });
 
+test('Windows discovery parser does not overclaim an unknown spooler status', () => {
+  const rows = parseSystemPrinterRows(JSON.stringify({ Name: 'Uncertain queue', PrinterStatus: 'Other', WorkOffline: false }), '2026-09-13T00:00:00.000Z');
+  assert.equal(rows[0].status, 'UNKNOWN');
+  assert.equal(rows[0].isAvailable, false);
+});
+
 test('precheck renderer is explicitly non-fiscal and contains guest totals', () => {
   const bytes = renderPrecheck({
     tableNumber: '4', waiterName: 'Айдана', orderId: 'order-4', totalMicros: 125000000,
