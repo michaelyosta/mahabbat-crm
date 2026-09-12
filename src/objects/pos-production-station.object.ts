@@ -16,6 +16,8 @@ export const POS_PRODUCTION_STATION_MENU_ITEMS_FIELD_UNIVERSAL_IDENTIFIER =
   'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b28';
 export const POS_PRODUCTION_STATION_PRINT_JOBS_FIELD_UNIVERSAL_IDENTIFIER =
   'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b29';
+export const POS_PRODUCTION_STATION_KITCHEN_TICKET_LINES_FIELD_UNIVERSAL_IDENTIFIER =
+  'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b2a';
 
 export default defineObject({
   universalIdentifier: POS_PRODUCTION_STATION_UNIVERSAL_IDENTIFIER,
@@ -64,28 +66,6 @@ export default defineObject({
       },
     },
     {
-      universalIdentifier: POS_PRODUCTION_STATION_CREATED_AT_FIELD_UNIVERSAL_IDENTIFIER,
-      type: FieldType.DATE_TIME,
-      name: 'createdAt',
-      label: 'Создана',
-      description: 'Время создания станции',
-      icon: 'IconClockPlus',
-      isNullable: false,
-      defaultValue: 'now',
-      isUIEditable: false,
-    },
-    {
-      universalIdentifier: POS_PRODUCTION_STATION_UPDATED_AT_FIELD_UNIVERSAL_IDENTIFIER,
-      type: FieldType.DATE_TIME,
-      name: 'updatedAt',
-      label: 'Изменена',
-      description: 'Время последнего изменения станции',
-      icon: 'IconClockEdit',
-      isNullable: false,
-      defaultValue: 'now',
-      isUIEditable: false,
-    },
-    {
       universalIdentifier: POS_PRODUCTION_STATION_MENU_ITEMS_FIELD_UNIVERSAL_IDENTIFIER,
       type: FieldType.RELATION,
       name: 'menuItems',
@@ -105,6 +85,19 @@ export default defineObject({
       icon: 'IconClipboardList',
       relationTargetObjectMetadataUniversalIdentifier: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c33',
       relationTargetFieldMetadataUniversalIdentifier: 'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c37',
+      universalSettings: { relationType: RelationType.ONE_TO_MANY },
+    },
+    {
+      universalIdentifier: POS_PRODUCTION_STATION_KITCHEN_TICKET_LINES_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.RELATION,
+      name: 'kitchenTicketLines',
+      label: 'Позиции кухонных фиш',
+      description: 'Строки кухонных фиш, направленные на станцию',
+      icon: 'IconList',
+      relationTargetObjectMetadataUniversalIdentifier:
+        '8d2b3f45-6c78-4e90-9f12-3456789abcde',
+      relationTargetFieldMetadataUniversalIdentifier:
+        '8d2b3f45-6c78-4e90-9f12-3456789abce9',
       universalSettings: { relationType: RelationType.ONE_TO_MANY },
     },
   ],

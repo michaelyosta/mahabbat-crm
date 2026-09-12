@@ -164,17 +164,6 @@ export default defineObject({
       isUIEditable: false,
     },
     {
-      universalIdentifier: POS_KITCHEN_TICKET_CREATED_AT_FIELD_UNIVERSAL_IDENTIFIER,
-      type: FieldType.DATE_TIME,
-      name: 'createdAt',
-      label: 'Создана',
-      description: 'Время создания kitchen ticket',
-      icon: 'IconClockPlus',
-      isNullable: false,
-      defaultValue: 'now',
-      isUIEditable: false,
-    },
-    {
       universalIdentifier: POS_KITCHEN_TICKET_LINES_FIELD_UNIVERSAL_IDENTIFIER,
       type: FieldType.RELATION,
       name: 'lines',

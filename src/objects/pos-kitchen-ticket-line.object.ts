@@ -159,7 +159,7 @@ export default defineObject({
       relationTargetObjectMetadataUniversalIdentifier:
         'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b22',
       relationTargetFieldMetadataUniversalIdentifier:
-        'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b28',
+        'b2f1d5e9-6a83-4c04-ab72-3e8f9d1c5b2a',
       universalSettings: {
         relationType: RelationType.MANY_TO_ONE,
         onDelete: OnDeleteAction.SET_NULL,
