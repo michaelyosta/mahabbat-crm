@@ -7,7 +7,7 @@
  */
 import { spawnSync } from 'node:child_process';
 
-const container = process.env.MAHABBAT_RUNTIME_CONTAINER?.trim() || 'mahabbat-twenty-server-1';
+const container = process.env.MAHABBAT_RUNTIME_CONTAINER?.trim() || 'mahabbat-server-1';
 if (!/^[A-Za-z0-9_.-]+$/.test(container)) throw new Error('MAHABBAT_RUNTIME_CONTAINER contains unsupported characters');
 
 const probe = `

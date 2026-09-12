@@ -2027,6 +2027,7 @@ const repairKitchenTicket = async (
   const newItemsTickets = tickets.filter(
     (candidate) => candidate.ticketType === 'NEW_ITEMS',
   );
+  const ticketLines = await findKitchenTicketLines(client, ticket.id);
   const allNewItemLines = (
     await Promise.all(
       newItemsTickets.map((candidate) =>
@@ -2034,12 +2035,19 @@ const repairKitchenTicket = async (
       ),
     )
   ).flat();
-  const ticketLines = await findKitchenTicketLines(client, ticket.id);
+  // The newly created ticket can briefly be absent from the order aggregate.
+  // Merge the current ticket's lines explicitly, deduplicated by immutable id,
+  // so a successful print never leaves the order looking unsent in the UI.
+  const mergedNewItemLines = Array.from(
+    new Map(
+      [...allNewItemLines, ...ticketLines].map((line) => [line.id, line]),
+    ).values(),
+  );
   for (const ticketLine of ticketLines) {
     if (!ticketLine.orderLineId) continue;
     const line = await findLineById(client, ticketLine.orderLineId);
     if (!line) continue;
-    const sent = allNewItemLines
+    const sent = mergedNewItemLines
       .filter(
         (candidate) =>
           candidate.orderLineId === ticketLine.orderLineId &&
