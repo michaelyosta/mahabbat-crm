@@ -81,6 +81,8 @@ const jobStatusLabel = (value: string | undefined): string => ({ QUEUED: 'В о�
 const safeMessage = (value: unknown): string => {
   const message = value instanceof Error ? value.message : String(value);
   if (/[\u0000-\u001f]/.test(message)) return 'Операция не выполнена.';
+  if (/\b401\b|unauthorized/i.test(message) && !/[А-Яа-яЁё]/.test(message)) return 'Административная сессия истекла. Войдите снова.';
+  if (/request to .*status \d{3}|bad request|internal server error/i.test(message) && !/[А-Яа-яЁё]/.test(message)) return 'Операция не выполнена. Проверьте данные и повторите.';
   if (/printer|spooler|gateway|queue|route|signature|systemqueue|windows|econnrefused|econnreset|timed? ?out|powershell|win32|raw/i.test(message) && !/[А-Яа-яЁё]/.test(message)) return 'Печатное устройство сейчас недоступно.';
   return message || 'Операция не выполнена.';
 };
