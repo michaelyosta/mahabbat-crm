@@ -716,15 +716,21 @@ const main = async () => {
             const prechecksAfterCreate = (await restGet(apiUrl, apiKey, 'posPrechecks'))
               .filter((precheck) => precheck.orderId === order2Id);
             const activePrecheck = prechecksAfterCreate.find((precheck) => precheck.status === 'ACTIVE');
+            const precheckJobs = (await restGet(apiUrl, apiKey, 'posPrintJobs'))
+              .filter((job) => job.sourceType === 'PRECHECK' && job.sourceId === activePrecheck?.id);
+            const activePrecheckJob = precheckJobs[precheckJobs.length - 1];
             const lockedOrder = (await restGet(apiUrl, apiKey, 'posOrders')).find((order) => order.id === order2Id);
             check(
-              'createPrecheck snapshots totals and locks the order',
+              'createPrecheck snapshots totals, locks the order, and enqueues a printable job',
               [200, 201].includes(createPrecheck.status) &&
                 createPrecheck.body?.precheckId === activePrecheck?.id &&
-                activePrecheck?.printStatus === 'PRINTED' &&
+                ['QUEUED', 'DISPATCHING', 'SENT', 'CONFIRMED'].includes(activePrecheck?.printStatus) &&
+                Boolean(activePrecheckJob?.id) &&
+                ['QUEUED', 'DISPATCHING', 'SENT', 'CONFIRMED'].includes(activePrecheckJob?.status) &&
+                !activePrecheckJob?.lastErrorCode &&
                 activePrecheck?.totalSnapshot?.amountMicros === lockedOrder?.total?.amountMicros &&
                 lockedOrder?.status === 'PRECHECK_PRINTED',
-              `status ${createPrecheck.status}, prechecks=${prechecksAfterCreate.length}, orderStatus=${lockedOrder?.status}`,
+              `status ${createPrecheck.status}, printStatus=${activePrecheck?.printStatus}, jobStatus=${activePrecheckJob?.status}, orderStatus=${lockedOrder?.status}`,
             );
 
             const precheckRetry = await postCommand(apiUrl, apiKey, 'createPrecheck', admin, {
