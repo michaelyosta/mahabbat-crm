@@ -99,7 +99,10 @@ POS — **отдельный операционный слой** на собст
 ### 9. KitchenPrint — Slice 2 РЕАЛИЗОВАН
 - `PosKitchenTicket` + `PosKitchenTicketLine`: immutable `NEW_ITEMS` snapshot, guest attribution, action/quantity delta, actor и print status.
 - `kitchenSentQuantity` различает sent/unsent; semantic hash и request key защищены unique indexes. Повтор без новых строк — `NO_UNSENT_LINES`; повтор/параллельный вызов не создаёт дубль.
-- `KitchenPrintAdapter` отделяет physical printer; текущий `MockKitchenPrintAdapter` не заявляет реальную печать.
+- `KitchenPrintAdapter` отделяет physical printer; `MockKitchenPrintAdapter`
+  remains the automated acceptance transport. Windows Spooler and Ethernet
+  delivery are documented separately in `docs/SYSTEM_PRINTER_DISCOVERY.md`
+  and `docs/PHYSICAL_PRINTING.md`; neither claims physical paper acceptance.
 
 ### 10. Precheck — Slice 3 РЕАЛИЗОВАН
 - `PosPrecheck` хранит immutable order/guest monetary snapshot, actor, print status,

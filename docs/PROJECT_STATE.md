@@ -367,16 +367,18 @@ The UI is mounted as the standalone `Касса` page layout/front component. It
 touch workspace now has a compact header, zones, table board, menu and a
 persistent order panel; reservation, payment and admin workflows use sheets
 instead of page-length forms. It remains connected to real read APIs and the
-signed POS command boundary; kitchen, precheck and cancellation adapters are
-still mock-only.
+signed POS command boundary. The simulator remains the automated acceptance
+adapter; Windows Spooler and Ethernet delivery are available through the
+documented host gateway, while no physical printer is configured yet.
 
 # Следующий лучший шаг
 
 CRM foundation, aggregate import, Dashboard, Reservations, Demo-ready shell and
 PRE-POS hardening are complete. POS Slices 1–7 and the product/UX refinement
 are PASS on both runtime targets, including the real `Касса` UI flow on
-self-hosted `:3000`. The next phase is human review and bounded
-hardware/printer/fiscal-payment discovery; do not start it automatically.
+self-hosted `:3000`. Windows system-printer discovery and configuration-driven
+printing routing are now implemented and documented. The next phase is human
+review with one real printer; do not start fiscal-payment work automatically.
 
 ## Inventory live pilot checkpoint — 2026-08-20
 
@@ -519,3 +521,32 @@ hardware/printer/fiscal-payment discovery; do not start it automatically.
 - `docs/INVENTORY_HUMAN_REVIEW.md` and the additive namespace seed prepare the
   next step: a human product review of Остатки, Приход, Производство,
   Перемещение, Расход, Ревизия, История and Калькуляции.
+
+## System printer discovery and routing — software PASS
+
+- The Windows host print gateway discovers installed printer queues through the
+  native `Get-Printer` mechanism and writes through the Windows Print Spooler.
+  Docker and browser code do not enumerate Windows printers.
+- The backend route `/s/printing/system-printers` is authenticated with the
+  internal route signature. The browser receives safe discovery data only; it
+  never receives the gateway secret or a service API key.
+- `PrinterDevice` is separate from runtime system-printer discovery. Windows
+  devices store the exact `systemQueueName`; a removed or renamed queue is
+  shown as unavailable and is never silently replaced.
+- The `Печать` UI supports refresh, human-readable device binding, profile and
+  paper-width selection, normal-path Test Print, and station routing. One
+  device may be assigned to multiple stations, and route changes affect new
+  PrintJobs while historical destination snapshots remain immutable.
+- The host lifecycle is wired into the outer `mahabbat-start/status/doctor/stop`
+  scripts. Status reports discovered queues, configured devices and broken
+  bindings; doctor checks the Windows Spooler, gateway and exact bindings.
+- Verified on the Windows self-hosted runtime: one virtual queue was discovered,
+  three PrinterDevices were configured, and zero bindings were broken. The
+  virtual queue demonstrates discovery and software transport only; it is not
+  evidence of ESC/POS paper compatibility.
+- Targeted verification: 288 unit tests, 12 printing tests, 7 standalone
+  gateway tests, runtime parity, revision atomicity and inventory
+  reconciliation (`mismatches=0`) pass. Exact UI smoke at 1024×768 and
+  1366×768 has no document-level horizontal overflow.
+- Physical ESC/POS output, Cyrillic on paper, 80 mm geometry, cutter behavior
+  and fiscalization remain NOT TESTED.

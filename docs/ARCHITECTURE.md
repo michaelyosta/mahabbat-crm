@@ -78,18 +78,35 @@ Slice 6 реализует ADMIN-only void/transfer commands и bounded append-o
 физически удалить line; отправленная на кухню отмена создаёт immutable
 `CANCELLATION` ticket.
 Slice 2 kitchen output and Slice 3 precheck output
-are immutable snapshots using mock adapters. Slice 4 payments stop at
+are immutable snapshots; the simulator/mock adapter remains the automated
+acceptance boundary. Slice 4 payments stop at
 server-authoritative CASH/CARD/OTHER records and close-at-zero, without fiscal,
 refund or bank-terminal semantics. Slice 5 reservations keep overdue as derived
 state, while prepayments are immutable and applied exactly once into remaining.
 Slice 6 voids lines without deletion and records transfer/void actors in the
-audit object; physical printer routing remains an adapter boundary.
-Physical printer routing is not claimed. The
-complete boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
+audit object. Physical delivery now has a separate host-side Windows Spooler
+and Ethernet adapter path; paper confirmation is still not claimed. The
+complete POS boundary and sequence are documented in `docs/POS_BOUNDARY.md` and
 `docs/POS_DOMAIN.md`. Twenty v2.29.0's App event still does not expose a member
 identity, so outer route authentication and the Mahabbat POS session are
 deliberately separate layers. The POS session is a pilot operational boundary,
 not a claim that Twenty's outer API-key route is a full Internet auth platform.
+
+## System printer discovery and routing
+
+Windows queues are runtime state, not automatically created Mahabbat business
+records. The host-side `print-gateway` uses the native `Get-Printer` provider
+and Windows Print Spooler; the authenticated App route
+`/s/printing/system-printers` exposes only safe discovery data to the admin UI.
+The browser never enumerates queues or receives the internal route secret.
+
+An administrator binds a discovered queue to a named `PrinterDevice`, then
+assigns that device to one or more `ProductionStation` routes in `Печать`.
+The server resolves station → device → exact system queue for every job and
+stores an immutable destination snapshot in the `PrintJob` payload. Missing
+queues and missing routes fail visibly without a silent fallback. See
+`docs/SYSTEM_PRINTER_DISCOVERY.md` for the host lifecycle, failure semantics,
+profiles and physical-hardware boundary.
 
 ## POS Slice 7 UI surface
 

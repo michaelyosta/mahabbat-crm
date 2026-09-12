@@ -102,6 +102,25 @@
   CRM smoke. Linux SDK replan is clean on both targets. No physical printer,
   fiscal or bank-terminal behavior was introduced.
 
+## Current printing boundary — Windows discovery and routing
+
+- The automated POS acceptance transport remains the simulator. It continues
+  to prove kitchen delta, precheck and cancellation semantics without requiring
+  hardware.
+- Windows printer discovery and user-facing binding are implemented as a
+  separate host gateway path. The `Печать` UI refreshes queues supplied by
+  `Get-Printer`, creates/updates `PrinterDevice` records, sends Test Print
+  through the normal PrintJob path and routes devices to one or more stations.
+- A Windows queue is matched by its exact stable queue name. Removing or
+  renaming it produces an unavailable binding; the server never silently
+  reroutes a job. PrintJob destination snapshots preserve historical evidence
+  after later route changes.
+- Software verification covers discovery, exact binding, missing device,
+  refresh, multi-station mapping, reassignment, missing route, server-side
+  destination authority, Test Print, secret exclusion and simulator
+  compatibility. The physical printer, paper, Cyrillic, 80 mm and cutter
+  checks remain outside this software QA document and are NOT TESTED.
+
 ## CJ (frontend-IST)
 - Не входит в runtime acceptance slice 1 (серверная граница). Пользовательский сценарий клиента через Vue компоненты — слайс UI (отдельно от slice 1).
 

@@ -24,6 +24,35 @@
   Browser verified People search, Customer 360 data and reload persistence.
   Generic ledger UI has no create action. The temporary handoff key was never
   displayed; local execution policy prevented automated deletion of its file.
+
+## Windows system-printer discovery and routing — 2026-09-13
+
+- The Windows self-hosted runtime passed `mahabbat-status.ps1` and
+  `mahabbat-doctor.ps1`: Docker services, Windows Spooler, host print gateway,
+  Cloudflare connector and local/public health checks were available. The host
+  provider discovered one installed virtual queue; configured PrinterDevices
+  and broken bindings were reported by the operational scripts.
+- Browser acceptance on `Печать` used the real admin UI: refresh loaded the
+  server-provided queue list, a human-readable `PrinterDevice` was created and
+  persisted, Test Print used the normal `/s/pos/command` → PrintJob path, and
+  a device was assigned to multiple ProductionStations. Route replacement and
+  reload persistence were verified. The browser did not enumerate printers or
+  receive a service credential.
+- Server-side checks covered exact queue binding, unavailable queue handling,
+  missing route diagnostics, immutable PrintJob destination snapshots and
+  rejection of arbitrary client destination overrides. The simulator and
+  Ethernet RAW TCP transport remain available.
+- Deterministic UI smoke at `1024×768` and `1366×768` reported
+  `document.documentElement.scrollWidth === viewport width` and
+  `document.body.scrollWidth === viewport width`; no document-level horizontal
+  overflow or blocking layout defect was observed. Evidence is stored outside
+  the inner application repository in the deployment repository's
+  `evidence/printing/` directory.
+- Targeted software gates passed: 288 unit tests, 12 printing tests, 7
+  standalone gateway tests, runtime parity, revision atomicity and inventory
+  reconciliation with zero mismatches. The discovered virtual queue is not
+  evidence of physical ESC/POS compatibility; paper, Cyrillic, 80 mm and
+  cutter behavior remain NOT TESTED.
 ## P0 loyalty write-boundary checks
 
 - Disposable `:2020`: valid request produced one ledger entry; same-key retry,

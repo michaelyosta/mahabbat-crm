@@ -513,3 +513,23 @@ Human review получает additive synthetic namespace через
 не добавляется. Следующий product gate — наблюдаемый сотрудником путь
 Приход → Производство → Перемещение → Расход → Ревизия, а не новый automated
 domain scope.
+
+## 2026-09-13 — Windows system-printer discovery and routing
+
+The browser must not enumerate or connect directly to Windows printers. The
+selected architecture is a host-side `print-gateway` beside the Windows Print
+Spooler, with the Docker backend calling it through an authenticated internal
+route. The gateway uses native `Get-Printer` discovery and an exact queue-name
+binding; a missing queue is unavailable and never silently replaced.
+
+Runtime discovery is deliberately separate from the persisted `PrinterDevice`
+business configuration. The `Печать` admin UI creates the named device and
+assigns it to one or more `ProductionStation` routes. The server, not the
+browser, resolves the final destination. Test Print uses the normal PrintJob
+path, and the job stores a destination snapshot so later route changes cannot
+rewrite historical evidence.
+
+The simulator and Ethernet RAW TCP provider remain available. A virtual
+Windows queue proves discovery and software transport only; it does not prove
+ESC/POS compatibility, paper output, Cyrillic rendering, 80 mm geometry or
+cutter behavior. Those checks require a real printer.
