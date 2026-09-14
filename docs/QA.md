@@ -476,3 +476,19 @@
   C5 persona returned rows=120, sum=900 (reload-stable, matching the two
   earlier passes and the PostgreSQL `sum(amount)=900`). `:3000` was not written
   and its seeded `staff@local.test`/demo fixtures were left untouched.
+
+### Dashboard operational overview refresh
+
+- The native Mahabbat Dashboard was refreshed through the App page-layout
+  manifest, without modifying Twenty core or business logic. The first screen
+  now presents a Russian welcome panel, four live operational KPIs, latest
+  orders, upcoming reservations and order-status distribution; historical
+  sales charts remain available lower on the page.
+- The self-hosted `:3000` browser smoke confirmed the rendered panel and tables
+  with the current review workspace data: 72 orders, 252 sold items and
+  `589.6k` order revenue. The dashboard document had no horizontal overflow:
+  `documentScrollWidth = documentClientWidth = 1280` and
+  `bodyScrollWidth = bodyClientWidth = 1280` in the verification viewport.
+- Verification: metadata plan `4 to add, 6 to change, 0 to destroy` followed
+  by successful apply; runtime SDK parity PASS; inner `typecheck` PASS;
+  inner `lint` PASS; `mahabbat-status.ps1` PASS; `mahabbat-doctor.ps1` PASS.

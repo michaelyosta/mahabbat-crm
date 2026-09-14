@@ -165,7 +165,7 @@ export default definePageLayout({
         },
         {
           universalIdentifier: '212bd711-bc41-4927-9e9a-b09e654236ce',
-          title: 'Брони впереди',
+          title: 'Всего бронирований',
           type: 'GRAPH',
           objectUniversalIdentifier: RESERVATION_UNIVERSAL_IDENTIFIER,
           gridPosition: { row: 2, column: 9, rowSpan: 2, columnSpan: 3 },

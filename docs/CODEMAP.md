@@ -95,10 +95,14 @@ catalog bootstrap, not for Customer 360 operational history.
 `SalesSnapshotLine` + `Order` → native page layout → Dashboard:
 
 - `src/page-layouts/mahabbat-dashboard.page-layout.ts` defines the native
-  `STANDALONE_PAGE` widgets;
+  `STANDALONE_PAGE` widgets. The top of the page is an operational overview:
+  a BlockNote welcome panel, live Order/OrderItem/Reservation KPI cards and
+  compact tables for the latest orders and upcoming reservations;
 - aggregate revenue/quantity/top-products/monthly trend query
   `SalesSnapshotLine`;
 - operational order totals/status counts query `Order`;
+- the historical charts remain below the operational widgets and are not
+  populated from fabricated transactions;
 - `src/navigation-menu-items/mahabbat-dashboard.navigation-menu-item.ts` puts
   the Dashboard on the Mahabbat-first path.
 
