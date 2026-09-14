@@ -100,6 +100,14 @@ reassigned to another device without changing application code. A station
 without a route is an error; there is no first-printer or default-printer
 fallback.
 
+The page is intentionally organized as a guided three-step setup. The normal
+screen shows only the device selection, human-facing device form, station
+routes and a short status summary. Per-dish routes, technical queue details,
+old jobs and retry controls are kept in collapsed sections so they do not
+block the ordinary restaurant workflow. Technical review fixtures are not
+listed as ordinary restaurant printers; they remain available to diagnostics
+and automated tests.
+
 The normal UI uses Russian operational terms and hides transport details.
 Queue name, driver, port and last error are available only under
 `Подробнее`/diagnostics.

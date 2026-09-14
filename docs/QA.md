@@ -492,3 +492,24 @@
 - Verification: metadata plan `4 to add, 6 to change, 0 to destroy` followed
   by successful apply; runtime SDK parity PASS; inner `typecheck` PASS;
   inner `lint` PASS; `mahabbat-status.ps1` PASS; `mahabbat-doctor.ps1` PASS.
+
+### Printing settings usability refresh
+
+- The CRM `Печать` page now uses a guided three-step flow: select the Windows
+  device, save its Mahabbat-facing name/profile, then assign it to stations.
+  It no longer displays the extra POS administrator PIN gate inside CRM.
+- The ordinary view now has a short setup guide, status summary cards and
+  clear availability/capability labels. Per-dish routing and diagnostics/job
+  history are collapsed until needed; technical review printer fixtures are
+  hidden from the normal restaurant setup surface.
+- The backend keeps the existing server-authoritative boundary. Only the
+  bounded printing-configuration command allowlist can use the authenticated
+  CRM route, which derives an active ADMIN actor server-side. POS and inventory
+  PIN boundaries are unchanged.
+- Browser smoke on local `:3000` confirmed the page opens without a PIN field,
+  loads discovered devices and routes, and Test Print returned
+  `Тестовая печать отправлена на принтер`. The page is responsive without
+  introducing a document-level overflow in the checked viewport.
+- Verification: Node 24 unit suite `288/288 PASS`; printing and standalone
+  targeted suite `20/20 PASS`; typecheck PASS; lint PASS; status/doctor PASS;
+  post-change PostgreSQL backup validated with `pg_restore --list`.
