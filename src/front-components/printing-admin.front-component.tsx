@@ -97,9 +97,6 @@ const PrintingAdmin = () => {
   const [stations, setStations] = useState<Station[]>([]);
   const [menuItems, setMenuItems] = useState<Row[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [pin, setPin] = useState('');
-  const [sessionToken, setSessionToken] = useState('');
-  const [role, setRole] = useState('');
   const [printerForm, setPrinterForm] = useState({ printerDeviceId: '', label: '', systemQueueName: '', isActive: true, isPrecheckPrinter: false, paperWidth: '80', encodingProfile: 'CP866' });
   const [stationForm, setStationForm] = useState({ label: '', printerDeviceId: '' });
   const [routeDraft, setRouteDraft] = useState<Record<string, string>>({});
@@ -146,24 +143,10 @@ const PrintingAdmin = () => {
   useEffect(() => { void load(); void discover(); }, [load, discover]);
 
   const command = useCallback(async (name: string, payload: Record<string, unknown>) => {
-    if (!sessionToken) throw new Error('Сначала войдите PIN администратора.');
-    const result = await rest.post<Record<string, unknown>>('/s/pos/command', { command: name, sessionToken, payload });
+    const result = await rest.post<Record<string, unknown>>('/s/pos/command', { command: name, payload });
     if (result.code || (typeof result.status === 'number' && result.status >= 400)) throw new Error(String(result.message ?? 'Команда отклонена.'));
     return result;
-  }, [sessionToken]);
-
-  const login = async () => {
-    setError('');
-    try {
-      const result = await rest.post<Record<string, unknown>>('/s/pos/command', { command: 'authenticatePosStaff', payload: { pin, terminalId: 'printing-admin' } });
-      if (!result.sessionToken || !result.staff || typeof result.staff !== 'object') throw new Error('Вход отклонён.');
-      const staff = result.staff as Record<string, unknown>;
-      setSessionToken(String(result.sessionToken));
-      setRole(String(staff.role ?? ''));
-      setPin('');
-      setNotice('Административная сессия открыта');
-    } catch (value) { setError(safeMessage(value)); }
-  };
+  }, []);
 
   const useSystemPrinter = (system: SystemPrinter) => {
     const existing = printers.find((printer) => printer.connectionType === 'WINDOWS_SPOOLER' && printer.systemQueueName === system.systemQueueName);
@@ -248,11 +231,8 @@ const PrintingAdmin = () => {
     {error && <div role="alert" style={{ marginTop: 12, padding: 10, background: '#fef2f2', color: '#991b1b', borderRadius: 8 }}>{error}</div>}
     {discoveryError && <div role="status" style={{ marginTop: 12, padding: 10, background: '#fffbeb', color: '#92400e', borderRadius: 8 }}>{discoveryError}</div>}
     {notice && <div role="status" style={{ marginTop: 12, padding: 10, background: '#ecfdf5', color: '#065f46', borderRadius: 8 }}>{notice}</div>}
-    {!sessionToken ? <section style={{ marginTop: 18, padding: 16, border: '1px solid #34343a', borderRadius: 10 }}>
-      <h2 style={{ fontSize: 17, marginTop: 0, color: '#f4efe5' }}>Вход администратора</h2><p style={{ color: '#aaa69e' }}>PIN нужен только для изменения настроек печати и тестовой печати.</p>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><input aria-label="PIN администратора" type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} placeholder="PIN" /><button type="button" onClick={() => void login()}>Войти</button></div>
-    </section> : <div style={{ marginTop: 14, color: '#065f46' }}>Сессия: {role || 'POS'} · браузер не подключается к принтеру напрямую.</div>}
-    {sessionToken && role === 'ADMIN' && <>
+    <div style={{ marginTop: 14, color: '#aaa69e' }}>Настройки доступны авторизованному пользователю CRM. Браузер не подключается к принтеру напрямую.</div>
+    <>
       <section style={{ marginTop: 18, padding: 16, border: '1px solid #34343a', borderRadius: 10, background: '#111113' }}>
         <h2 style={{ fontSize: 17, marginTop: 0, color: '#f4efe5' }}>Устройства</h2>
         <p style={{ color: '#aaa69e', marginTop: 0 }}>Список предоставлен локальным печатным шлюзом Windows. Состояние «Подключён» означает доступность очереди, а не подтверждение бумаги.</p>
@@ -297,8 +277,7 @@ const PrintingAdmin = () => {
       <section style={{ marginTop: 18, padding: 16, border: '1px solid #34343a', borderRadius: 10, background: '#111113' }}><h2 style={{ fontSize: 17, marginTop: 0, color: '#f4efe5' }}>Маршрут блюд</h2><p style={{ color: '#aaa69e', marginTop: 0 }}>Станция фиксируется в задании печати при отправке.</p><div style={{ display: 'grid', gap: 7, overflowX: 'auto' }}>{visibleMenuItems.map((item) => <div key={item.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(180px,1fr) minmax(180px,280px) auto', gap: 8, alignItems: 'center' }}><span>{String(item.name ?? 'Блюдо')}</span><select value={routeDraft[item.id] ?? String(item.productionStationId ?? '')} onChange={(event) => setRouteDraft({ ...routeDraft, [item.id]: event.target.value })}><option value="">Без станции</option>{stations.map((station) => <option key={station.id} value={station.id}>{station.label ?? 'Станция'}</option>)}</select><button type="button" onClick={() => void setRoute(item.id)}>Сохранить</button></div>)}</div></section>
 
       <section style={{ marginTop: 18, padding: 16, border: '1px solid #34343a', borderRadius: 10, background: '#111113' }}><h2 style={{ fontSize: 17, marginTop: 0, color: '#f4efe5' }}>Настроенные принтеры и задания</h2><div style={{ display: 'grid', gap: 7 }}>{printers.map((printer) => { const system = printer.systemQueueName ? systemByQueue.get(printer.systemQueueName) ?? null : null; return <div key={printer.id} style={{ padding: 10, background: '#171719', borderRadius: 7, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}><div style={{ flex: '1 1 260px' }}><strong>{printer.label ?? 'Принтер'}</strong><div style={{ color: statusLabel(printer, system) === 'Подключён' ? '#9fdbb4' : '#edcf95', marginTop: 3 }}>{statusLabel(printer, system)}{printer.isPrecheckPrinter ? ' · пречек' : ''}</div></div>{printer.connectionType === 'WINDOWS_SPOOLER' && !system && <span style={{ color: '#f0a6aa' }}>⚠ Не найден в Windows</span>}<button type="button" onClick={() => void testPrint(printer)} disabled={printer.isActive === false || (printer.connectionType === 'WINDOWS_SPOOLER' && !system)}>Тестовая печать</button><details style={{ width: '100%' }}><summary style={{ cursor: 'pointer', color: '#aaa69e' }}>Подробнее</summary><div style={{ color: '#aaa69e', fontSize: 12, marginTop: 5 }}>Профиль: {printer.paperWidth ?? '80'} мм · {printer.encodingProfile ?? 'CP866'}{printer.systemQueueName ? ` · системное имя: ${printer.systemQueueName}` : ''}</div></details></div>; })}</div><h3 style={{ marginBottom: 6, color: '#f4efe5' }}>Последние задания</h3><div style={{ display: 'grid', gap: 6 }}>{jobs.slice(0, 30).map((job) => <div key={job.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto auto', gap: 8, alignItems: 'center', padding: 8, borderTop: '1px solid #34343a' }}><span><strong>{humanJobLabel(job.label)}</strong><small style={{ display: 'block', color: job.status === 'FAILED' ? '#f0a6aa' : '#aaa69e' }}>{jobStatusLabel(job.status)}{job.lastErrorMessage ? ` · ${safeMessage(job.lastErrorMessage)}` : ''}</small></span><span>{job.createdAt ? new Date(job.createdAt).toLocaleString('ru-RU') : ''}</span>{(job.status === 'FAILED' || job.status === 'OUTCOME_UNKNOWN') && <button type="button" onClick={() => void retry(job)}>Повторить</button>}</div>)}</div></section>
-    </>}
-    {sessionToken && role !== 'ADMIN' && <div style={{ marginTop: 18, padding: 12, background: '#fffbeb', color: '#92400e', borderRadius: 8 }}>Вошёл сотрудник без роли ADMIN. Конфигурация печати скрыта.</div>}
+    </>
   </div>;
 };
 

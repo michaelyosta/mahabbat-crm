@@ -18,6 +18,23 @@ import {
   parsePosCommandEnvelope,
 } from 'src/pos/pos-command-input';
 import { dispatchPosCommand } from 'src/pos/pos-command.dispatch';
+import { POS_PRINTING_COMMANDS } from 'src/pos/pos-permissions';
+import type { PosActor } from 'src/pos/pos-permissions';
+
+const crmPrintingActor = async (
+  client: ReturnType<typeof asClient>,
+): Promise<PosActor | null> => {
+  const result = (await client.query({
+    posStaffs: {
+      __args: { filter: { staffRole: { eq: 'ADMIN' }, isActive: { eq: true } }, first: 1 },
+      edges: { node: { id: true, staffRole: true, isActive: true } },
+    },
+  })) as { posStaffs?: { edges?: Array<{ node?: { id?: string; staffRole?: string; isActive?: boolean } | null } | null> } };
+  const staff = result.posStaffs?.edges?.map((edge) => edge?.node).find(
+    (node) => node?.id && node.staffRole === 'ADMIN' && node.isActive !== false,
+  );
+  return staff?.id ? { staffId: staff.id, role: 'ADMIN' } : null;
+};
 
 const response = (body: unknown, status: number) =>
   new Response(JSON.stringify(body), {
@@ -47,12 +64,24 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
   if (!envelope.ok) return response(envelope.error, 400);
 
   const { command, payload, sessionToken } = envelope.data;
+  const crmWorkspaceAuthenticated =
+    Boolean(event.body && typeof event.body === 'object' && (event.body as Record<string, unknown>).crmWorkspaceAuthenticated === true);
 
   const parsedPayload = parseCommandPayload(command, payload);
 
   if (!parsedPayload.ok) return response(parsedPayload.error, 400);
 
   const client = asClient();
+
+  if (crmWorkspaceAuthenticated) {
+    if (sessionToken !== undefined || !POS_PRINTING_COMMANDS.has(command)) {
+      return response({ code: 'COMMAND_FORBIDDEN', message: 'Команда недоступна через CRM.' }, 403);
+    }
+    const actor = await crmPrintingActor(client);
+    if (!actor) return response({ code: 'PRINT_ADMIN_NOT_CONFIGURED', message: 'Администратор печати не настроен.' }, 503);
+    const result = await dispatchPosCommand(client, command, parsedPayload.data as Record<string, unknown>, actor);
+    return response(result.body, result.status);
+  }
 
   if (command === 'authenticatePosStaff') {
     const result = await authenticatePosStaff(

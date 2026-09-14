@@ -17,7 +17,8 @@ POS UI (2nd terminal / web)
 [server action] pos-command.resolver.logic-function.ts  (src/logic-functions/)
       │  читает подпись, декодирует envelope
       │  authenticatePosStaff → PosSession
-      │  остальные команды → getAuthenticatedPosContext()
+      │  POS-команды → getAuthenticatedPosContext()
+      │  CRM printing commands → server-derived ADMIN actor
       ▼
 [domain dispatch] src/pos/pos-command.dispatch.ts
       execute<Command>(input, db) ──► ops: read (QueryClientLike) / write
@@ -74,7 +75,9 @@ POS UI (2nd terminal / web)
 `authenticatePosStaff`, хранит короткоживущий `sessionToken` только в памяти
 компонента, передаёт его в POS commands и очищает при logout. Поля `actor`,
 `staffId` и `role` из прототипа/клиента не отправляются как доверенный контекст:
-actor выводится сервером из `PosSession`. `prototypes/mahabbat-pos-ultra-premium.html`
+для POS actor выводится сервером из `PosSession`, а для ограниченных команд
+настройки печати внутри CRM — из авторизованного CRM-маршрута и активного
+ADMIN `PosStaff`. `prototypes/mahabbat-pos-ultra-premium.html`
 остаётся только визуальным reference; runtime-данные и security boundary
 находятся в App/API.
 

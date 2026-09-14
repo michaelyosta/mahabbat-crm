@@ -34,6 +34,19 @@ export const POS_COMMANDS = [
 
 export type PosCommand = (typeof POS_COMMANDS)[number];
 
+// These commands are exposed by the authenticated CRM printing settings page.
+// The page already has a Twenty workspace session, so it must not ask the
+// operator to authenticate a second time with a POS PIN. The server route
+// still restricts this bypass to this allowlist and derives an ADMIN actor on
+// the server; POS/standalone clients continue to use PosSession authentication.
+export const POS_PRINTING_COMMANDS: ReadonlySet<PosCommand> = new Set([
+  'upsertPrinterDevice',
+  'upsertProductionStation',
+  'setMenuItemProductionStation',
+  'retryPrintJob',
+  'testPrinterDevice',
+]);
+
 export const POS_ACTOR_ROLES = ['ADMIN', 'WAITER'] as const;
 
 export type PosActorRole = (typeof POS_ACTOR_ROLES)[number];

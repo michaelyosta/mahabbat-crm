@@ -88,6 +88,13 @@ Open `Настройки → Печать` (the App navigation item is `Печа
 6. Under `Маршрутизация`, assign the device to `Кухня`, `Бар`, `Мангал`,
    `Пречек` or another `ProductionStation` and save the route.
 
+When opened inside the authenticated CRM, this settings page uses the existing
+CRM session and does not ask for a second POS administrator PIN. The backend
+still keeps the command boundary server-side: only the allowlisted printing
+configuration commands can use this CRM-authenticated path, and the actor is
+resolved to an active POS administrator on the server. Standalone POS and
+inventory flows retain their separate POS PIN rules.
+
 One `PrinterDevice` may serve several stations. A station may be explicitly
 reassigned to another device without changing application code. A station
 without a route is an error; there is no first-printer or default-printer

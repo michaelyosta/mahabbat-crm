@@ -8,6 +8,7 @@ import {
 } from 'src/constants/universal-identifiers';
 import { signInternalRouteBody } from 'src/logic-functions/utils/mahabbat-internal-route-signature.util';
 import { parsePosCommandEnvelope } from 'src/pos/pos-command-input';
+import { POS_PRINTING_COMMANDS } from 'src/pos/pos-permissions';
 
 const response = (body: unknown, status: number) =>
   new Response(JSON.stringify(body), {
@@ -19,6 +20,17 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
   const parsed = parsePosCommandEnvelope(event.body);
 
   if (!parsed.ok) return response(parsed.error, 400);
+
+  // `isAuthRequired` has already validated the CRM/ Twenty workspace session
+  // before this handler runs. Mark only the printing configuration subset as
+  // CRM-authenticated; every other POS command still requires PosSession.
+  const crmPrintingRequest =
+    event.userWorkspaceId !== null &&
+    parsed.data.sessionToken === undefined &&
+    POS_PRINTING_COMMANDS.has(parsed.data.command);
+  const delegatedEnvelope = crmPrintingRequest
+    ? { ...parsed.data, crmWorkspaceAuthenticated: true }
+    : parsed.data;
 
   const secret = process.env[MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME];
   const apiUrl = process.env.TWENTY_API_URL?.replace(/\/+$/, '');
@@ -37,9 +49,9 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-mahabbat-signature': signInternalRouteBody(parsed.data, secret),
+          'x-mahabbat-signature': signInternalRouteBody(delegatedEnvelope, secret),
         },
-        body: JSON.stringify(parsed.data),
+        body: JSON.stringify(delegatedEnvelope),
       },
     );
 

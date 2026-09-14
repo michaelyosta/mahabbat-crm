@@ -100,6 +100,12 @@ and Windows Print Spooler; the authenticated App route
 `/s/printing/system-printers` exposes only safe discovery data to the admin UI.
 The browser never enumerates queues or receives the internal route secret.
 
+Inside CRM, the `Печать` settings page relies on the existing authenticated
+Twenty session and does not require a second POS administrator PIN. The
+server-side command gateway exposes this CRM shortcut only for the bounded
+printing-configuration command allowlist and derives an active ADMIN actor;
+POS and inventory commands still require their normal short-lived PosSession.
+
 An administrator binds a discovered queue to a named `PrinterDevice`, then
 assigns that device to one or more `ProductionStation` routes in `Печать`.
 The server resolves station → device → exact system queue for every job and
