@@ -38,6 +38,58 @@ const BAR_CHART_DEFAULTS = {
   firstDayOfTheWeek: 1,
 } as const;
 
+const DASHBOARD_HERO_BLOCKNOTE = JSON.stringify([
+  {
+    type: 'heading',
+    props: {
+      level: 1,
+      textColor: 'default',
+      backgroundColor: 'default',
+      textAlignment: 'left',
+    },
+    content: [
+      {
+        type: 'text',
+        text: 'Добро пожаловать в Mahabbat',
+        styles: {},
+      },
+    ],
+    children: [],
+  },
+  {
+    type: 'paragraph',
+    props: {
+      textColor: 'default',
+      backgroundColor: 'default',
+      textAlignment: 'left',
+    },
+    content: [
+      {
+        type: 'text',
+        text: 'Рабочий обзор ресторана: заказы, выручка, бронирования и статусы на одном экране.',
+        styles: {},
+      },
+    ],
+    children: [],
+  },
+  {
+    type: 'paragraph',
+    props: {
+      textColor: 'default',
+      backgroundColor: 'default',
+      textAlignment: 'left',
+    },
+    content: [
+      {
+        type: 'text',
+        text: 'Начните с последних заказов или проверьте ближайшие бронирования.',
+        styles: { bold: true },
+      },
+    ],
+    children: [],
+  },
+]);
+
 export default definePageLayout({
   universalIdentifier: MAHABBAT_DASHBOARD_PAGE_LAYOUT_UNIVERSAL_IDENTIFIER,
   name: 'Главная Mahabbat CRM',
@@ -58,8 +110,8 @@ export default definePageLayout({
           configuration: {
             configurationType: 'STANDALONE_RICH_TEXT',
             body: {
-              markdown:
-                '# Добро пожаловать в Mahabbat\n\nВаш рабочий обзор ресторана — всё важное на одном экране: заказы, выручка, бронирования и статусы.\n\n**Сейчас:** начните с последних заказов или проверьте ближайшие бронирования.',
+              blocknote: DASHBOARD_HERO_BLOCKNOTE,
+              markdown: null,
             },
           },
         },
@@ -113,7 +165,7 @@ export default definePageLayout({
         },
         {
           universalIdentifier: '212bd711-bc41-4927-9e9a-b09e654236ce',
-          title: 'Ближайшие бронирования',
+          title: 'Брони впереди',
           type: 'GRAPH',
           objectUniversalIdentifier: RESERVATION_UNIVERSAL_IDENTIFIER,
           gridPosition: { row: 2, column: 9, rowSpan: 2, columnSpan: 3 },
