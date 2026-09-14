@@ -108,6 +108,15 @@ queues and missing routes fail visibly without a silent fallback. See
 `docs/SYSTEM_PRINTER_DISCOVERY.md` for the host lifecycle, failure semantics,
 profiles and physical-hardware boundary.
 
+For temporary physical tests with the server at home and the printer at the
+restaurant, the same gateway can run in `PRINT_GATEWAY_MODE=REMOTE`. It
+initiates outbound HTTPS polling to the home resolver and keeps Windows
+Spooler/RAW TCP access on the restaurant host. The home lifecycle skips its
+local dispatcher in this mode, preventing competing job claimers. This is a
+temporary deployment option only; the intended steady state remains server
+and gateway on the restaurant LAN. See
+`docs/TEMPORARY_REMOTE_PRINT_BRIDGE.md`.
+
 ## POS Slice 7 UI surface
 
 The operational POS is a standalone Twenty page layout (`Касса`) hosting the

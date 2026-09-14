@@ -10,11 +10,21 @@ const PORT = Number(process.env.PRINT_GATEWAY_PORT ?? 3110);
 const HOST = process.env.PRINT_GATEWAY_HOST ?? '127.0.0.1';
 const TWENTY_API_URL = (process.env.TWENTY_API_URL ?? process.env.MAHABBAT_API_URL ?? '').replace(/\/+$/, '');
 const INTERNAL_SECRET = process.env.MAHABBAT_INTERNAL_ROUTE_SECRET ?? '';
+const PRINT_GATEWAY_MODE = String(process.env.PRINT_GATEWAY_MODE ?? 'LOCAL').trim().toUpperCase();
+const ACCESS_CLIENT_ID = process.env.CLOUDFLARE_ACCESS_CLIENT_ID ?? '';
+const ACCESS_CLIENT_SECRET = process.env.CLOUDFLARE_ACCESS_CLIENT_SECRET ?? '';
 const RESOLVER_ID = process.env.PRINT_GATEWAY_RESOLVER_ID ?? 'd4f3e7fb-8c05-4e26-8d94-5a0b1f3e7d44';
 const GATEWAY_ID = (process.env.PRINT_GATEWAY_ID ?? `gateway-${process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? randomUUID()}`).slice(0, 128);
 const POLL_MS = Math.max(500, Number(process.env.PRINT_GATEWAY_POLL_MS ?? 1500));
 const CONNECT_TIMEOUT_MS = Math.max(500, Number(process.env.PRINT_GATEWAY_CONNECT_TIMEOUT_MS ?? 5000));
 const AUTO_RETRY_LIMIT = Math.max(0, Math.min(3, Number(process.env.PRINT_GATEWAY_AUTO_RETRY_LIMIT ?? 2)));
+
+if (!['LOCAL', 'REMOTE'].includes(PRINT_GATEWAY_MODE)) {
+  throw new Error('PRINT_GATEWAY_MODE must be LOCAL or REMOTE');
+}
+if ((ACCESS_CLIENT_ID && !ACCESS_CLIENT_SECRET) || (!ACCESS_CLIENT_ID && ACCESS_CLIENT_SECRET)) {
+  throw new Error('CLOUDFLARE_ACCESS_CLIENT_ID and CLOUDFLARE_ACCESS_CLIENT_SECRET must be provided together');
+}
 
 const renderer = new EscPosRenderer();
 const windowsTransport = new WindowsSpoolerPrinterTransport();
@@ -45,9 +55,19 @@ const verifyAgentRequest = ({ method, path, body, signature }) => {
 
 const resolverCall = async (body) => {
   if (!TWENTY_API_URL || !INTERNAL_SECRET) throw new Error('print gateway is not configured');
+  const headers = {
+    'content-type': 'application/json',
+    'x-mahabbat-signature': signBody(body),
+  };
+  // Optional Cloudflare Access service-token headers are only used by the
+  // restaurant-side remote gateway. They never enter a browser response.
+  if (ACCESS_CLIENT_ID && ACCESS_CLIENT_SECRET) {
+    headers['CF-Access-Client-Id'] = ACCESS_CLIENT_ID;
+    headers['CF-Access-Client-Secret'] = ACCESS_CLIENT_SECRET;
+  }
   const response = await fetch(`${TWENTY_API_URL}/webhooks/server/${RESOLVER_ID}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-mahabbat-signature': signBody(body) },
+    headers,
     body: JSON.stringify(body),
   });
   const text = await response.text();
@@ -155,7 +175,7 @@ const pollOnce = async () => {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   if (req.method === 'GET' && url.pathname === '/health') {
-    jsonResponse(res, 200, { status: 'ok', service: 'print-gateway', gatewayId: GATEWAY_ID, systemPrinterProvider: 'WINDOWS_SPOOLER', lastPollAt, dispatchedCount, lastError });
+    jsonResponse(res, 200, { status: 'ok', service: 'print-gateway', mode: PRINT_GATEWAY_MODE, gatewayId: GATEWAY_ID, systemPrinterProvider: 'WINDOWS_SPOOLER', lastPollAt, dispatchedCount, lastError });
     return;
   }
   if (req.method === 'GET' && url.pathname === '/system-printers') {
@@ -180,7 +200,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(JSON.stringify({ msg: 'print-gateway listening', host: HOST, port: PORT, gatewayId: GATEWAY_ID, apiUrl: TWENTY_API_URL || '(missing)' }));
+  console.log(JSON.stringify({ msg: 'print-gateway listening', mode: PRINT_GATEWAY_MODE, host: HOST, port: PORT, gatewayId: GATEWAY_ID, apiUrl: TWENTY_API_URL || '(missing)' }));
   void pollOnce();
   setInterval(() => void pollOnce(), POLL_MS);
 });

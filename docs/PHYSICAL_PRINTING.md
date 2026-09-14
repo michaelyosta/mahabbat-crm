@@ -81,6 +81,13 @@ Windows Print Spooler for writes. It reports printer `REACHABLE`,
 bytes are sent is retryable. If any bytes may have left the process, the job
 becomes `OUTCOME_UNKNOWN` and the gateway stops automatic retries.
 
+For the temporary case where the server is at home and the physical printer is
+at the restaurant, use the existing gateway in explicit `REMOTE` mode. The
+restaurant process polls the home resolver over HTTPS and prints locally; the
+home deployment must not run a second local dispatcher. See
+[TEMPORARY_REMOTE_PRINT_BRIDGE.md](TEMPORARY_REMOTE_PRINT_BRIDGE.md). This is
+not a permanent production topology.
+
 The resolver marks stale `DISPATCHING` jobs as `OUTCOME_UNKNOWN` after its lease. This protects against duplicate paper after a process crash. An administrator may explicitly request a reprint after checking the printer and kitchen.
 
 ## Simulator and checks

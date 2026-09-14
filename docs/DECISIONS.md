@@ -533,3 +533,17 @@ The simulator and Ethernet RAW TCP provider remain available. A virtual
 Windows queue proves discovery and software transport only; it does not prove
 ESC/POS compatibility, paper output, Cyrillic rendering, 80 mm geometry or
 cutter behavior. Those checks require a real printer.
+
+## 2026-09-14 — Temporary remote physical-print bridge
+
+The existing host Print Gateway is reused for the temporary split topology;
+there is no second print agent. `PRINT_GATEWAY_MODE=REMOTE` makes the home
+deployment skip its local dispatcher while a restaurant Windows PC polls the
+home resolver outbound and writes to its local Windows Spooler or the existing
+Ethernet RAW TCP transport. Optional Cloudflare Access service-token headers
+are private gateway configuration and HMAC route signing remains mandatory.
+
+This mode is development-only and is not a replacement for the intended
+server-and-gateway-on-the-restaurant-LAN deployment. The restaurant host is
+not available in the current environment, and this machine has only Microsoft
+Print to PDF; physical Soft Group 8256 output remains NOT TESTED.

@@ -48,7 +48,7 @@
   overflow or blocking layout defect was observed. Evidence is stored outside
   the inner application repository in the deployment repository's
   `evidence/printing/` directory.
-- Targeted software gates passed: 288 unit tests, 12 printing tests, 7
+- Targeted software gates passed: 288 unit tests, 13 printing tests, 7
   standalone gateway tests, runtime parity, revision atomicity and inventory
   reconciliation with zero mismatches. The discovered virtual queue is not
   evidence of physical ESC/POS compatibility; paper, Cyrillic, 80 mm and

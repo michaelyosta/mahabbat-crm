@@ -544,9 +544,23 @@ review with one real printer; do not start fiscal-payment work automatically.
   three PrinterDevices were configured, and zero bindings were broken. The
   virtual queue demonstrates discovery and software transport only; it is not
   evidence of ESC/POS paper compatibility.
-- Targeted verification: 288 unit tests, 12 printing tests, 7 standalone
+- Targeted verification: 288 unit tests, 13 printing tests, 7 standalone
   gateway tests, runtime parity, revision atomicity and inventory
   reconciliation (`mismatches=0`) pass. Exact UI smoke at 1024×768 and
   1366×768 has no document-level horizontal overflow.
 - Physical ESC/POS output, Cyrillic on paper, 80 mm geometry, cutter behavior
   and fiscalization remain NOT TESTED.
+
+## Temporary remote physical-print bridge — prepared, hardware pending
+
+- The existing host `print-gateway.mjs` is reusable for a temporary split
+  deployment: the restaurant Windows PC polls the home resolver outbound and
+  prints through its local Spooler or the existing Ethernet RAW TCP provider.
+- `PRINT_GATEWAY_MODE=REMOTE` prevents the home lifecycle from starting a
+  competing local dispatcher. Optional Cloudflare Access service-token headers
+  remain private to the restaurant process; HMAC route signing is still
+  required.
+- The bridge runbook is `docs/TEMPORARY_REMOTE_PRINT_BRIDGE.md`. This machine
+  currently has only Microsoft Print to PDF, so Soft Group 8256 paper output,
+  Cyrillic, 80 mm geometry, cutter and offline/reconnect behavior remain
+  NOT TESTED until the restaurant PC and physical printer are available.

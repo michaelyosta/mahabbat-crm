@@ -33,7 +33,7 @@
     "pos:dev": "node pos-standalone/dev.mjs",
     "pos:deploy:build": "docker build -f pos-standalone/Dockerfile -t mahabbat-pos-gateway:local .",
     "test:pos:standalone": "node --test pos-standalone/server/__tests__/gateway.test.mjs",
-    "test:printing": "node --test pos-standalone/server/__tests__/printing.test.mjs"
+    "test:printing": "node --test pos-standalone/server/__tests__/printing.test.mjs pos-standalone/server/__tests__/print-gateway.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.7.2",

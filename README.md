@@ -31,6 +31,7 @@ navigation, page layouts, front components и Apps SDK.
 - Deployment templates: `deploy/`.
 - Physical Ethernet ESC/POS printing: `docs/PHYSICAL_PRINTING.md`.
 - Windows system-printer discovery and routing: `docs/SYSTEM_PRINTER_DISCOVERY.md`.
+- Temporary home-to-restaurant physical print bridge: `docs/TEMPORARY_REMOTE_PRINT_BRIDGE.md`.
 - Project decisions and operational notes: `docs/`.
 
 The app is intentionally kept as a separate repository from a local Twenty
