@@ -20,6 +20,8 @@ navigation, page layouts, front components и Apps SDK.
 - нормализацию казахстанских телефонов и `provider + externalId` ingestion;
 - read-only aggregate `SalesSnapshotLine` для исторических отчётов;
 - Dashboard, views, Russian labels и demo navigation;
+- русский пользовательский интерфейс CRM; настройка языка пользователя описана
+  в [docs/LOCALIZATION.md](docs/LOCALIZATION.md);
 - deterministic seed и smoke/import tooling.
 
 ## Архитектура и версии
