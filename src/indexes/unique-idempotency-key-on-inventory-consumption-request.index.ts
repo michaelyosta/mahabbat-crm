@@ -1,0 +1,23 @@
+import { defineIndex } from 'twenty-sdk/define';
+
+import {
+  INVENTORY_CONSUMPTION_REQUEST_IDEMPOTENCY_FIELD_UNIVERSAL_IDENTIFIER,
+  INVENTORY_CONSUMPTION_REQUEST_UNIVERSAL_IDENTIFIER,
+} from '../objects/inventory-consumption-request.object';
+
+export const INVENTORY_CONSUMPTION_REQUEST_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =
+  'b88e1f00-9999-4aaa-8000-000000000809';
+
+export default defineIndex({
+  universalIdentifier:
+    INVENTORY_CONSUMPTION_REQUEST_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER,
+  objectUniversalIdentifier: INVENTORY_CONSUMPTION_REQUEST_UNIVERSAL_IDENTIFIER,
+  isUnique: true,
+  fields: [
+    {
+      universalIdentifier: 'b88e1f00-8888-4aaa-8000-000000000808',
+      fieldUniversalIdentifier:
+        INVENTORY_CONSUMPTION_REQUEST_IDEMPOTENCY_FIELD_UNIVERSAL_IDENTIFIER,
+    },
+  ],
+});
