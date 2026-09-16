@@ -1,0 +1,17 @@
+# Build-context exclusions for the standalone POS image.
+# The Dockerfile only needs src/, pos-standalone/web and pos-standalone/server.
+.git
+.gitignore
+.github
+node_modules
+dist
+.yarn
+coverage
+.env
+.env.*
+.audit
+backups
+artifacts
+*.log
+*.md
+Dockerfile
