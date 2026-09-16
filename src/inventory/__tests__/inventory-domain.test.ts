@@ -71,10 +71,19 @@ class FakeDb {
     const args = op.__args as Record<string, unknown>;
     const filter = (args?.filter ?? {}) as Record<string, unknown>;
     const first = typeof args?.first === 'number' ? args.first : 100;
+    const after = typeof args?.after === 'string' ? args.after : undefined;
     const kind = root as Kind;
     if (!(kind in this.rows)) return { [root]: { edges: [], pageInfo: { hasNextPage: false, endCursor: null } } };
-    const filtered = this.find(kind, filter).slice(0, first);
-    return { [root]: { edges: filtered.map(r => ({ node: { ...r } })), pageInfo: { hasNextPage: false, endCursor: null } } };
+    const all = this.find(kind, filter);
+    const start = after ? all.findIndex(r => r.id === after) + 1 : 0;
+    const page = all.slice(start, start + first);
+    const hasNextPage = start + first < all.length;
+    return {
+      [root]: {
+        edges: page.map(r => ({ node: { ...r } })),
+        pageInfo: { hasNextPage, endCursor: page.length ? page[page.length - 1].id : null },
+      },
+    };
   }
   async mutation(m: unknown): Promise<unknown> {
     const doc = m as Record<string, unknown>;
@@ -688,4 +697,35 @@ describe('partial consumption recovery (exactly-once per movement)', () => {
     expect((result.body as { alreadyApplied?: boolean }).alreadyApplied).toBe(true);
     expect(saleMovements(db, orderId)).toHaveLength(before);
   });
+});
+
+describe('revision ledger reads beyond the 500-row page', () => {
+  const seedMovements = (db: FakeDb, locationId: string, count: number) => {
+    for (let i = 0; i < count; i += 1) {
+      db.seed('inventoryStockMovements', {
+        id: `mv-${i}`,
+        movementType: 'RECEIPT',
+        stockItemId: 'item-x',
+        locationId,
+        quantityDeltaMicros: 1,
+        sourceType: 'RECEIPT',
+        sourceId: `src-${i}`,
+        occurredAt: new Date().toISOString(),
+        idempotencyKey: `k-${i}`,
+      });
+    }
+  };
+
+  for (const count of [500, 501, 750]) {
+    it(`captures an exact watermark for ${count} movements`, async () => {
+      const db = new FakeDb();
+      const k = await locId(db, `K-${count}`);
+      seedMovements(db, k, count);
+      const created = await executeCreateCount(db as any, { label: 'L', locationId: k, idempotencyKey: `c-${count}` }, admin);
+      const countId = (created.body as { countId: string }).countId;
+      const started = await executeStartCount(db as any, { countId }, admin);
+      const watermark = (started.body as { watermark: string }).watermark;
+      expect(watermark.endsWith(`|${count}`)).toBe(true);
+    });
+  }
 });

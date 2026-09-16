@@ -49,11 +49,33 @@ type RevisionPostingPlan = {
 
 type Connection<T> = { edges?: Array<{ node?: T | null } | null>; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null };
 
+// Hard upper bound on pagination so a malformed cursor cannot loop forever.
+const MAX_QUERY_PAGES = 200;
+// A revision posts one atomic movement batch. Keep it below database/platform
+// batch limits so all-or-nothing holds; larger revisions are rejected up front
+// with a clear operator-facing error instead of failing mid-post.
+const MAX_REVISION_MOVEMENTS = 1000;
+
 const queryConnection = async <T extends Existing>(
   client: CoreApiClientLike, root: string, args: Record<string, unknown>, fields: Record<string, boolean | Record<string, boolean>>,
 ): Promise<T[]> => {
-  const result = (await client.query({ [root]: { __args: { first: 200, ...args }, edges: { node: fields }, pageInfo: { hasNextPage: true, endCursor: true } } })) as Record<string, Connection<T>>;
-  return (result[root]?.edges ?? []).map(e => e?.node).filter((n): n is T => Boolean(n));
+  const pageArgs = { first: 200, ...args };
+  const rows: T[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < MAX_QUERY_PAGES; page += 1) {
+    const result = (await client.query({
+      [root]: {
+        __args: { ...pageArgs, ...(after ? { after } : {}) },
+        edges: { node: fields },
+        pageInfo: { hasNextPage: true, endCursor: true },
+      },
+    })) as Record<string, Connection<T>>;
+    const connection = result[root];
+    rows.push(...(connection?.edges ?? []).map(e => e?.node).filter((n): n is T => Boolean(n)));
+    if (!connection?.pageInfo?.hasNextPage || !connection.pageInfo.endCursor) return rows;
+    after = connection.pageInfo.endCursor;
+  }
+  return rows;
 };
 
 // === field selections (mirror object definitions; use minimal) ===
@@ -969,6 +991,10 @@ const createRevisionPostingPlan = async (
     else addDirectAdjustment(actual.stockItemId, actual.actualQuantityMicros, virtualBalances.get(actual.stockItemId)?.averageCostMicros ?? 0, `${payload.idempotencyKey}:${actual.stockItemId}`);
   }
 
+  if (movements.length > MAX_REVISION_MOVEMENTS) {
+    throw revisionError('REVISION_LIMIT_EXCEEDED', `Ревизия формирует ${movements.length} операций, что превышает безопасный предел ${MAX_REVISION_MOVEMENTS} за одну проводку. Разделите ревизию на части.`);
+  }
+
   return { countId: count.id, locationId, idempotencyKey: payload.idempotencyKey, watermark, claimToken, lineUpdates, lineCreates, movements, affectedItemIds: [...affectedItemIds] };
 };
 
@@ -1073,7 +1099,7 @@ export const executeFinalizeCount = async (
     return ok(201, { countId: count.id, movements: plan.movements.length });
   } catch (caught) {
     if (plan && !movementBatchCommitted) await restoreRevisionClaim(c, plan);
-    if (caught && typeof caught === 'object' && 'code' in caught && ['REVISION_STALE', 'REVISION_IN_PROGRESS', 'INVALID_QTY', 'RESOLUTION_INVALID', 'RECIPE_NOT_FOUND', 'RECIPE_EMPTY', 'BALANCE_NOT_FOUND', 'ITEM_NOT_FOUND', 'LOCATION_NOT_FOUND', 'UNIT_INVALID', 'DUPLICATE_ACTUAL', 'DUPLICATE_COUNT_LINE', 'EXPECTED_QTY_INVALID', 'QUANTITY_OVERFLOW', 'MOVEMENT_KEY_CONFLICT', 'COUNT_LINE_WRITE_FAILED'].includes(String((caught as { code?: unknown }).code))) {
+    if (caught && typeof caught === 'object' && 'code' in caught && ['REVISION_STALE', 'REVISION_IN_PROGRESS', 'INVALID_QTY', 'RESOLUTION_INVALID', 'RECIPE_NOT_FOUND', 'RECIPE_EMPTY', 'BALANCE_NOT_FOUND', 'ITEM_NOT_FOUND', 'LOCATION_NOT_FOUND', 'UNIT_INVALID', 'DUPLICATE_ACTUAL', 'DUPLICATE_COUNT_LINE', 'EXPECTED_QTY_INVALID', 'QUANTITY_OVERFLOW', 'MOVEMENT_KEY_CONFLICT', 'COUNT_LINE_WRITE_FAILED', 'REVISION_LIMIT_EXCEEDED'].includes(String((caught as { code?: unknown }).code))) {
       return error(String((caught as { code: string }).code), (caught as unknown as Error).message);
     }
     throw caught;
