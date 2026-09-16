@@ -54,6 +54,7 @@ let gatewayOutput = '';
 let gatewayError = '';
 const state = {
   session: 'valid',
+  role: 'WAITER',
   resolverCalls: [],
   graphqlCalls: 0,
   staffCalls: 0,
@@ -104,7 +105,7 @@ before(async () => {
               id: 'session-record-1',
               sessionId: 'session-1',
               staffId: 'staff-a',
-              staffRole: 'WAITER',
+              staffRole: state.role,
               tokenHash,
               expiresAt:
                 state.session === 'expired'
@@ -119,7 +120,7 @@ before(async () => {
       if (req.url.startsWith('/rest/posStaffs/')) {
         state.staffCalls += 1;
         json(res, 200, {
-          data: { posStaff: { id: 'staff-a', staffRole: 'WAITER', isActive: true } },
+          data: { posStaff: { id: 'staff-a', staffRole: state.role, isActive: true } },
         });
         return;
       }
@@ -128,7 +129,10 @@ before(async () => {
         state.restCalls += 1;
         assert.equal(req.headers.authorization, `Bearer ${SERVICE_KEY}`);
         const collection = req.url.split('/')[2].split('?')[0];
-        json(res, 200, { data: { [collection]: [{ id: `${collection}-1` }] } });
+        const row = collection === 'posStaffs'
+          ? { id: 'staff-1', displayName: 'Официант', pinHash: 'scrypt$leak', pinLookup: 'lookup-leak' }
+          : { id: `${collection}-1` };
+        json(res, 200, { data: { [collection]: [row] } });
         return;
       }
 
@@ -289,6 +293,21 @@ test('denies malformed, expired, and revoked sessions', async () => {
   assert.equal(revoked.response.status, 401);
   assert.equal(revoked.body.code, 'POS_SESSION_EXPIRED');
   state.session = 'valid';
+});
+
+test('never exposes pinHash or pinLookup to an ADMIN POS client', async () => {
+  state.role = 'ADMIN';
+  const result = await requestJson(`${gatewayUrl}/api/pos/rest/posStaffs`, {
+    headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+  });
+  assert.equal(result.response.status, 200);
+  const rows = result.body.data.posStaffs;
+  assert.ok(Array.isArray(rows) && rows.length > 0);
+  for (const row of rows) {
+    assert.equal('pinHash' in row, false);
+    assert.equal('pinLookup' in row, false);
+  }
+  state.role = 'WAITER';
 });
 
 test('does not log PIN or reusable session token', async () => {

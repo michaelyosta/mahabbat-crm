@@ -169,6 +169,16 @@ const proxyRest = async (collection, search, token) => {
   const text = await r.text();
   let body;
   try { body = text ? JSON.parse(text) : {}; } catch { body = { message: text }; }
+  // Authentication verifiers must never reach a browser, not even an ADMIN one.
+  if (collection === 'posStaffs' && body && typeof body === 'object' && body.data) {
+    const scrub = (row) => {
+      if (!row || typeof row !== 'object') return row;
+      const { pinHash, pinLookup, ...safe } = row;
+      return safe;
+    };
+    if (Array.isArray(body.data.posStaffs)) body.data.posStaffs = body.data.posStaffs.map(scrub);
+    else if (body.data.posStaff) body.data.posStaff = scrub(body.data.posStaff);
+  }
   return { status: r.status, body };
 };
 
