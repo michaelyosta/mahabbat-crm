@@ -24,16 +24,24 @@ export const processInventoryRequest = async (client: InstanceType<typeof CoreAp
 
 const handler = async (event: Event): Promise<void> => {
   const client = new CoreApiClient() as unknown as { query: (q: unknown)=>Promise<unknown>; mutation: (m: unknown)=>Promise<unknown> };
+  // Destroyed events carry no snapshot and require no work.
+  if (!event.properties?.after && event.name.endsWith('.destroyed')) return;
+  // Only PENDING requests are processed. Terminal statuses (APPLIED /
+  // FAILED_*) must never re-enter the processor: otherwise the processor's own
+  // status update emits another update event and the request never converges.
+  const after = event.properties?.after as RequestRecord | undefined;
+  if (after?.status && after.status !== 'PENDING') return;
   // Resolve actual orderId from request record
   let targetOrderId: string | null = null;
   if (event.properties?.after?.orderId) targetOrderId = event.properties.after.orderId as string;
   else {
     // fallback: fetch request
-    const res = (await client.query({ inventoryConsumptionRequests: { __args: { filter: { id: { eq: event.recordId } }, first: 1 }, edges: { node: { orderId: true } } } })) as { inventoryConsumptionRequests?: { edges?: Array<{ node?: { orderId?: string } }> } };
-    targetOrderId = res.inventoryConsumptionRequests?.edges?.[0]?.node?.orderId ?? null;
+    const res = (await client.query({ inventoryConsumptionRequests: { __args: { filter: { id: { eq: event.recordId } }, first: 1 }, edges: { node: { orderId: true, status: true } } } })) as { inventoryConsumptionRequests?: { edges?: Array<{ node?: { orderId?: string; status?: string } }> } };
+    const node = res.inventoryConsumptionRequests?.edges?.[0]?.node;
+    if (node?.status && node.status !== 'PENDING') return;
+    targetOrderId = node?.orderId ?? null;
   }
   if (!targetOrderId) return;
-  // only process PENDING
   await processInventoryRequest(client, targetOrderId);
 };
 
