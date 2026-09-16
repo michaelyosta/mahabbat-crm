@@ -2958,6 +2958,13 @@ export const executeRecordPayment = async (
   const order = await findOrderById(client, payload.orderId);
   if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
 
+  // Payments are owner-bound like every other order mutation: a waiter can only
+  // settle their own order; ADMIN may settle any. Enforced server-side on the
+  // verified actor, never on a client-supplied identity.
+  if (!orderCanBeEditedBy(order.ownerStaffId, actor)) {
+    return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
+  }
+
   const method = await findPaymentMethodById(client, payload.paymentMethodId);
   if (!method) return errorResult('PAYMENT_METHOD_NOT_FOUND', 'Payment method does not exist.');
   if (method.isActive === false) {
@@ -3172,6 +3179,13 @@ export const executeCloseOrder = async (
 
   const order = await findOrderById(client, payload.orderId);
   if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+
+  // Closing is owner-bound: a waiter closes only their own order; ADMIN may
+  // close any. Verified server-side from the authenticated actor.
+  if (!orderCanBeEditedBy(order.ownerStaffId, actor)) {
+    return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
+  }
+
   if (order.status === 'CLOSED') {
     return errorResult('ORDER_ALREADY_CLOSED', 'Order is already closed.');
   }
@@ -3369,6 +3383,9 @@ export const executeCreatePrepayment = async (
   }
   const reservation = await findReservationById(client, payload.reservationId);
   if (!reservation) return errorResult('RESERVATION_NOT_FOUND', 'Reservation does not exist.');
+  if (reservation.createdByStaffId !== actor.staffId && actor.role !== 'ADMIN') {
+    return errorResult('ORDER_NOT_OWNED', 'Reservation belongs to another staff member.');
+  }
   const existing = await findPrepaymentByIdempotencyKey(client, payload.idempotencyKey);
   if (existing) {
     if (existing.reservationId !== payload.reservationId || existing.createdByStaffId !== actor.staffId || normalizeCurrency(existing.amount).amountMicros !== payload.amountMicros) {
@@ -3430,6 +3447,9 @@ export const executeApplyPrepayment = async (
   const order = await findOrderById(client, payload.orderId);
   if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
   if (order.status === 'CLOSED') return errorResult('ORDER_NOT_EDITABLE', 'Closed order cannot receive a prepayment.');
+  if (!orderCanBeEditedBy(order.ownerStaffId, actor)) {
+    return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
+  }
   const keyReplay = await findPrepaymentByApplyIdempotencyKey(client, payload.idempotencyKey);
   if (keyReplay) {
     if (keyReplay.id !== payload.prepaymentId || keyReplay.appliedByStaffId !== actor.staffId) return idempotencyConflict('The idempotency key belongs to another prepayment context.');

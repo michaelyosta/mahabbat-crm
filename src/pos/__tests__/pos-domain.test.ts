@@ -28,6 +28,7 @@ type TableKind =
   | 'posPrechecks'
   | 'posPaymentMethods'
   | 'posPayments'
+  | 'posPrepayments'
   | 'posOperationalEvents';
 
 class UniqueViolationError extends Error {
@@ -51,6 +52,7 @@ class FakePosDb {
     posPrechecks: [],
     posPaymentMethods: [],
     posPayments: [],
+    posPrepayments: [],
     posOperationalEvents: [],
   };
 
@@ -274,6 +276,9 @@ class FakePosDb {
       updatePosPaymentMethod: 'posPaymentMethods',
       createPosPayment: 'posPayments',
       updatePosPayment: 'posPayments',
+      createPosPrepayment: 'posPrepayments',
+      updatePosPrepayment: 'posPrepayments',
+      updatePosPrepayments: 'posPrepayments',
       createPosOperationalEvent: 'posOperationalEvents',
       updatePosOperationalEvent: 'posOperationalEvents',
     };
@@ -304,6 +309,7 @@ class FakePosDb {
       posPrechecks: 'posPrechecks',
       posPaymentMethods: 'posPaymentMethods',
       posPayments: 'posPayments',
+      posPrepayments: 'posPrepayments',
       posOperationalEvents: 'posOperationalEvents',
     };
 
@@ -1281,5 +1287,105 @@ describe('pos domain concurrency races', () => {
     expect((foreignLineKey.body as { code: string }).code).toBe(
       'IDEMPOTENCY_CONFLICT',
     );
+  });
+});
+
+describe('foreign order is read-only for a waiter (server-side authorization)', () => {
+  const foreignWaiter = { staffId: OTHER_STAFF, role: 'WAITER' as const };
+  const admin = { staffId: OTHER_STAFF, role: 'ADMIN' as const };
+
+  const setupPrecheckOrder = async (db: FakePosDb) => {
+    await executeOpenShift(db, { idempotencyKey: key(801) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(802) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(803) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 1, idempotencyKey: key(804) },
+      waiter,
+    );
+    await executeCreatePrecheck(db, { orderId, idempotencyKey: key(805) }, waiter);
+    return orderId;
+  };
+
+  it('rejects a foreign waiter recordPayment with ORDER_NOT_OWNED', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+
+    const foreign = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 1_000_000_000, idempotencyKey: key(806) },
+      foreignWaiter,
+    );
+    expect(foreign.status).toBe(400);
+    expect((foreign.body as { code: string }).code).toBe('ORDER_NOT_OWNED');
+    expect(db.rows.posPayments).toHaveLength(0);
+
+    const owner = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 1_000_000_000, idempotencyKey: key(807) },
+      waiter,
+    );
+    expect(owner.status).toBe(201);
+    expect(db.rows.posPayments).toHaveLength(1);
+  });
+
+  it('rejects a foreign waiter closeOrder with ORDER_NOT_OWNED', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+
+    await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 1_500_000_000, idempotencyKey: key(808) },
+      waiter,
+    );
+    const precheckId = (db.rows.posPrechecks[0] as { id: string }).id;
+    void precheckId;
+
+    const foreign = await executeCloseOrder(db, { orderId, idempotencyKey: key(809) }, foreignWaiter);
+    expect(foreign.status).toBe(400);
+    expect((foreign.body as { code: string }).code).toBe('ORDER_NOT_OWNED');
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.status).toBe('PRECHECK_PRINTED');
+
+    const owner = await executeCloseOrder(db, { orderId, idempotencyKey: key(810) }, waiter);
+    expect(owner.status).toBe(201);
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.status).toBe('CLOSED');
+  });
+
+  it('rejects a foreign waiter applyPrepayment with ORDER_NOT_OWNED', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+    db.seed('posPrepayments', {
+      id: '40000000-0000-4000-8000-000000000001',
+      orderId: null,
+      amount: { amountMicros: 100_000_000, currencyCode: 'KZT' },
+      status: 'UNAPPLIED',
+      createdByStaffId: STAFF,
+    });
+
+    const foreign = await dispatchPosCommand(
+      db,
+      'applyPrepayment',
+      { prepaymentId: '40000000-0000-4000-8000-000000000001', orderId, idempotencyKey: key(811) },
+      foreignWaiter,
+    );
+    expect(foreign.status).toBe(400);
+    expect((foreign.body as { code: string }).code).toBe('ORDER_NOT_OWNED');
+    expect(db.rows.posPrepayments[0].status).toBe('UNAPPLIED');
+  });
+
+  it('allows an ADMIN to pay and close any order', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+    const pay = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 1_500_000_000, idempotencyKey: key(812) },
+      admin,
+    );
+    expect(pay.status).toBe(201);
+    const close = await executeCloseOrder(db, { orderId, idempotencyKey: key(813) }, admin);
+    expect(close.status).toBe(201);
   });
 });
