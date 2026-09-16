@@ -11,6 +11,7 @@ import {
   executeOpenOrder,
   executeOpenShift,
   executePrintKitchenTicket,
+  _internal,
 } from 'src/pos/pos-command.dispatch';
 
 type Row = Record<string, unknown> & { id: string };
@@ -1387,5 +1388,66 @@ describe('foreign order is read-only for a waiter (server-side authorization)', 
     expect(pay.status).toBe(201);
     const close = await executeCloseOrder(db, { orderId, idempotencyKey: key(813) }, admin);
     expect(close.status).toBe(201);
+  });
+});
+
+describe('payment optimistic concurrency (CAS)', () => {
+  const setupOrder = async (db: FakePosDb) => {
+    await executeOpenShift(db, { idempotencyKey: key(901) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(902) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(903) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 2, idempotencyKey: key(904) },
+      waiter,
+    );
+    await executeCreatePrecheck(db, { orderId, idempotencyKey: key(905) }, waiter);
+    return orderId;
+  };
+  const paidMicros = (db: FakePosDb, orderId: string) =>
+    (db.rows.posOrders.find((row) => row.id === orderId)?.paidTotal as { amountMicros: number }).amountMicros;
+
+  it('rejects a stale expected paidTotal instead of overwriting it', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrder(db);
+    const order = db.rows.posOrders.find((row) => row.id === orderId)!;
+
+    // A writer whose expected value is stale must lose the compare-and-swap.
+    const stale = await _internal.guardedUpdatePaidTotal(db, order, 1, 500_000_000);
+    expect(stale).toBe(false);
+    expect(paidMicros(db, orderId)).toBe(0);
+
+    // The correct expected value applies once.
+    const fresh = await _internal.guardedUpdatePaidTotal(db, order, 0, 500_000_000);
+    expect(fresh).toBe(true);
+    expect(paidMicros(db, orderId)).toBe(500_000_000);
+  });
+
+  it('bars barrier-concurrent payments from double-counting the remaining amount', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrder(db);
+
+    const [first, second] = await Promise.all([
+      executeRecordPayment(
+        db,
+        { orderId, paymentMethodId: CARD_METHOD, amountMicros: 1_500_000_000, idempotencyKey: key(906) },
+        waiter,
+      ),
+      executeRecordPayment(
+        db,
+        { orderId, paymentMethodId: CARD_METHOD, amountMicros: 1_500_000_000, idempotencyKey: key(907) },
+        waiter,
+      ),
+    ]);
+
+    const successPayments = db.rows.posPayments.filter((row) => row.status === 'SUCCESS');
+    expect(successPayments).toHaveLength(1);
+    expect(paidMicros(db, orderId)).toBe(1_500_000_000);
+    expect([first.status, second.status].sort()).toEqual([201, 400]);
+    const loser = first.status === 400 ? (first.body as { code: string }) : (second.body as { code: string });
+    expect(['PAYMENT_IN_PROGRESS', 'OVERPAYMENT']).toContain(loser.code);
   });
 });

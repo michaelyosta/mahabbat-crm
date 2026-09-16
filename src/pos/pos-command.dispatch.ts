@@ -3763,3 +3763,8 @@ export const dispatchPosCommand = async (
       );
   }
 };
+
+// Test-only surface for the optimistic-concurrency primitives that protect
+// payments. Kept explicit so a regression test can prove the CAS contract and
+// fail if the guard is removed.
+export const _internal = { guardedUpdatePaidTotal, paymentTotals };
