@@ -21,6 +21,7 @@ type Row = Record<string, unknown> & { id: string };
 class FakeAuthDb implements CoreApiClientLike {
   readonly posStaffs: Row[] = [];
   readonly posSessions: Row[] = [];
+  readonly posLoginThrottles: Row[] = [];
   private sequence = 1;
 
   async query(document: unknown): Promise<unknown> {
@@ -28,7 +29,12 @@ class FakeAuthDb implements CoreApiClientLike {
     const operation = (document as Record<string, Record<string, unknown>>)[root];
     const args = (operation.__args ?? {}) as Record<string, unknown>;
     const filter = (args.filter ?? {}) as Record<string, unknown>;
-    const rows = root === 'posStaffs' ? this.posStaffs : this.posSessions;
+    const rows =
+      root === 'posStaffs'
+        ? this.posStaffs
+        : root === 'posLoginThrottles'
+          ? this.posLoginThrottles
+          : this.posSessions;
     const filtered = rows.filter((row) =>
       Object.entries(filter).every(([field, condition]) => {
         const eq = (condition as Record<string, unknown>)?.eq;
@@ -67,6 +73,19 @@ class FakeAuthDb implements CoreApiClientLike {
       if (!row) throw new Error('staff not found');
       Object.assign(row, data);
       return { updatePosStaff: row };
+    }
+
+    if (root === 'createPosLoginThrottle') {
+      const row = { ...data, id: `throttle-${this.sequence++}` };
+      this.posLoginThrottles.push(row);
+      return { createPosLoginThrottle: row };
+    }
+
+    if (root === 'updatePosLoginThrottle') {
+      const row = this.posLoginThrottles.find((item) => item.id === args.id);
+      if (!row) throw new Error('throttle not found');
+      Object.assign(row, data);
+      return { updatePosLoginThrottle: row };
     }
 
     throw new Error(`unsupported mutation ${root}`);
@@ -214,5 +233,60 @@ describe('POS authentication context', () => {
 
     expect((await revokePosSession(db, context.context)).status).toBe(200);
     expect((await getAuthenticatedPosContext(db, token)).ok).toBe(false);
+  });
+
+  it('keeps the lockout when the client rotates terminalId', async () => {
+    const db = new FakeAuthDb();
+    db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const result = await authenticatePosStaff(db, {
+        pin: '0000',
+        terminalId: `terminal-${attempt}`,
+      });
+      expect(result.status).toBe(401);
+    }
+
+    const rotated = await authenticatePosStaff(db, {
+      pin: '0000',
+      terminalId: 'a-brand-new-terminal-id',
+    });
+    expect(rotated.status).toBe(429);
+    expect((rotated.body as { code: string }).code).toBe('POS_LOGIN_RATE_LIMITED');
+  });
+
+  it('applies a durable global bound across credential rotation', async () => {
+    const db = new FakeAuthDb();
+    db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
+
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const pin = String(1000 + attempt);
+      const result = await authenticatePosStaff(db, { pin, terminalId: 'global-test' });
+      expect(result.status).toBe(401);
+    }
+
+    const next = await authenticatePosStaff(db, { pin: '9999', terminalId: 'global-test' });
+    expect(next.status).toBe(429);
+  });
+
+  it('rejects while locked and recovers after the durable lock expires', async () => {
+    const db = new FakeAuthDb();
+    db.posStaffs.push(
+      await staffRow(STAFF, 'Айжан', 'WAITER', '1234', { cardIdentifier: 'CARD-A' }),
+    );
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(401);
+    }
+    expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(429);
+
+    for (const row of db.posLoginThrottles) {
+      if (typeof row.lockedUntil === 'string') {
+        row.lockedUntil = new Date(Date.now() - 1000).toISOString();
+      }
+      row.failedCount = 0;
+    }
+
+    expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(401);
   });
 });

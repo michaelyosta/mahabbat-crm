@@ -8,6 +8,10 @@ export const POS_STAFF_ROLE_FIELD_UNIVERSAL_IDENTIFIER =
   'c4d1205b-2f98-4f55-a914-46025c2fe21c';
 export const POS_STAFF_PIN_HASH_FIELD_UNIVERSAL_IDENTIFIER =
   '3ff5c1ed-0bfb-4b94-85e7-c1a2830b2857';
+export const POS_STAFF_PIN_LOOKUP_FIELD_UNIVERSAL_IDENTIFIER =
+  '7c2f1a90-4d3e-4b6a-9f21-8e5d0c7b3a11';
+export const POS_STAFF_PIN_LOOKUP_INDEX_UNIVERSAL_IDENTIFIER =
+  '3a5b7c9d-1e2f-4a3b-8c4d-5e6f7a8b9c0d';
 export const POS_STAFF_CARD_IDENTIFIER_FIELD_UNIVERSAL_IDENTIFIER =
   '4b296b65-c20e-4c64-944a-dc3ef92cf8e4';
 export const POS_STAFF_IS_ACTIVE_FIELD_UNIVERSAL_IDENTIFIER =
@@ -82,6 +86,18 @@ export default defineObject({
       isNullable: false,
       isUIEditable: false,
       defaultValue: "''",
+    },
+    {
+      universalIdentifier: POS_STAFF_PIN_LOOKUP_FIELD_UNIVERSAL_IDENTIFIER,
+      type: FieldType.TEXT,
+      name: 'pinLookup',
+      label: 'PIN lookup',
+      description:
+        'Непроверяющий детерминированный индекс для поиска кандидата до scrypt; не является credential',
+      icon: 'IconSearch',
+      isNullable: true,
+      isUIEditable: false,
+      defaultValue: null,
     },
     {
       universalIdentifier:

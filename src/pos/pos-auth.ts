@@ -1,5 +1,6 @@
 import {
   createHash,
+  createHmac,
   randomBytes,
   randomUUID,
   scrypt,
@@ -23,6 +24,12 @@ const MAX_SESSION_IDLE_MINUTES = 24 * 60;
 const MAX_LOGIN_FAILURES = 5;
 const LOCKOUT_MS = 60 * 1000;
 const MAX_STAFF_ROWS = 1000;
+// Server-owned global bound so rotating the credential or the client-supplied
+// terminalId cannot bypass brute-force protection. Durable (stored in the
+// database) so it survives stateless resolver invocations and process restarts.
+const GLOBAL_MAX_FAILURES = 30;
+const GLOBAL_WINDOW_MS = 5 * 60 * 1000;
+const GLOBAL_LOCKOUT_MS = 60 * 1000;
 
 type Connection<T> = {
   edges?: Array<{ node?: T | null } | null>;
@@ -50,6 +57,7 @@ type PosStaffRecord = {
   displayName?: string | null;
   staffRole?: string | null;
   pinHash?: string | null;
+  pinLookup?: string | null;
   cardIdentifier?: string | null;
   isActive?: boolean | null;
   failedLoginCount?: number | null;
@@ -66,11 +74,6 @@ type PosSessionRecord = {
   expiresAt?: string | null;
   revokedAt?: string | null;
   terminalId?: string | null;
-};
-
-type LoginRateState = {
-  failures: number;
-  lockedUntil: number;
 };
 
 export type AuthenticatePosStaffPayload = {
@@ -92,8 +95,6 @@ export type PosAuthResult = {
   status: number;
   body: unknown;
 };
-
-const loginRateStates = new Map<string, LoginRateState>();
 
 const response = (status: number, body: unknown): PosAuthResult => ({
   status,
@@ -241,6 +242,7 @@ const STAFF_FIELDS = {
   displayName: true,
   staffRole: true,
   pinHash: true,
+  pinLookup: true,
   cardIdentifier: true,
   isActive: true,
   failedLoginCount: true,
@@ -288,37 +290,166 @@ const updateStaffLoginState = async (
   });
 };
 
-const rateKey = (payload: AuthenticatePosStaffPayload): string =>
-  payload.cardIdentifier
-    ? `card:${payload.cardIdentifier}`
-    : `pin:${payload.terminalId ?? 'default'}`;
+type PosLoginThrottleRecord = {
+  id: string;
+  key?: string | null;
+  failedCount?: number | null;
+  lockedUntil?: string | null;
+  windowStartedAt?: string | null;
+};
 
-const checkRateLimit = (key: string): PosAuthResult | null => {
-  const state = loginRateStates.get(key);
-  if (!state || state.lockedUntil <= Date.now()) return null;
+const THROTTLE_FIELDS = {
+  id: true,
+  key: true,
+  failedCount: true,
+  lockedUntil: true,
+  windowStartedAt: true,
+};
 
-  return response(429, {
+const pinLookupSecret = (): string =>
+  process.env.MAHABBAT_PIN_LOOKUP_SECRET ??
+  process.env.MAHABBAT_INTERNAL_ROUTE_SECRET ??
+  '';
+
+// Deterministic, non-verifying index used only to select the single candidate
+// row before running scrypt. It is not a credential and cannot be used to
+// authenticate; the scrypt hash remains the verifier.
+export const computePinLookup = (pin: string): string => {
+  const secret = pinLookupSecret();
+  const payload = `mahabbat-pin-lookup:${pin}`;
+  return secret
+    ? createHmac('sha256', secret).update(payload, 'utf8').digest('hex')
+    : createHash('sha256').update(payload, 'utf8').digest('hex');
+};
+
+const credentialFingerprint = (kind: 'pin' | 'card', value: string): string => {
+  const secret = pinLookupSecret();
+  const payload = `mahabbat-login:${kind}:${value}`;
+  return secret
+    ? createHmac('sha256', secret).update(payload, 'utf8').digest('hex')
+    : createHash('sha256').update(payload, 'utf8').digest('hex');
+};
+
+const findThrottle = async (
+  client: CoreApiClientLike,
+  key: string,
+): Promise<PosLoginThrottleRecord | null> =>
+  (
+    await queryRecords<PosLoginThrottleRecord>(
+      client,
+      'posLoginThrottles',
+      { key: { eq: key } },
+      THROTTLE_FIELDS,
+      1,
+    )
+  )[0] ?? null;
+
+const throttleRetryAfterSeconds = (
+  record: PosLoginThrottleRecord | null,
+  now = Date.now(),
+): number => {
+  const lockedUntil = record?.lockedUntil ? Date.parse(record.lockedUntil) : Number.NaN;
+  return Number.isFinite(lockedUntil) && lockedUntil > now
+    ? Math.ceil((lockedUntil - now) / 1000)
+    : 0;
+};
+
+const rateLimitedResponse = (retryAfterSeconds: number): PosAuthResult =>
+  response(429, {
     code: 'POS_LOGIN_RATE_LIMITED',
     message: 'Слишком много попыток входа. Повторите позже.',
-    retryAfterSeconds: Math.ceil((state.lockedUntil - Date.now()) / 1000),
+    retryAfterSeconds,
   });
+
+const recordThrottleFailure = async (
+  client: CoreApiClientLike,
+  key: string,
+  maxFailures: number,
+  windowMs: number,
+  lockoutMs: number,
+  now = Date.now(),
+): Promise<void> => {
+  const record = await findThrottle(client, key);
+  const nowIso = new Date(now).toISOString();
+
+  if (!record?.id) {
+    try {
+      await client.mutation({
+        createPosLoginThrottle: {
+          __args: {
+            data: {
+              key,
+              failedCount: 1,
+              lockedUntil: null,
+              windowStartedAt: nowIso,
+            },
+          },
+          id: true,
+        },
+      });
+    } catch {
+      // A concurrent worker may have created the row first; enforcement still
+      // applies on the next attempt via the durable read.
+    }
+    return;
+  }
+
+  const windowStartedAt = record.windowStartedAt
+    ? Date.parse(record.windowStartedAt)
+    : Number.NaN;
+  const inWindow =
+    Number.isFinite(windowStartedAt) && now - windowStartedAt < windowMs;
+  const failedCount = (inWindow ? (record.failedCount ?? 0) : 0) + 1;
+  const lockedUntil =
+    failedCount >= maxFailures
+      ? new Date(now + lockoutMs).toISOString()
+      : record.lockedUntil ?? null;
+
+  try {
+    await client.mutation({
+      updatePosLoginThrottle: {
+        __args: {
+          id: record.id,
+          data: {
+            failedCount,
+            lockedUntil,
+            windowStartedAt: inWindow
+              ? record.windowStartedAt
+              : nowIso,
+          },
+        },
+        id: true,
+      },
+    });
+  } catch {
+    // Bounded failure: the next attempt re-reads the durable value.
+  }
 };
 
-const recordFailure = (key: string): void => {
-  const previous = loginRateStates.get(key);
-  const failures = (previous?.failures ?? 0) + 1;
-  loginRateStates.set(key, {
-    failures,
-    lockedUntil: failures >= MAX_LOGIN_FAILURES ? Date.now() + LOCKOUT_MS : 0,
-  });
-};
-
-const clearFailures = (key: string): void => {
-  loginRateStates.delete(key);
+const clearThrottle = async (
+  client: CoreApiClientLike,
+  key: string,
+): Promise<void> => {
+  const record = await findThrottle(client, key);
+  if (!record?.id) return;
+  try {
+    await client.mutation({
+      updatePosLoginThrottle: {
+        __args: {
+          id: record.id,
+          data: { failedCount: 0, lockedUntil: null },
+        },
+        id: true,
+      },
+    });
+  } catch {
+    // Clearing is best-effort; a residual counter only tightens protection.
+  }
 };
 
 export const resetPosAuthRateLimiterForTests = (): void => {
-  loginRateStates.clear();
+  // Throttle state is durable (database-backed); this hook is retained for
+  // callers and intentionally performs no in-process reset.
 };
 
 const staffIsUsable = (staff: PosStaffRecord): PosAuthResult | null => {
@@ -361,13 +492,39 @@ export const authenticatePosStaff = async (
     });
   }
 
-  const ratePayload = {
-    cardIdentifier: cardIdentifier ?? undefined,
-    terminalId: terminalId ?? undefined,
+  // Server-owned throttle keys: the credential fingerprint plus a global key.
+  // Neither depends on the client-supplied terminalId, and both are persisted
+  // so rotating terminalId or restarting a worker cannot bypass protection.
+  const credentialKey = cardIdentifier
+    ? `cred:card:${credentialFingerprint('card', cardIdentifier)}`
+    : `cred:pin:${credentialFingerprint('pin', pin as string)}`;
+  const globalKey = 'global';
+
+  const credentialRetry = throttleRetryAfterSeconds(
+    await findThrottle(client, credentialKey),
+  );
+  if (credentialRetry > 0) return rateLimitedResponse(credentialRetry);
+  const globalRetry = throttleRetryAfterSeconds(
+    await findThrottle(client, globalKey),
+  );
+  if (globalRetry > 0) return rateLimitedResponse(globalRetry);
+
+  const recordFailure = async (): Promise<void> => {
+    await recordThrottleFailure(
+      client,
+      credentialKey,
+      MAX_LOGIN_FAILURES,
+      GLOBAL_WINDOW_MS,
+      LOCKOUT_MS,
+    );
+    await recordThrottleFailure(
+      client,
+      globalKey,
+      GLOBAL_MAX_FAILURES,
+      GLOBAL_WINDOW_MS,
+      GLOBAL_LOCKOUT_MS,
+    );
   };
-  const key = rateKey(ratePayload);
-  const rateLimited = checkRateLimit(key);
-  if (rateLimited) return rateLimited;
 
   const staff = await queryRecords<PosStaffRecord>(
     client,
@@ -382,24 +539,49 @@ export const authenticatePosStaff = async (
   if (cardIdentifier) {
     candidate = staff[0] ?? null;
   } else {
-    const matches: PosStaffRecord[] = [];
-    for (const row of staff) {
-      if (row.pinHash && (await verifyPosPin(pin as string, row.pinHash))) {
-        matches.push(row);
-      }
-    }
+    const normalizedPin = pin as string;
+    const lookup = computePinLookup(normalizedPin);
+    const lookupMatch = staff.find(
+      (row) => Boolean(row.pinLookup) && row.pinLookup === lookup,
+    );
 
-    if (matches.length === 1) {
-      candidate = matches[0];
-      inactiveCandidate = candidate.isActive === false;
+    if (lookupMatch) {
+      if (
+        lookupMatch.pinHash &&
+        (await verifyPosPin(normalizedPin, lookupMatch.pinHash))
+      ) {
+        candidate = lookupMatch;
+      }
     } else {
-      recordFailure(key);
-      return invalidCredentials();
+      // Only legacy rows without a lookup index need the expensive scrypt
+      // trial. After migration the loop is empty and login is O(1).
+      const matches: PosStaffRecord[] = [];
+      for (const row of staff) {
+        if (row.pinLookup) continue;
+        if (row.pinHash && (await verifyPosPin(normalizedPin, row.pinHash))) {
+          matches.push(row);
+        }
+      }
+
+      if (matches.length === 1) {
+        candidate = matches[0];
+        inactiveCandidate = candidate.isActive === false;
+        try {
+          await client.mutation({
+            updatePosStaff: {
+              __args: { id: candidate.id, data: { pinLookup: lookup } },
+              id: true,
+            },
+          });
+        } catch {
+          // Best-effort migration; a failure simply keeps the legacy path.
+        }
+      }
     }
   }
 
   if (!candidate) {
-    recordFailure(key);
+    await recordFailure();
     return invalidCredentials();
   }
 
@@ -411,11 +593,11 @@ export const authenticatePosStaff = async (
   if (unusable) return unusable;
 
   if (cardIdentifier && !candidate.cardIdentifier) {
-    recordFailure(key);
+    await recordFailure();
     return invalidCredentials();
   }
 
-  clearFailures(key);
+  await clearThrottle(client, credentialKey);
   if ((candidate.failedLoginCount ?? 0) !== 0 || candidate.lockedUntil) {
     await updateStaffLoginState(client, candidate, 0, null);
   }
