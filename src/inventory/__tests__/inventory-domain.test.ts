@@ -579,3 +579,113 @@ describe('cost deterministic', () => {
     expect((res.body as { unitCostMicros: number }).unitCostMicros).toBe(900); // (0.5*800+0.5*1000)/1 =900
   });
 });
+
+describe('partial consumption recovery (exactly-once per movement)', () => {
+  const setupTwoIngredientOrder = async (db: FakeDb) => {
+    const k = await locId(db, 'Кухня');
+    const tomato = await itemId(db, 'Tomato');
+    const cucumber = await itemId(db, 'Cucumber');
+    const menu = await itemId(db, 'SaladMenu');
+    await executeReceiveStock(db as any, {
+      locationId: k,
+      lines: [
+        { stockItemId: tomato, quantityMicros: kgToMicros(10), unitCostMicros: 500 },
+        { stockItemId: cucumber, quantityMicros: kgToMicros(10), unitCostMicros: 400 },
+      ],
+      idempotencyKey: 'partial-receipt',
+    }, admin);
+    await executeUpsertRecipe(db as any, {
+      label: 'salad',
+      targetKind: 'MENU_ITEM',
+      targetId: menu,
+      defaultLocationId: k,
+      lines: [
+        { stockItemId: tomato, quantityMicros: 100_000 },
+        { stockItemId: cucumber, quantityMicros: 100_000 },
+      ],
+      yieldQuantityMicros: 1000,
+      idempotencyKey: 'partial-recipe',
+    }, admin);
+    return { k, tomato, cucumber, menu };
+  };
+  const orderLines = (menu: string) => [
+    { id: 'line-1', menuItemId: menu, quantity: 1, status: 'ACTIVE', createdAt: new Date().toISOString() },
+  ];
+  const saleMovements = (db: FakeDb, orderId: string) =>
+    db.rows.inventoryStockMovements.filter(
+      (r) => r.sourceId === orderId && r.movementType === 'SALE_CONSUMPTION',
+    );
+
+  it('completes 0/N then never duplicates (N/N)', async () => {
+    const db = new FakeDb();
+    const { menu } = await setupTwoIngredientOrder(db);
+    await processConsumptionRequest(db as any, 'ord-0', orderLines(menu));
+    expect(saleMovements(db, 'ord-0')).toHaveLength(2);
+    await processConsumptionRequest(db as any, 'ord-0', orderLines(menu));
+    expect(saleMovements(db, 'ord-0')).toHaveLength(2);
+    expect(db.rows.inventoryConsumptionRequests[0].status).toBe('APPLIED');
+  });
+
+  it('completes 1/N written and skips nothing on retry', async () => {
+    const db = new FakeDb();
+    const { menu, tomato } = await setupTwoIngredientOrder(db);
+    const orderId = 'ord-1';
+    // Simulate a previous partial attempt: only the tomato movement exists.
+    db.seed('inventoryStockMovements', {
+      id: 'seed-movement-1',
+      movementType: 'SALE_CONSUMPTION',
+      stockItemId: tomato,
+      locationId: (db.rows.inventoryStockBalances[0]?.locationId as string) ?? 'loc',
+      quantityDeltaMicros: -100_000,
+      sourceType: 'SALE',
+      sourceId: orderId,
+      orderId,
+      orderLineId: 'line-1',
+      occurredAt: new Date().toISOString(),
+      idempotencyKey: `${orderId}:line-1:${tomato}`,
+    });
+
+    await processConsumptionRequest(db as any, orderId, orderLines(menu));
+    expect(saleMovements(db, orderId)).toHaveLength(2);
+
+    await processConsumptionRequest(db as any, orderId, orderLines(menu));
+    expect(saleMovements(db, orderId)).toHaveLength(2);
+  });
+
+  it('completes N-1/N on retry', async () => {
+    const db = new FakeDb();
+    const { menu, tomato, cucumber } = await setupTwoIngredientOrder(db);
+    const orderId = 'ord-n1';
+    const locationId = (db.rows.inventoryStockBalances[0]?.locationId as string) ?? 'loc';
+    for (const [id, item] of [['seed-a', tomato], ['seed-b', cucumber]] as const) {
+      db.seed('inventoryStockMovements', {
+        id,
+        movementType: 'SALE_CONSUMPTION',
+        stockItemId: item,
+        locationId,
+        quantityDeltaMicros: -100_000,
+        sourceType: 'SALE',
+        sourceId: orderId,
+        orderId,
+        orderLineId: 'line-1',
+        occurredAt: new Date().toISOString(),
+        idempotencyKey: `${orderId}:line-1:${item}`,
+      });
+    }
+    // Re-run must be a no-op with all movements present.
+    await processConsumptionRequest(db as any, orderId, orderLines(menu));
+    expect(saleMovements(db, orderId)).toHaveLength(2);
+    expect(db.rows.inventoryConsumptionRequests[0].status).toBe('APPLIED');
+  });
+
+  it('does not reprocess an APPLIED request', async () => {
+    const db = new FakeDb();
+    const { menu } = await setupTwoIngredientOrder(db);
+    const orderId = 'ord-applied';
+    await processConsumptionRequest(db as any, orderId, orderLines(menu));
+    const before = saleMovements(db, orderId).length;
+    const result = await processConsumptionRequest(db as any, orderId, orderLines(menu));
+    expect((result.body as { alreadyApplied?: boolean }).alreadyApplied).toBe(true);
+    expect(saleMovements(db, orderId)).toHaveLength(before);
+  });
+});

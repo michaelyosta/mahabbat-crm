@@ -587,87 +587,103 @@ const findEffectiveRecipeVersion = async (c: CoreApiClientLike, menuItemId: stri
 
 // === Consumption processor (like loyalty) ===
 export const processConsumptionRequest = async (c: CoreApiClientLike, orderId: string, posOrderLines: Array<{ id: string; menuItemId: string; quantity: number; status: string; voidPreparedState?: string | null; createdAt?: string }>): Promise<InventoryResult> => {
-  // check existing movements for this order
-  const existingMovs = await findMovementsBySource(c, orderId);
-  if (existingMovs.length > 0) return ok(200, { orderId, alreadyApplied: true });
-  const req = await findConsumptionByOrder(c, orderId);
+  const now = new Date().toISOString();
+  let req = await findConsumptionByOrder(c, orderId);
   if (!req) {
     // create PENDING request if not exists (as POS would)
     try {
       await c.mutation({ createInventoryConsumptionRequest: { __args: { data: { orderId, status: 'PENDING', idempotencyKey: orderId, attemptCount: 0 } }, id: true } });
     } catch {}
+    req = await findConsumptionByOrder(c, orderId);
   }
-  // if no lines, mark applied
-  const now = new Date().toISOString();
-  let appliedLines = 0;
+  // Terminal state is never reprocessed. Completion is derived per movement,
+  // never from "some movement exists", so a partial previous attempt is
+  // completed instead of being treated as fully applied.
+  if (req?.status === 'APPLIED') {
+    return ok(200, { orderId, alreadyApplied: true });
+  }
+
+  let createdMovements = 0;
+  let presentMovements = 0;
+  let expectedMovements = 0;
   let issues = 0;
-  for (const line of posOrderLines) {
-    if (line.status === 'VOIDED') {
-      if (line.voidPreparedState === 'NOT_PREPARED') continue; // no consumption
-      // PREPARED void -> treat as waste consumption (same recipe, different movement type)
-      const ver = await findEffectiveRecipeVersion(c, line.menuItemId, line.createdAt ?? now);
-      if (!ver) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_RECIPE' }); continue; }
-      const recipeLines = await findRecipeLines(c, ver.id);
-      const recHeader = await queryConnection<RecipeRecord>(c, 'inventoryRecipes', { filter: { targetId: { eq: line.menuItemId } }, first: 1 }, RECIPE_FIELDS);
-      const locId = recHeader[0]?.defaultLocationId ?? null;
-      if (!locId) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_LOCATION' }); continue; }
-      const revisionLock = await rejectMovementDuringRevision(c, [locId]);
-      if (revisionLock) return revisionLock;
-      for (const rl of recipeLines) {
-        const required = scaledQuantityMicros(rl.quantityMicros as number, (line.quantity * 1000), ver.yieldQuantityMicros as number);
-        const bal = await ensureBalance(c, rl.stockItemId as string, locId);
-        const snap = bal.averageCostMicros ?? 0;
-        const key = `${orderId}:${line.id}:${rl.stockItemId}`;
-        if ((bal.quantityMicros ?? 0) < required) {
-          issues += 1;
-          await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'INSUFFICIENT_STOCK' });
-        }
-        const movement = await appendMovement(c, {
-          movementType: 'PREPARED_VOID_CONSUMPTION', stockItemId: rl.stockItemId as string, locationId: locId,
-          quantityDeltaMicros: -required, unitCostMicros: snap, totalCostMicros: -quantityCostTotal(required, snap),
-          sourceType: 'VOID', sourceId: orderId, recipeVersionId: ver.id, orderId, orderLineId: line.id, actorStaffId: 'system', occurredAt: now, idempotencyKey: key,
-        });
-        if (!movement) return error('CONFLICT', 'Списание продажи не проведено.');
-        await applyMovementToProjection(c, movement, rl.stockItemId as string, locId, bal, -required, snap, 'WRITE_OFF');
-        appliedLines += 1;
-      }
-      continue;
-    }
-    if (line.status !== 'ACTIVE') continue;
+
+  const processLine = async (
+    line: { id: string; menuItemId: string; quantity: number; status: string; voidPreparedState?: string | null; createdAt?: string },
+    movementType: string,
+    sourceType: string,
+  ): Promise<void> => {
     const ver = await findEffectiveRecipeVersion(c, line.menuItemId, line.createdAt ?? now);
-    if (!ver) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_RECIPE' }); continue; }
+    if (!ver) {
+      issues += 1;
+      await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_RECIPE' });
+      return;
+    }
     const recipeLines = await findRecipeLines(c, ver.id);
     const recHeader = (await queryConnection<RecipeRecord>(c, 'inventoryRecipes', { filter: { targetKind: { eq: 'MENU_ITEM' }, targetId: { eq: line.menuItemId } }, first: 1 }, RECIPE_FIELDS))[0];
     const locId = recHeader?.defaultLocationId ?? null;
-    if (!locId) { issues += 1; await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_LOCATION' }); continue; }
+    if (!locId) {
+      issues += 1;
+      await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'MISSING_LOCATION' });
+      return;
+    }
     const revisionLock = await rejectMovementDuringRevision(c, [locId]);
-    if (revisionLock) return revisionLock;
+    if (revisionLock) throw revisionLock;
+
     for (const rl of recipeLines) {
       const required = scaledQuantityMicros(rl.quantityMicros as number, (line.quantity * 1000), ver.yieldQuantityMicros as number);
+      const key = `${orderId}:${line.id}:${rl.stockItemId}`;
+      expectedMovements += 1;
+
+      const existing = await findMovementByIdempotency(c, key);
+      if (existing) {
+        presentMovements += 1;
+        continue;
+      }
+
       const bal = await ensureBalance(c, rl.stockItemId as string, locId);
       const snap = bal.averageCostMicros ?? 0;
-      const key = `${orderId}:${line.id}:${rl.stockItemId}`;
       if ((bal.quantityMicros ?? 0) < required) {
         issues += 1;
         await ensureConsumptionIssue(c, { orderId, orderLineId: line.id, menuItemId: line.menuItemId, issueType: 'INSUFFICIENT_STOCK' });
       }
       const movement = await appendMovement(c, {
-        movementType: 'SALE_CONSUMPTION', stockItemId: rl.stockItemId as string, locationId: locId,
+        movementType, stockItemId: rl.stockItemId as string, locationId: locId,
         quantityDeltaMicros: -required, unitCostMicros: snap, totalCostMicros: -quantityCostTotal(required, snap),
-        sourceType: 'SALE', sourceId: orderId, recipeVersionId: ver.id, orderId, orderLineId: line.id, actorStaffId: 'system', occurredAt: now, idempotencyKey: key,
+        sourceType, sourceId: orderId, recipeVersionId: ver.id, orderId, orderLineId: line.id, actorStaffId: 'system', occurredAt: now, idempotencyKey: key,
       });
-      if (!movement) return error('CONFLICT', 'Списание продажи не проведено.');
+      if (!movement) throw new Error('CONFLICT: Списание продажи не проведено.');
+      if (movement.created) createdMovements += 1;
+      else presentMovements += 1;
       await applyMovementToProjection(c, movement, rl.stockItemId as string, locId, bal, -required, snap, 'WRITE_OFF');
-      appliedLines += 1;
     }
+  };
+
+  for (const line of posOrderLines) {
+    if (line.status === 'ACTIVE') {
+      await processLine(line, 'SALE_CONSUMPTION', 'SALE');
+      continue;
+    }
+    if (line.status === 'VOIDED' && line.voidPreparedState === 'PREPARED') {
+      // PREPARED void -> waste consumption (same recipe, different movement type)
+      await processLine(line, 'PREPARED_VOID_CONSUMPTION', 'VOID');
+    }
+    // VOIDED with NOT_PREPARED (or any other status) consumes nothing.
   }
-  // update request status
+
+  const posted = createdMovements + presentMovements;
+  const status = posted === 0 && issues > 0 ? 'FAILED_MISSING_RECIPE' : 'APPLIED';
+
   const reqFresh = await findConsumptionByOrder(c, orderId);
-  if (reqFresh) {
-    const status = issues > 0 && appliedLines === 0 ? 'FAILED_MISSING_RECIPE' : 'APPLIED';
+  if (reqFresh && reqFresh.status !== status) {
     await c.mutation({ updateInventoryConsumptionRequest: { __args: { id: reqFresh.id, data: { status, processedAt: now, attemptCount: (reqFresh.attemptCount ?? 0) + 1 } }, id: true } }).catch(()=>null);
+  } else if (reqFresh && status === 'FAILED_MISSING_RECIPE') {
+    // Retryable/permanent failure: count attempts without re-emitting an
+    // unchanged terminal status update (prevents a self-triggered loop).
+    await c.mutation({ updateInventoryConsumptionRequest: { __args: { id: reqFresh.id, data: { processedAt: now, attemptCount: (reqFresh.attemptCount ?? 0) + 1 } }, id: true } }).catch(()=>null);
   }
-  return ok(200, { orderId, appliedLines, issues });
+
+  return ok(200, { orderId, appliedLines: posted, issues, expectedMovements, createdMovements, presentMovements });
 };
 
 // === Inventory Counts ===
