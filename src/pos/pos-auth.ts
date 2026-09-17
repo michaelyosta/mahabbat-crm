@@ -541,16 +541,21 @@ export const authenticatePosStaff = async (
   } else {
     const normalizedPin = pin as string;
     const lookup = computePinLookup(normalizedPin);
-    const lookupMatch = staff.find(
+    // Preserve the historical "the PIN must identify exactly one staff member"
+    // rule on the fast path too: a shared PIN is ambiguous and denied, never
+    // silently resolved to whichever row happens to be first.
+    const lookupMatches = staff.filter(
       (row) => Boolean(row.pinLookup) && row.pinLookup === lookup,
     );
 
-    if (lookupMatch) {
-      if (
-        lookupMatch.pinHash &&
-        (await verifyPosPin(normalizedPin, lookupMatch.pinHash))
-      ) {
-        candidate = lookupMatch;
+    if (lookupMatches.length > 1) {
+      await recordFailure();
+      return invalidCredentials();
+    }
+    if (lookupMatches.length === 1) {
+      const match = lookupMatches[0];
+      if (match.pinHash && (await verifyPosPin(normalizedPin, match.pinHash))) {
+        candidate = match;
       }
     } else {
       // Only legacy rows without a lookup index need the expensive scrypt

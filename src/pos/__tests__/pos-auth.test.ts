@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
   authenticatePosStaff,
+  computePinLookup,
   getAuthenticatedPosContext,
   hashPosPin,
   posSessionIdleTtlMs,
@@ -267,6 +268,17 @@ describe('POS authentication context', () => {
 
     const next = await authenticatePosStaff(db, { pin: '9999', terminalId: 'global-test' });
     expect(next.status).toBe(429);
+  });
+
+  it('rejects a shared PIN even on the lookup fast path', async () => {
+    const db = new FakeAuthDb();
+    const sharedLookup = computePinLookup('1234');
+    db.posStaffs.push(
+      await staffRow(STAFF, 'Айжан', 'WAITER', '1234', { pinLookup: sharedLookup }),
+      await staffRow(ADMIN, 'Болат', 'WAITER', '1234', { pinLookup: sharedLookup }),
+    );
+
+    expect((await authenticatePosStaff(db, { pin: '1234' })).status).toBe(401);
   });
 
   it('rejects while locked and recovers after the durable lock expires', async () => {
