@@ -89,3 +89,6 @@ fixtures/**/*.csv
 
 # local design prototypes (untracked reference mockups, never commit)
 /prototypes/
+
+# local audit artifacts
+/.audit/
