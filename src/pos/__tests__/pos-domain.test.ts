@@ -1450,4 +1450,24 @@ describe('payment optimistic concurrency (CAS)', () => {
     const loser = first.status === 400 ? (first.body as { code: string }) : (second.body as { code: string });
     expect(['PAYMENT_IN_PROGRESS', 'OVERPAYMENT']).toContain(loser.code);
   });
+
+  it('repairs a stale prepaidTotal from the APPLIED prepayment ledger', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupOrder(db);
+    db.seed('posPrepayments', { id: 'pp-1', orderId, amount: { amountMicros: 100_000_000, currencyCode: 'KZT' }, status: 'APPLIED', createdByStaffId: STAFF });
+    db.seed('posPrepayments', { id: 'pp-2', orderId, amount: { amountMicros: 200_000_000, currencyCode: 'KZT' }, status: 'APPLIED', createdByStaffId: STAFF });
+    // UNAPPLIED must never contribute to the derived total.
+    db.seed('posPrepayments', { id: 'pp-3', orderId, amount: { amountMicros: 999_000_000, currencyCode: 'KZT' }, status: 'UNAPPLIED', createdByStaffId: STAFF });
+    const order = db.rows.posOrders.find((row) => row.id === orderId)!;
+    order.prepaidTotal = { amountMicros: 5, currencyCode: 'KZT' };
+
+    await _internal.reconcileOrderPrepaidTotal(db, orderId);
+    const prepaid = db.rows.posOrders.find((row) => row.id === orderId)!.prepaidTotal as { amountMicros: number };
+    expect(prepaid.amountMicros).toBe(300_000_000);
+
+    // Idempotent: a second reconciliation does not drift.
+    await _internal.reconcileOrderPrepaidTotal(db, orderId);
+    const again = db.rows.posOrders.find((row) => row.id === orderId)!.prepaidTotal as { amountMicros: number };
+    expect(again.amountMicros).toBe(300_000_000);
+  });
 });

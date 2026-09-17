@@ -3433,9 +3433,33 @@ const reconcileOrderPrepaidTotal = async (
   client: CoreApiClientLike,
   orderId: string,
 ): Promise<OrderRecord | null> => {
-  const rows = await queryConnection<PrepaymentRecord>(client, 'posPrepayments', { filter: { orderId: { eq: orderId }, status: { eq: 'APPLIED' } }, first: 100 }, PREPAYMENT_FIELDS);
-  const total = rows.reduce((sum, row) => sum + normalizeCurrency(row.amount).amountMicros, 0);
-  await client.mutation({ updatePosOrder: { __args: { id: orderId, data: { prepaidTotal: microsToCurrency(total) } }, id: true } });
+  // prepaidTotal is derived from the append-only APPLIED prepayments. Guard the
+  // projection write with a compare-and-swap so two concurrent reconciliations
+  // cannot leave a stale value: the loser re-reads and retries instead of
+  // overwriting a newer total.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const order = await findOrderById(client, orderId);
+    if (!order) return null;
+
+    const rows = await queryConnection<PrepaymentRecord>(client, 'posPrepayments', { filter: { orderId: { eq: orderId }, status: { eq: 'APPLIED' } }, first: 100 }, PREPAYMENT_FIELDS);
+    const total = rows.reduce((sum, row) => sum + normalizeCurrency(row.amount).amountMicros, 0);
+    const observed = normalizeCurrency(order.prepaidTotal).amountMicros;
+
+    if (observed === total) return order;
+
+    const result = await client.mutation({
+      updatePosOrders: {
+        __args: {
+          filter: { id: { eq: orderId }, prepaidTotal: currencyFilter(observed) },
+          data: { prepaidTotal: microsToCurrency(total) },
+        },
+        id: true,
+      },
+    });
+    if (mutationUpdatedRows(result, 'updatePosOrders') > 0) {
+      return findOrderById(client, orderId);
+    }
+  }
   return findOrderById(client, orderId);
 };
 
@@ -3767,4 +3791,4 @@ export const dispatchPosCommand = async (
 // Test-only surface for the optimistic-concurrency primitives that protect
 // payments. Kept explicit so a regression test can prove the CAS contract and
 // fail if the guard is removed.
-export const _internal = { guardedUpdatePaidTotal, paymentTotals };
+export const _internal = { guardedUpdatePaidTotal, paymentTotals, reconcileOrderPrepaidTotal };
