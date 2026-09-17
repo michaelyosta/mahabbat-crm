@@ -24,6 +24,7 @@ import { POS_PRECHECK_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-precheck.obje
 import { POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment-method.object';
 import { POS_PAYMENT_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-payment.object';
 import { POS_STAFF_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-staff.object';
+import { POS_LOGIN_THROTTLE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-login-throttle.object';
 import { POS_SESSION_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-session.object';
 import { POS_TABLE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-table.object';
 import { POS_ZONE_UNIVERSAL_IDENTIFIER } from 'src/objects/pos-zone.object';
@@ -124,6 +125,7 @@ export default defineApplicationRole({
       POS_PAYMENT_METHOD_UNIVERSAL_IDENTIFIER,
       POS_PAYMENT_UNIVERSAL_IDENTIFIER,
       POS_STAFF_UNIVERSAL_IDENTIFIER,
+      POS_LOGIN_THROTTLE_UNIVERSAL_IDENTIFIER,
       POS_SESSION_UNIVERSAL_IDENTIFIER,
       POS_RESERVATION_UNIVERSAL_IDENTIFIER,
       POS_PREPAYMENT_UNIVERSAL_IDENTIFIER,
