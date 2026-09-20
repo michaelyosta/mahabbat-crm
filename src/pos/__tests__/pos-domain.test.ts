@@ -30,6 +30,7 @@ type TableKind =
   | 'posPaymentMethods'
   | 'posPayments'
   | 'posPrepayments'
+  | 'posReservations'
   | 'posOperationalEvents';
 
 class UniqueViolationError extends Error {
@@ -54,6 +55,7 @@ class FakePosDb {
     posPaymentMethods: [],
     posPayments: [],
     posPrepayments: [],
+    posReservations: [],
     posOperationalEvents: [],
   };
 
@@ -224,6 +226,7 @@ class FakePosDb {
         const predicate = condition as Record<string, unknown>;
         if (typeof predicate !== 'object' || predicate === null) return true;
         if ('eq' in predicate) return JSON.stringify(value) === JSON.stringify(predicate.eq);
+        if ('in' in predicate) return (predicate.in as unknown[]).includes(value);
         if (typeof value !== 'object' || value === null) return true;
         return Object.entries(predicate).every(([nestedField, nestedCondition]) =>
           matchesCondition((value as Record<string, unknown>)[nestedField], nestedCondition),
@@ -280,6 +283,8 @@ class FakePosDb {
       createPosPrepayment: 'posPrepayments',
       updatePosPrepayment: 'posPrepayments',
       updatePosPrepayments: 'posPrepayments',
+      createPosReservation: 'posReservations',
+      updatePosReservation: 'posReservations',
       createPosOperationalEvent: 'posOperationalEvents',
       updatePosOperationalEvent: 'posOperationalEvents',
     };
@@ -311,6 +316,7 @@ class FakePosDb {
       posPaymentMethods: 'posPaymentMethods',
       posPayments: 'posPayments',
       posPrepayments: 'posPrepayments',
+      posReservations: 'posReservations',
       posOperationalEvents: 'posOperationalEvents',
     };
 
@@ -1388,6 +1394,172 @@ describe('foreign order is read-only for a waiter (server-side authorization)', 
     expect(pay.status).toBe(201);
     const close = await executeCloseOrder(db, { orderId, idempotencyKey: key(813) }, admin);
     expect(close.status).toBe(201);
+  });
+
+  it('rejects applying another waiter deposit even when the order is owned', async () => {
+    const db = dbWithBaseline();
+    await executeOpenShift(db, { idempotencyKey: key(820) }, foreignWaiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(821) }, foreignWaiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    db.seed('posPrepayments', {
+      id: '40000000-0000-4000-8000-000000000099',
+      orderId: null,
+      reservationId: null,
+      amount: { amountMicros: 100_000_000, currencyCode: 'KZT' },
+      status: 'UNAPPLIED',
+      createdByStaffId: STAFF,
+    });
+
+    const result = await dispatchPosCommand(
+      db,
+      'applyPrepayment',
+      { prepaymentId: '40000000-0000-4000-8000-000000000099', orderId, idempotencyKey: key(822) },
+      foreignWaiter,
+    );
+    expect(result.status).toBe(400);
+    expect((result.body as { code: string }).code).toBe('PREPAYMENT_NOT_OWNED');
+    expect(db.rows.posPrepayments[0].status).toBe('UNAPPLIED');
+  });
+
+  it('rejects a cumulative prepayment that would exceed the order total', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+    const total = 1_500_000_000;
+    db.seed('posPrepayments', {
+      id: 'pp-a',
+      orderId: null,
+      amount: { amountMicros: total, currencyCode: 'KZT' },
+      status: 'UNAPPLIED',
+      createdByStaffId: STAFF,
+    });
+    db.seed('posPrepayments', {
+      id: 'pp-b',
+      orderId: null,
+      amount: { amountMicros: total, currencyCode: 'KZT' },
+      status: 'UNAPPLIED',
+      createdByStaffId: STAFF,
+    });
+
+    const first = await dispatchPosCommand(
+      db,
+      'applyPrepayment',
+      { prepaymentId: 'pp-a', orderId, idempotencyKey: key(823) },
+      waiter,
+    );
+    expect(first.status).toBe(201);
+
+    const second = await dispatchPosCommand(
+      db,
+      'applyPrepayment',
+      { prepaymentId: 'pp-b', orderId, idempotencyKey: key(824) },
+      waiter,
+    );
+    expect(second.status).toBe(400);
+    expect((second.body as { code: string }).code).toBe('PREPAYMENT_EXCEEDS_ORDER');
+    expect((db.rows.posOrders.find((row) => row.id === orderId)?.prepaidTotal as { amountMicros: number }).amountMicros).toBe(total);
+    expect(db.rows.posPrepayments.find((row) => row.id === 'pp-b')?.status).toBe('UNAPPLIED');
+  });
+
+  it('consumes the active precheck on close and cannot resurrect the order', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+    await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 1_500_000_000, idempotencyKey: key(830) },
+      waiter,
+    );
+    const close = await executeCloseOrder(db, { orderId, idempotencyKey: key(831) }, waiter);
+    expect(close.status).toBe(201);
+
+    const precheck = db.rows.posPrechecks.find((row) => row.orderId === orderId)!;
+    expect(precheck.status).toBe('CONSUMED');
+    expect(precheck.activeOrderKey).toBeNull();
+
+    const reopen = await executeCreatePrecheck(db, { orderId, idempotencyKey: key(832) }, waiter);
+    expect(reopen.status).toBe(400);
+    expect((reopen.body as { code: string }).code).toBe('ORDER_NOT_EDITABLE');
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.status).toBe('CLOSED');
+  });
+
+  it('rejects a foreign waiter createPrecheck before any replay branch', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+
+    const foreign = await executeCreatePrecheck(
+      db,
+      { orderId, idempotencyKey: key(833) },
+      foreignWaiter,
+    );
+    expect(foreign.status).toBe(400);
+    expect((foreign.body as { code: string }).code).toBe('ORDER_NOT_OWNED');
+  });
+
+  it('releases a stale PENDING payment lock after the TTL', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+    db.seed('posPayments', {
+      id: 'pending-stale',
+      orderId,
+      lockKey: orderId,
+      status: 'PENDING',
+      idempotencyKey: key(840),
+      createdAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    });
+
+    const pay = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CASH_METHOD, amountMicros: 1_500_000_000, idempotencyKey: key(841) },
+      waiter,
+    );
+    expect(pay.status).toBe(201);
+    expect(db.rows.posPayments.find((row) => row.id === 'pending-stale')?.status).toBe('REJECTED');
+  });
+
+  it('does not rewrite totals on an order locked by a concurrent precheck', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+    const guestId = (db.rows.posOrderGuests[0] as { id: string }).id;
+    // A line applied against a stale editable read, after the precheck locked
+    // the order. The totals write must be fenced out.
+    db.seed('posOrderLines', {
+      id: 'line-race',
+      orderId,
+      guestId,
+      menuItemId: MENU_A,
+      unitPrice: { amountMicros: 1_500_000_000, currencyCode: 'KZT' },
+      quantity: 1,
+      status: 'ACTIVE',
+      kitchenSentQuantity: 0,
+    });
+    const stale = { ...db.rows.posOrders.find((row) => row.id === orderId)!, status: 'OPEN' };
+    await _internal.updateLinesTotals(db, stale);
+
+    const after = db.rows.posOrders.find((row) => row.id === orderId)!;
+    expect((after.total as { amountMicros: number }).amountMicros).toBe(1_500_000_000);
+    expect(after.status).toBe('PRECHECK_PRINTED');
+  });
+
+  it('rejects applying a prepayment to a cancelled order', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrecheckOrder(db);
+    db.rows.posOrders.find((row) => row.id === orderId)!.status = 'CANCELLED';
+    db.seed('posPrepayments', {
+      id: 'pp-cancelled',
+      orderId: null,
+      amount: { amountMicros: 100_000_000, currencyCode: 'KZT' },
+      status: 'UNAPPLIED',
+      createdByStaffId: STAFF,
+    });
+
+    const result = await dispatchPosCommand(
+      db,
+      'applyPrepayment',
+      { prepaymentId: 'pp-cancelled', orderId, idempotencyKey: key(825) },
+      waiter,
+    );
+    expect(result.status).toBe(400);
+    expect((result.body as { code: string }).code).toBe('ORDER_NOT_EDITABLE');
+    expect(db.rows.posPrepayments[0].status).toBe('UNAPPLIED');
   });
 });
 

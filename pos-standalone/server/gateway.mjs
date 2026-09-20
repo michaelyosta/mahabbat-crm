@@ -78,9 +78,20 @@ const bearerToken = (req) => {
   return m ? m[1].trim() : null;
 };
 
+// Bound the request body for every route, including the unauthenticated
+// /api/pos/auth, so a LAN client cannot exhaust gateway memory.
+const MAX_BODY_BYTES = Number(process.env.POS_MAX_BODY_BYTES ?? 65536);
+
+class BodyTooLargeError extends Error {}
+
 const readJsonBody = async (req) => {
   const chunks = [];
-  for await (const c of req) chunks.push(c);
+  let total = 0;
+  for await (const c of req) {
+    total += c.length;
+    if (total > MAX_BODY_BYTES) throw new BodyTooLargeError();
+    chunks.push(c);
+  }
   const raw = Buffer.concat(chunks).toString('utf8');
   if (!raw) return {};
   try { return JSON.parse(raw); } catch { return null; }
@@ -122,7 +133,8 @@ const validateSessionUncached = async (token) => {
     const gj = await gr.json();
     const node = gj.data?.posSessions?.edges?.[0]?.node;
     if (!node?.staffId || !node?.sessionId || !node?.expiresAt) return { ok: false, code: 'POS_SESSION_INVALID' };
-    if (node.revokedAt || Date.parse(node.expiresAt) <= Date.now()) return { ok: false, code: 'POS_SESSION_EXPIRED' };
+    const expiresAtMs = Date.parse(node.expiresAt);
+    if (node.revokedAt || !Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return { ok: false, code: 'POS_SESSION_EXPIRED' };
     const sr = await fetch(`${TWENTY_API_URL}/rest/posStaffs/${encodeURIComponent(node.staffId)}`, {
       headers: { Authorization: `Bearer ${SERVICE_API_KEY}` },
     });
@@ -173,7 +185,9 @@ const proxyRest = async (collection, search, token) => {
   if (collection === 'posStaffs' && body && typeof body === 'object' && body.data) {
     const scrub = (row) => {
       if (!row || typeof row !== 'object') return row;
-      const { pinHash, pinLookup, ...safe } = row;
+      const safe = { ...row };
+      delete safe.pinHash;
+      delete safe.pinLookup;
       return safe;
     };
     if (Array.isArray(body.data.posStaffs)) body.data.posStaffs = body.data.posStaffs.map(scrub);
@@ -262,14 +276,26 @@ const handler = async (req, res) => {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/pos/auth') {
-    const body = await readJsonBody(req);
-    if (!body || typeof body.pin !== 'string') {
-      send(400, { code: 'INVALID_POS_CREDENTIALS', message: 'Введите PIN' });
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      send(413, { code: 'PAYLOAD_TOO_LARGE', message: 'Запрос слишком большой.' });
+      log(413, { command: 'authenticatePosStaff' });
+      return;
+    }
+    const hasPin = typeof body?.pin === 'string';
+    const hasCard = typeof body?.cardIdentifier === 'string';
+    if (!body || hasPin === hasCard) {
+      send(400, { code: 'INVALID_POS_CREDENTIALS', message: 'Введите PIN или карту' });
       log(400, { command: 'authenticatePosStaff' });
       return;
     }
-    // Never log raw PIN or token. Log only presence.
-    const envelope = { command: 'authenticatePosStaff', payload: { pin: body.pin, terminalId: body.terminalId ?? 'touch-pos' } };
+    // Never log raw PIN/card or token. Log only presence.
+    const payload = hasPin
+      ? { pin: body.pin, terminalId: body.terminalId ?? 'touch-pos' }
+      : { cardIdentifier: body.cardIdentifier, terminalId: body.terminalId ?? 'touch-pos' };
+    const envelope = { command: 'authenticatePosStaff', payload };
     try {
       const { status, body: respBody } = await forwardToResolver(envelope);
       // Do not log token; strip it before logging
@@ -290,7 +316,14 @@ const handler = async (req, res) => {
       log(401, { command: 'unknown' });
       return;
     }
-    const body = await readJsonBody(req);
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      send(413, { code: 'PAYLOAD_TOO_LARGE', message: 'Запрос слишком большой.' });
+      log(413, { command: 'unknown' });
+      return;
+    }
     if (!body || typeof body.command !== 'string') {
       send(400, { code: 'INVALID_COMMAND', message: 'command required' });
       log(400);

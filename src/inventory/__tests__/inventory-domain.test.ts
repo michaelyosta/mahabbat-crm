@@ -406,7 +406,18 @@ describe('revision', () => {
     expect((result.body as { code: string }).code).toBe('INVALID_QTY');
     expect(db.rows.inventoryStockMovements.length).toBe(beforeMovements);
     expect(db.rows.inventoryStockBalances.map((balance) => ({ id: balance.id, quantityMicros: balance.quantityMicros, version: balance.version }))).toEqual(beforeBalances);
-    expect((db.rows.inventoryCounts.find((count) => count.id === countId) as Row).status).toBe('ACTIVE');
+    const count = db.rows.inventoryCounts.find((row) => row.id === countId) as Row;
+    expect(count.status).toBe('ACTIVE');
+    // The claim must be released after a planning error, otherwise the whole
+    // location stays frozen until manual repair.
+    expect(String(count.ledgerWatermark).startsWith('POSTING:')).toBe(false);
+
+    const retry = await executeFinalizeCount(db as any, {
+      countId,
+      actuals: [{ stockItemId: items[0], actualQuantityMicros: kgToMicros(5) }],
+      idempotencyKey: 'preflight-finalize-retry',
+    }, admin);
+    expect(retry.status).toBe(201);
   });
 
   it('reproduces the +1g failure boundary and retries without a partial movement', async () => {
@@ -696,6 +707,91 @@ describe('partial consumption recovery (exactly-once per movement)', () => {
     const result = await processConsumptionRequest(db as any, orderId, orderLines(menu));
     expect((result.body as { alreadyApplied?: boolean }).alreadyApplied).toBe(true);
     expect(saleMovements(db, orderId)).toHaveLength(before);
+  });
+});
+
+describe('consumption completeness and ingredient aggregation', () => {
+  const movementsFor = (db: FakeDb, orderId: string) =>
+    db.rows.inventoryStockMovements.filter(
+      (row) => row.sourceId === orderId && row.movementType === 'SALE_CONSUMPTION',
+    );
+
+  it('consumes a repeated ingredient in full instead of once', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'K-dup');
+    const tomato = await itemId(db, 'TomDup');
+    const menu = await itemId(db, 'MenuDup');
+    await executeReceiveStock(db as any, { locationId: k, lines: [{ stockItemId: tomato, quantityMicros: kgToMicros(10), unitCostMicros: 500 }], idempotencyKey: 'dup-receipt' }, admin);
+    await executeUpsertRecipe(db as any, {
+      label: 'dup', targetKind: 'MENU_ITEM', targetId: menu, defaultLocationId: k,
+      lines: [{ stockItemId: tomato, quantityMicros: 100_000 }, { stockItemId: tomato, quantityMicros: 200_000 }],
+      yieldQuantityMicros: 1000, idempotencyKey: 'dup-recipe',
+    }, admin);
+
+    const orderId = 'ord-dup';
+    await processConsumptionRequest(db as any, orderId, [{ id: 'line-1', menuItemId: menu, quantity: 1, status: 'ACTIVE', createdAt: new Date().toISOString() }]);
+
+    const movements = movementsFor(db, orderId);
+    expect(movements).toHaveLength(1);
+    expect(movements[0].quantityDeltaMicros).toBe(-300_000);
+    const balance = db.rows.inventoryStockBalances.find((row) => row.stockItemId === tomato) as Row;
+    expect(balance.quantityMicros).toBe(kgToMicros(10) - 300_000);
+  });
+
+  it('keeps the request retryable when a line has no recipe', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'K-miss');
+    const tomato = await itemId(db, 'TomMiss');
+    const goodMenu = await itemId(db, 'GoodMenu');
+    await executeReceiveStock(db as any, { locationId: k, lines: [{ stockItemId: tomato, quantityMicros: kgToMicros(10), unitCostMicros: 500 }], idempotencyKey: 'miss-receipt' }, admin);
+    await executeUpsertRecipe(db as any, {
+      label: 'good', targetKind: 'MENU_ITEM', targetId: goodMenu, defaultLocationId: k,
+      lines: [{ stockItemId: tomato, quantityMicros: 100_000 }],
+      yieldQuantityMicros: 1000, idempotencyKey: 'miss-recipe',
+    }, admin);
+
+    const orderId = 'ord-missing-recipe';
+    const now = new Date().toISOString();
+    const result = await processConsumptionRequest(db as any, orderId, [
+      { id: 'line-good', menuItemId: goodMenu, quantity: 1, status: 'ACTIVE', createdAt: now },
+      { id: 'line-missing', menuItemId: 'menu-without-recipe', quantity: 1, status: 'ACTIVE', createdAt: now },
+    ]);
+
+    // The valid line is consumed, but the request is not reported as complete.
+    expect(movementsFor(db, orderId)).toHaveLength(1);
+    expect(db.rows.inventoryConsumptionRequests[0].status).toBe('FAILED_MISSING_RECIPE');
+    expect((result.body as { complete: boolean }).complete).toBe(false);
+  });
+
+  it('aggregates duplicate receipt lines for the same item', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'K-rcdup');
+    const tomato = await itemId(db, 'TomRcDup');
+    const result = await executeReceiveStock(db as any, {
+      locationId: k,
+      lines: [
+        { stockItemId: tomato, quantityMicros: kgToMicros(1), unitCostMicros: 500 },
+        { stockItemId: tomato, quantityMicros: kgToMicros(2), unitCostMicros: 800 },
+      ],
+      idempotencyKey: 'rc-dup',
+    }, admin);
+    expect(result.status).toBe(201);
+    const movements = db.rows.inventoryStockMovements.filter((row) => row.sourceId === 'rc-dup');
+    expect(movements).toHaveLength(1);
+    expect(movements[0].quantityDeltaMicros).toBe(kgToMicros(3));
+    const balance = db.rows.inventoryStockBalances.find((row) => row.stockItemId === tomato) as Row;
+    expect(balance.quantityMicros).toBe(kgToMicros(3));
+  });
+
+  it('reaches terminal FAILED after the attempt cap', async () => {
+    const db = new FakeDb();
+    const lines = [{ id: 'l', menuItemId: 'still-no-recipe', quantity: 1, status: 'ACTIVE', createdAt: new Date().toISOString() }];
+    for (let i = 0; i < 12; i += 1) {
+      await processConsumptionRequest(db as any, 'ord-cap', lines);
+    }
+    expect(db.rows.inventoryConsumptionRequests[0].status).toBe('FAILED');
+    const after = await processConsumptionRequest(db as any, 'ord-cap', lines);
+    expect((after.body as { alreadyFailed?: boolean }).alreadyFailed).toBe(true);
   });
 });
 

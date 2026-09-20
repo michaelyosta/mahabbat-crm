@@ -40,6 +40,14 @@ test('ESC/POS renderer keeps Cyrillic readable and marks a cancellation', () => 
   assert.ok(decoded.length > 10);
 });
 
+test('ESC/POS renderer strips injected control bytes from stored text', () => {
+  const bytes = encodeCyrillic('Борщ\u001dVA\u0000\u001b p\u0007', 'CP866');
+  assert.ok(!bytes.includes(0x1b), 'ESC must not be emitted from text');
+  assert.ok(!bytes.includes(0x1d), 'GS must not be emitted from text');
+  assert.ok(!bytes.includes(0x00), 'NUL must not be emitted from text');
+  assert.ok(!bytes.includes(0x07), 'BEL must not be emitted from text');
+});
+
 test('ESC/POS renderer creates a non-fiscal Windows test document', () => {
   const bytes = renderTestPrint({ printerLabel: 'Принтер кухни', createdAt: '2026-09-13T00:00:00.000Z' }, { paperWidth: '80', encodingProfile: 'CP866', cutSupport: false });
   const decoded = bytes.toString('latin1');

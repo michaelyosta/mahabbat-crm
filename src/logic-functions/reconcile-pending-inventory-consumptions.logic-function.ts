@@ -9,9 +9,10 @@ export default defineLogicFunction({
   timeoutSeconds: 30,
   handler: async () => {
     const client = new CoreApiClient() as unknown as { query: (q: unknown)=>Promise<unknown>; mutation: (m: unknown)=>Promise<unknown> };
-    // 1. PENDING requests
+    // 1. PENDING and retryable FAILED_MISSING_RECIPE requests. Bounded by the
+    // processor's attempt cap, which flips a stuck request to terminal FAILED.
     const pending = (await client.query({
-      inventoryConsumptionRequests: { __args: { filter: { status: { eq: 'PENDING' } }, first: 50 }, edges: { node: { id: true, orderId: true } } },
+      inventoryConsumptionRequests: { __args: { filter: { status: { in: ['PENDING', 'FAILED_MISSING_RECIPE'] } }, first: 50 }, edges: { node: { id: true, orderId: true } } },
     })) as { inventoryConsumptionRequests?: { edges?: Array<{ node?: { orderId?: string } }> } };
     for (const edge of pending.inventoryConsumptionRequests?.edges ?? []) {
       const orderId = edge?.node?.orderId;

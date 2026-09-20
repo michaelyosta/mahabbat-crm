@@ -17,5 +17,11 @@ export default defineApplication({
       isSecret: true,
       isRequired: true,
     },
+    MAHABBAT_PRINTING_ADMIN_USER_IDS: {
+      description:
+        'Comma-separated CRM workspace user ids allowed to run printing-admin commands from the CRM. When empty, CRM printing administration is denied.',
+      isSecret: false,
+      isRequired: false,
+    },
   },
 });

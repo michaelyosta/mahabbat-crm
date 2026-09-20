@@ -50,6 +50,12 @@ jobs:
       - name: Unit tests
         run: yarn test:unit
 
+      - name: Standalone POS gateway tests
+        run: yarn test:pos:standalone
+
+      - name: Printing tests
+        run: yarn test:printing
+
       - name: Run integration tests
         run: yarn test
         env:

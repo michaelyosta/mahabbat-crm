@@ -9,8 +9,14 @@ dist
 coverage
 .env
 .env.*
-.audit
+*.env
+!*.env.example
+.private
+fixtures
 backups
+recovery
+deploy
+.audit
 artifacts
 *.log
 *.md

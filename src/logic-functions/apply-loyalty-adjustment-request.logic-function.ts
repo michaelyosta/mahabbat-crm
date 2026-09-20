@@ -108,9 +108,11 @@ const findRequest = async (
 
   // Keep a bounded cursor fallback for transient filter/index inconsistencies.
   // This prevents recovery from silently depending on the first 100 records.
+  // The page cap stops a non-advancing cursor from spinning until timeout.
+  const MAX_RECOVERY_PAGES = 200;
   let after: string | undefined;
 
-  for (;;) {
+  for (let page = 0; page < MAX_RECOVERY_PAGES; page += 1) {
     const result = (await client.query({
       loyaltyAdjustmentRequests: {
         __args: { first: 100, ...(after ? { after } : {}) },
@@ -126,9 +128,10 @@ const findRequest = async (
     if (request) return request;
 
     const pageInfo = result.loyaltyAdjustmentRequests?.pageInfo;
-    if (!pageInfo?.hasNextPage || !pageInfo.endCursor) return null;
+    if (!pageInfo?.hasNextPage || !pageInfo.endCursor || pageInfo.endCursor === after) return null;
     after = pageInfo.endCursor;
   }
+  return null;
 };
 
 const customerExists = async (

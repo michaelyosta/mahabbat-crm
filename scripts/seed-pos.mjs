@@ -13,7 +13,7 @@
  *   MAHABBAT_API_URL=http://localhost:2020 MAHABBAT_API_KEY=<key> node scripts/seed-pos.mjs
  *   MAHABBAT_API_URL=... MAHABBAT_API_KEY=... node scripts/seed-pos.mjs --dry-run
  */
-import { createHash, randomBytes, scryptSync } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scryptSync } from 'node:crypto';
 
 const MICROS_PER_TENGE = 1_000_000;
 const CURRENCY = 'KZT';
@@ -149,6 +149,20 @@ const pinHash = (pin) => {
   return `scrypt$16384$8$1$${salt.toString('base64url')}$${key.toString('base64url')}`;
 };
 
+// Must match src/pos/pos-auth.ts computePinLookup so the deterministic index
+// resolves a single candidate. Uses MAHABBAT_PIN_LOOKUP_SECRET, falling back to
+// the internal route secret; the running app must see the same value.
+const pinLookup = (pin) => {
+  const secret =
+    process.env.MAHABBAT_PIN_LOOKUP_SECRET ||
+    process.env.MAHABBAT_INTERNAL_ROUTE_SECRET ||
+    '';
+  const payload = `mahabbat-pin-lookup:${pin}`;
+  return secret
+    ? createHmac('sha256', secret).update(payload, 'utf8').digest('hex')
+    : createHash('sha256').update(payload, 'utf8').digest('hex');
+};
+
 const waiterPin = normalizeSeedPin(process.env.MAHABBAT_POS_SEED_WAITER_PIN);
 const adminPin = normalizeSeedPin(process.env.MAHABBAT_POS_SEED_ADMIN_PIN);
 const posStaffs = [
@@ -158,6 +172,7 @@ const posStaffs = [
         displayName: 'Демо официант',
         staffRole: 'WAITER',
         pinHash: pinHash(waiterPin),
+        pinLookup: pinLookup(waiterPin),
         cardIdentifier: null,
         isActive: true,
         failedLoginCount: 0,
@@ -170,6 +185,7 @@ const posStaffs = [
         displayName: 'Демо администратор',
         staffRole: 'ADMIN',
         pinHash: pinHash(adminPin),
+        pinLookup: pinLookup(adminPin),
         cardIdentifier: null,
         isActive: true,
         failedLoginCount: 0,

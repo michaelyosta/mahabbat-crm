@@ -203,6 +203,7 @@ type PaymentRecord = ExistingRecord & {
   appliedToOrder?: boolean | null;
   tenderedAmount?: unknown;
   changeAmount?: unknown;
+  createdAt?: string | null;
 };
 
 type ReservationRecord = ExistingRecord & {
@@ -293,6 +294,7 @@ export const POS_ERROR_CODES = [
   'PREPAYMENT_ALREADY_APPLIED',
   'PREPAYMENT_AMOUNT_INVALID',
   'PREPAYMENT_EXCEEDS_ORDER',
+  'PREPAYMENT_NOT_OWNED',
   'STAFF_NOT_FOUND',
   'STAFF_INACTIVE',
   'GUEST_TRANSFER_INVALID',
@@ -483,6 +485,7 @@ const PAYMENT_FIELDS: NodeSelection = {
   appliedToOrder: true,
   tenderedAmount: { amountMicros: true, currencyCode: true },
   changeAmount: { amountMicros: true, currencyCode: true },
+  createdAt: true,
 };
 
 const RESERVATION_FIELDS: NodeSelection = {
@@ -556,6 +559,43 @@ const queryConnection = async <T extends ExistingRecord>(
 type Connection<T> = {
   edges?: Array<{ node?: T | null } | null>;
   pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+};
+
+// Hard cap so a malformed cursor cannot loop forever.
+const MAX_QUERY_PAGES = 200;
+
+// Paginating reader for list-shaped queries used in aggregates (order lines,
+// guests, prepayments, tickets). Without it, a large order silently undercounts
+// beyond the first page.
+const queryConnectionAll = async <T extends ExistingRecord>(
+  client: CoreApiClientLike,
+  root: string,
+  args: Record<string, unknown>,
+  nodeFields: NodeSelection,
+): Promise<T[]> => {
+  const connectionArgs = 'filter' in args ? args : { filter: args };
+  const rows: T[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < MAX_QUERY_PAGES; page += 1) {
+    const result = (await client.query({
+      [root]: {
+        __args: { first: 100, ...connectionArgs, ...(after ? { after } : {}) },
+        edges: { node: nodeFields },
+        pageInfo: { hasNextPage: true, endCursor: true },
+      },
+    })) as Record<string, Connection<T>>;
+    const connection = result[root];
+    rows.push(
+      ...(connection?.edges ?? [])
+        .map((edge) => edge?.node)
+        .filter((node): node is T => Boolean(node)),
+    );
+    if (!connection?.pageInfo?.hasNextPage || !connection.pageInfo.endCursor) {
+      return rows;
+    }
+    after = connection.pageInfo.endCursor;
+  }
+  return rows;
 };
 
 const findShiftById = async (
@@ -708,10 +748,10 @@ const findKitchenTicketsByOrder = async (
   client: CoreApiClientLike,
   orderId: string,
 ): Promise<KitchenTicketRecord[]> =>
-  queryConnection<KitchenTicketRecord>(
+  queryConnectionAll<KitchenTicketRecord>(
     client,
     'posKitchenTickets',
-    { filter: { orderId: { eq: orderId } }, first: 100 },
+    { filter: { orderId: { eq: orderId } } },
     KITCHEN_TICKET_FIELDS,
   );
 
@@ -732,10 +772,10 @@ const findKitchenTicketLines = async (
   client: CoreApiClientLike,
   ticketId: string,
 ): Promise<KitchenTicketLineRecord[]> =>
-  queryConnection<KitchenTicketLineRecord>(
+  queryConnectionAll<KitchenTicketLineRecord>(
     client,
     'posKitchenTicketLines',
-    { filter: { ticketId: { eq: ticketId } }, first: 100 },
+    { filter: { ticketId: { eq: ticketId } } },
     KITCHEN_TICKET_LINE_FIELDS,
   );
 
@@ -834,6 +874,37 @@ const findPendingPaymentByOrder = async (
   return payments[0] ?? null;
 };
 
+// A crashed terminal can leave a PENDING payment holding the per-order lock
+// forever, making the order impossible to pay or close. After this TTL the lock
+// is considered abandoned and released on the next attempt.
+const PAYMENT_LOCK_TTL_MS = 2 * 60 * 1000;
+
+const isStalePendingPayment = (
+  payment: PaymentRecord,
+  now = Date.now(),
+): boolean => {
+  const createdAt = payment.createdAt ? Date.parse(payment.createdAt) : Number.NaN;
+  return Number.isFinite(createdAt) && now - createdAt > PAYMENT_LOCK_TTL_MS;
+};
+
+// Returns true when a stale lock was released and the caller may proceed.
+const releaseStalePendingPayment = async (
+  client: CoreApiClientLike,
+  payment: PaymentRecord,
+): Promise<boolean> => {
+  if (!isStalePendingPayment(payment)) return false;
+  try {
+    await updatePayment(client, payment.id, {
+      status: 'REJECTED',
+      lockKey: null,
+      appliedToOrder: false,
+    });
+  } catch {
+    return false;
+  }
+  return true;
+};
+
 const findReservationById = async (
   client: CoreApiClientLike,
   reservationId: string,
@@ -929,12 +1000,33 @@ const findPrepaymentsByReservation = async (
   client: CoreApiClientLike,
   reservationId: string,
 ): Promise<PrepaymentRecord[]> =>
-  queryConnection<PrepaymentRecord>(
+  queryConnectionAll<PrepaymentRecord>(
     client,
     'posPrepayments',
-    { filter: { reservationId: { eq: reservationId } }, first: 100 },
+    { filter: { reservationId: { eq: reservationId } } },
     PREPAYMENT_FIELDS,
   );
+
+// A prepayment is a customer deposit. Only the staff member who created it,
+// the owner of its reservation, or an ADMIN may apply it to an order. This
+// stops waiter B from consuming waiter A's reservation deposit.
+const assertPrepaymentApplier = async (
+  client: CoreApiClientLike,
+  prepayment: PrepaymentRecord,
+  actor: PosActor,
+): Promise<CommandResult | null> => {
+  if (actor.role === 'ADMIN') return null;
+  if (prepayment.createdByStaffId && prepayment.createdByStaffId === actor.staffId) {
+    return null;
+  }
+  if (prepayment.reservationId) {
+    const reservation = await findReservationById(client, prepayment.reservationId);
+    if (reservation?.createdByStaffId && reservation.createdByStaffId === actor.staffId) {
+      return null;
+    }
+  }
+  return errorResult('PREPAYMENT_NOT_OWNED', 'Prepayment belongs to another staff member.');
+};
 
 const findOrderByCloseIdempotencyKey = async (
   client: CoreApiClientLike,
@@ -981,10 +1073,10 @@ const findActiveOrderForTable = async (
   client: CoreApiClientLike,
   tableId: string,
 ): Promise<OrderRecord | null> => {
-  const orders = await queryConnection<OrderRecord>(
+  const orders = await queryConnectionAll<OrderRecord>(
     client,
     'posOrders',
-    { filter: { tableId: { eq: tableId } }, first: 100 },
+    { filter: { tableId: { eq: tableId } } },
     ORDER_FIELDS,
   );
 
@@ -1026,10 +1118,10 @@ const findGuestsByOrder = async (
   client: CoreApiClientLike,
   orderId: string,
 ): Promise<GuestRecord[]> => {
-  const guests = await queryConnection<GuestRecord>(
+  const guests = await queryConnectionAll<GuestRecord>(
     client,
     'posOrderGuests',
-    { filter: { orderId: { eq: orderId } }, first: 100 },
+    { filter: { orderId: { eq: orderId } } },
     GUEST_FIELDS,
   );
 
@@ -1070,10 +1162,10 @@ const findLinesByOrder = async (
   client: CoreApiClientLike,
   orderId: string,
 ): Promise<LineRecord[]> => {
-  const lines = await queryConnection<LineRecord>(
+  const lines = await queryConnectionAll<LineRecord>(
     client,
     'posOrderLines',
-    { filter: { orderId: { eq: orderId } }, first: 100 },
+    { filter: { orderId: { eq: orderId } } },
     LINE_FIELDS,
   );
 
@@ -1162,10 +1254,16 @@ const updateLinesTotals = async (
   const needsStatusUpdate = nextStatus !== order.status;
 
   if (needsTotalsUpdate || needsStatusUpdate) {
+    // Fence the totals/status write to editable orders. If a concurrent
+    // createPrecheck locked the order between this read and write, we must not
+    // mutate its financial totals behind the immutable precheck snapshot.
     await client.mutation({
-      updatePosOrder: {
+      updatePosOrders: {
         __args: {
-          id: order.id,
+          filter: {
+            id: { eq: order.id },
+            status: { in: ['OPEN', 'IN_PROGRESS'] },
+          },
           data: {
             ...(needsTotalsUpdate ? { subtotal, total: subtotal } : {}),
             ...(needsStatusUpdate ? { status: nextStatus } : {}),
@@ -1246,8 +1344,35 @@ const PRINTING_STATION_FIELDS: NodeSelection = {
   printerDeviceId: true,
 };
 
-const validPrinterHost = (host: string): boolean =>
-  host.length > 0 && host.length <= 253 && !/[\u0000-\u001f\u007f\s]/.test(host);
+const isPrivateIpv4 = (value: string): boolean => {
+  const parts = value.split('.');
+  if (parts.length !== 4) return false;
+  const octets = parts.map((part) => (/^\d{1,3}$/.test(part) ? Number(part) : Number.NaN));
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
+  const [a, b] = octets;
+  // RFC1918 private ranges only. Loopback (127/8) and link-local (169.254/16,
+  // the cloud metadata range) are intentionally excluded.
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+};
+
+// A printer endpoint must be a LAN destination. Without this an ADMIN (or a
+// compromised printing-admin session) could point the print gateway at an
+// arbitrary host:port and use it as a blind SSRF / port-scan primitive.
+const validPrinterHost = (host: string): boolean => {
+  if (host.length === 0 || host.length > 253) return false;
+  if (/[\u0000-\u001f\u007f\s/\\@]/.test(host)) return false;
+  if (host.includes(':')) return false; // reject IPv6 literals and host:port
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return isPrivateIpv4(host);
+  const lower = host.toLowerCase();
+  if (lower === 'localhost' || lower.endsWith('.localhost')) return false;
+  // Allow single-label LAN hostnames and common local domains, reject dotted
+  // public-looking names that would resolve outside the local network.
+  if (!host.includes('.')) return true;
+  return /\.(local|lan|internal|home|localdomain)$/.test(lower);
+};
 
 export const executeUpsertPrinterDevice = async (
   client: CoreApiClientLike,
@@ -1700,6 +1825,9 @@ export const executeAddLine = async (
   },
   actor: PosActor,
 ): Promise<CommandResult> => {
+  if (!Number.isSafeInteger(payload.quantity) || payload.quantity < 1) {
+    return errorResult('LINE_NOT_EDITABLE', 'Line quantity must be a positive integer.');
+  }
   const order = await findOrderById(client, payload.orderId);
 
   if (!order) {
@@ -1811,6 +1939,9 @@ export const executeChangeLineQuantity = async (
   payload: { lineId: string; quantity: number },
   actor: PosActor,
 ): Promise<CommandResult> => {
+  if (!Number.isSafeInteger(payload.quantity) || payload.quantity < 1) {
+    return errorResult('LINE_NOT_EDITABLE', 'Line quantity must be a positive integer.');
+  }
   const line = await findLineById(client, payload.lineId);
 
   if (!line) {
@@ -2539,6 +2670,9 @@ const repairPrecheckOrderLock = async (
   order: OrderRecord,
 ): Promise<void> => {
   if (order.status === 'PRECHECK_PRINTED') return;
+  // Never resurrect a terminal order. A closed/cancelled order must not be
+  // pulled back into an active state by a stale precheck repair.
+  if (!isPosOrderActive((order.status ?? '') as PosOrderStatus)) return;
 
   await client.mutation({
     updatePosOrder: {
@@ -2546,6 +2680,37 @@ const repairPrecheckOrderLock = async (
       id: true,
     },
   });
+};
+
+// A paid/closed order consumes its active precheck so it can never be repaired
+// back into an active state or reprinted through the active-precheck path.
+const consumeActivePrecheckForOrder = async (
+  client: CoreApiClientLike,
+  orderId: string,
+): Promise<void> => {
+  const active = await findActivePrecheckByOrderId(client, orderId);
+  if (!active?.id) return;
+  try {
+    await client.mutation({
+      updatePosPrecheck: {
+        __args: {
+          id: active.id,
+          data: { status: 'CONSUMED', activeOrderKey: null },
+        },
+        id: true,
+      },
+    });
+  } catch {
+    // Best-effort: the order is already closed; a retry re-runs this.
+  }
+};
+
+const finalizeClosedOrder = async (
+  client: CoreApiClientLike,
+  orderId: string,
+): Promise<void> => {
+  await ensureInventoryConsumptionRequest(client, orderId);
+  await consumeActivePrecheckForOrder(client, orderId);
 };
 
 const repairCancelledPrecheckOrder = async (
@@ -2667,6 +2832,12 @@ export const executeCreatePrecheck = async (
 ): Promise<CommandResult> => {
   const order = await findOrderById(client, payload.orderId);
   if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+
+  // Ownership is checked before the idempotency/active replay branches so that
+  // a foreign waiter cannot reprint or mutate another waiter's precheck order.
+  if (!orderCanBeEditedBy(order.ownerStaffId, actor)) {
+    return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
+  }
 
   const existingByIdempotency = await findPrecheckByIdempotencyKey(
     client,
@@ -3032,7 +3203,7 @@ export const executeRecordPayment = async (
     }
     // For cash with tendered, overpayment is capped as change, not rejected.
     const lockOwner = await findPendingPaymentByOrder(client, payload.orderId);
-    if (lockOwner) {
+    if (lockOwner && !(await releaseStalePendingPayment(client, lockOwner))) {
       return errorResult('PAYMENT_IN_PROGRESS', 'Another payment is currently being processed for this order.');
     }
 
@@ -3173,7 +3344,7 @@ export const executeCloseOrder = async (
     if (replay.id !== payload.orderId || replay.closedByStaffId !== actor.staffId) {
       return idempotencyConflict('The idempotency key belongs to another close-order context.');
     }
-    await ensureInventoryConsumptionRequest(client, payload.orderId);
+    await finalizeClosedOrder(client, payload.orderId);
     return closeOrderResponse(replay, 200);
   }
 
@@ -3194,7 +3365,9 @@ export const executeCloseOrder = async (
   }
 
   const pending = await findPendingPaymentByOrder(client, order.id);
-  if (pending) return errorResult('PAYMENT_IN_PROGRESS', 'A payment is still being processed.');
+  if (pending && !(await releaseStalePendingPayment(client, pending))) {
+    return errorResult('PAYMENT_IN_PROGRESS', 'A payment is still being processed.');
+  }
 
   const totals = paymentTotals(order);
   if (totals.remainingMicros !== 0) {
@@ -3230,7 +3403,7 @@ export const executeCloseOrder = async (
     if (mutationUpdatedRows(result, 'updatePosOrders') === 0) {
       const raced = await findOrderByCloseIdempotencyKey(client, payload.idempotencyKey);
       if (raced) {
-        await ensureInventoryConsumptionRequest(client, payload.orderId);
+        await finalizeClosedOrder(client, payload.orderId);
         return closeOrderResponse(raced, 200);
       }
       return errorResult('CONFLICT', 'Order close lost a concurrent state transition.');
@@ -3238,12 +3411,12 @@ export const executeCloseOrder = async (
   } catch {
     const raced = await findOrderByCloseIdempotencyKey(client, payload.idempotencyKey);
     if (raced) {
-      await ensureInventoryConsumptionRequest(client, payload.orderId);
+      await finalizeClosedOrder(client, payload.orderId);
       return closeOrderResponse(raced, 200);
     }
     const refreshed = await findOrderById(client, order.id);
     if (refreshed?.status === 'CLOSED') {
-      await ensureInventoryConsumptionRequest(client, payload.orderId);
+      await finalizeClosedOrder(client, payload.orderId);
       return closeOrderResponse(refreshed, 200);
     }
     return errorResult('CONFLICT', 'Order could not be closed.');
@@ -3257,7 +3430,7 @@ export const executeCloseOrder = async (
     closeIdempotencyKey: payload.idempotencyKey,
     claimToken: null,
   };
-  await ensureInventoryConsumptionRequest(client, order.id);
+  await finalizeClosedOrder(client, order.id);
   return closeOrderResponse(closed, 201);
 };
 
@@ -3441,7 +3614,7 @@ const reconcileOrderPrepaidTotal = async (
     const order = await findOrderById(client, orderId);
     if (!order) return null;
 
-    const rows = await queryConnection<PrepaymentRecord>(client, 'posPrepayments', { filter: { orderId: { eq: orderId }, status: { eq: 'APPLIED' } }, first: 100 }, PREPAYMENT_FIELDS);
+    const rows = await queryConnectionAll<PrepaymentRecord>(client, 'posPrepayments', { filter: { orderId: { eq: orderId }, status: { eq: 'APPLIED' } } }, PREPAYMENT_FIELDS);
     const total = rows.reduce((sum, row) => sum + normalizeCurrency(row.amount).amountMicros, 0);
     const observed = normalizeCurrency(order.prepaidTotal).amountMicros;
 
@@ -3470,7 +3643,9 @@ export const executeApplyPrepayment = async (
 ): Promise<CommandResult> => {
   const order = await findOrderById(client, payload.orderId);
   if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
-  if (order.status === 'CLOSED') return errorResult('ORDER_NOT_EDITABLE', 'Closed order cannot receive a prepayment.');
+  if (!isPosOrderActive((order.status ?? 'OPEN') as PosOrderStatus)) {
+    return errorResult('ORDER_NOT_EDITABLE', 'Only an active order can receive a prepayment.');
+  }
   if (!orderCanBeEditedBy(order.ownerStaffId, actor)) {
     return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
   }
@@ -3482,13 +3657,31 @@ export const executeApplyPrepayment = async (
   }
   const prepayment = await findPrepaymentById(client, payload.prepaymentId);
   if (!prepayment) return errorResult('PREPAYMENT_NOT_FOUND', 'Prepayment does not exist.');
+  const notOwned = await assertPrepaymentApplier(client, prepayment, actor);
+  if (notOwned) return notOwned;
   const amountMicros = normalizeCurrency(prepayment.amount).amountMicros;
   if (prepayment.status === 'APPLIED') {
     if (prepayment.orderId !== payload.orderId) return errorResult('PREPAYMENT_ALREADY_APPLIED', 'Prepayment is already applied to another order.');
     const refreshed = (await reconcileOrderPrepaidTotal(client, payload.orderId)) ?? order;
     return okResult(200, { prepaymentId: prepayment.id, orderId: payload.orderId, status: 'APPLIED', prepaidMicros: normalizeCurrency(refreshed.prepaidTotal).amountMicros, remainingMicros: paymentTotals(refreshed).remainingMicros });
   }
-  if (amountMicros > normalizeCurrency(order.total).amountMicros && normalizeCurrency(order.total).amountMicros > 0) return errorResult('PREPAYMENT_EXCEEDS_ORDER', 'Prepayment exceeds the order total.');
+  if (prepayment.reservationId && order.tableId) {
+    const boundReservation = await findReservationById(client, prepayment.reservationId);
+    if (boundReservation?.tableId && boundReservation.tableId !== order.tableId) {
+      return errorResult('RESERVATION_TABLE_MISMATCH', 'Prepayment reservation and order must use the same table.');
+    }
+  }
+  const orderTotalMicros = normalizeCurrency(order.total).amountMicros;
+  const prepaidMicros = normalizeCurrency(order.prepaidTotal).amountMicros;
+  if (orderTotalMicros > 0 && amountMicros > orderTotalMicros) {
+    return errorResult('PREPAYMENT_EXCEEDS_ORDER', 'Prepayment exceeds the order total.');
+  }
+  // Cumulative guard: applying this prepayment must not push the derived
+  // prepaid total above the order total, which would leave a negative
+  // remaining and make the order impossible to close.
+  if (orderTotalMicros > 0 && prepaidMicros + amountMicros > orderTotalMicros) {
+    return errorResult('PREPAYMENT_EXCEEDS_ORDER', 'Prepayments exceed the order total.');
+  }
   try {
     const result = await client.mutation({
       updatePosPrepayments: {
@@ -3522,8 +3715,37 @@ export const executeAttachReservationToOrder = async (
   if (!reservation) return errorResult('RESERVATION_NOT_FOUND', 'Reservation does not exist.');
   const order = await findOrderById(client, payload.orderId);
   if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+  if (!isPosOrderActive((order.status ?? 'OPEN') as PosOrderStatus)) {
+    return errorResult('ORDER_NOT_EDITABLE', 'Only an active order can accept a reservation.');
+  }
+  if (reservation.createdByStaffId !== actor.staffId && actor.role !== 'ADMIN') {
+    return errorResult('ORDER_NOT_OWNED', 'Reservation belongs to another staff member.');
+  }
   if (order.tableId !== reservation.tableId) return errorResult('RESERVATION_TABLE_MISMATCH', 'Reservation and order must use the same table.');
   if (reservation.orderId && reservation.orderId !== payload.orderId) return errorResult('CONFLICT', 'Reservation is already attached to another order.');
+
+  const replay = await findOperationalEventByIdempotencyKey(client, payload.idempotencyKey);
+  if (replay) {
+    let details: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(replay.details ?? '{}') as unknown;
+      if (parsed && typeof parsed === 'object') details = parsed as Record<string, unknown>;
+    } catch {
+      details = {};
+    }
+    if (details.reservationId !== payload.reservationId || details.orderId !== payload.orderId) {
+      return idempotencyConflict('The idempotency key belongs to another reservation context.');
+    }
+    const refreshedReplay = (await reconcileOrderPrepaidTotal(client, payload.orderId)) ?? order;
+    return okResult(200, {
+      reservationId: payload.reservationId,
+      orderId: payload.orderId,
+      appliedPrepaymentIds: Array.isArray(details.appliedPrepaymentIds) ? (details.appliedPrepaymentIds as string[]) : [],
+      prepaidMicros: normalizeCurrency(refreshedReplay.prepaidTotal).amountMicros,
+      remainingMicros: paymentTotals(refreshedReplay).remainingMicros,
+    });
+  }
+
   if (order.ownerStaffId !== actor.staffId && actor.role !== 'ADMIN') return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
   try {
     await client.mutation({ updatePosReservation: { __args: { id: reservation.id, data: { orderId: payload.orderId } }, id: true } });
@@ -3539,6 +3761,14 @@ export const executeAttachReservationToOrder = async (
     applied.push(prepayment.id);
   }
   const refreshed = (await reconcileOrderPrepaidTotal(client, payload.orderId)) ?? order;
+  const event = await createOperationalEvent(client, {
+    eventType: 'ATTACH_RESERVATION_TO_ORDER',
+    actorStaffId: actor.staffId,
+    orderId: payload.orderId,
+    details: { reservationId: payload.reservationId, orderId: payload.orderId, appliedPrepaymentIds: applied },
+    idempotencyKey: payload.idempotencyKey,
+  });
+  if (!event?.id) return errorResult('CONFLICT', 'Reservation attachment could not be recorded.');
   return okResult(200, { reservationId: reservation.id, orderId: payload.orderId, appliedPrepaymentIds: applied, prepaidMicros: normalizeCurrency(refreshed.prepaidTotal).amountMicros, remainingMicros: paymentTotals(refreshed).remainingMicros });
 };
 
@@ -3791,4 +4021,4 @@ export const dispatchPosCommand = async (
 // Test-only surface for the optimistic-concurrency primitives that protect
 // payments. Kept explicit so a regression test can prove the CAS contract and
 // fail if the guard is removed.
-export const _internal = { guardedUpdatePaidTotal, paymentTotals, reconcileOrderPrepaidTotal };
+export const _internal = { guardedUpdatePaidTotal, paymentTotals, reconcileOrderPrepaidTotal, updateLinesTotals };

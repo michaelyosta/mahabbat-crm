@@ -19,7 +19,10 @@ import {
   type PrintJobRecord,
 } from 'src/printing/print-queue';
 
-const PRINT_GATEWAY_LEASE_MS = 90_000;
+// Must exceed the gateway's worst-case dispatch time (discovery + print
+// timeouts, retried up to 3 times), otherwise a slow but successful print is
+// prematurely declared OUTCOME_UNKNOWN and its real confirmation is dropped.
+const PRINT_GATEWAY_LEASE_MS = 5 * 60_000;
 const MAX_CLAIM_BATCH = 20;
 
 type GatewayRequest = {
@@ -147,7 +150,11 @@ const report = async (
 
   const job = await _internal.findPrintJob(client, jobId);
   if (!job) return error('PRINT_JOB_NOT_FOUND', 'Print job does not exist.');
-  if (job.status !== 'DISPATCHING') {
+  // A confident success report from the same claimant may override a
+  // pessimistic OUTCOME_UNKNOWN (the gateway was merely slow, not restarted).
+  const overridesUnknown =
+    job.status === 'OUTCOME_UNKNOWN' && (outcome === 'SENT' || outcome === 'CONFIRMED');
+  if (job.status !== 'DISPATCHING' && !overridesUnknown) {
     return response({ jobId: job.id, status: job.status, stale: true });
   }
   if (job.claimToken !== claimToken || job.gatewayId !== id) return error('CLAIM_MISMATCH', 'Print job is claimed by another gateway.', 409);

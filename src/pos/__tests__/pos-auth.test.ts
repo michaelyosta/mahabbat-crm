@@ -23,6 +23,8 @@ class FakeAuthDb implements CoreApiClientLike {
   readonly posStaffs: Row[] = [];
   readonly posSessions: Row[] = [];
   readonly posLoginThrottles: Row[] = [];
+  readonly staffFilters: Record<string, unknown>[] = [];
+  readonly staffQueryLimits: number[] = [];
   private sequence = 1;
 
   async query(document: unknown): Promise<unknown> {
@@ -30,6 +32,10 @@ class FakeAuthDb implements CoreApiClientLike {
     const operation = (document as Record<string, Record<string, unknown>>)[root];
     const args = (operation.__args ?? {}) as Record<string, unknown>;
     const filter = (args.filter ?? {}) as Record<string, unknown>;
+    if (root === 'posStaffs') {
+      this.staffFilters.push(filter);
+      this.staffQueryLimits.push(Number(args.first ?? 100));
+    }
     const rows =
       root === 'posStaffs'
         ? this.posStaffs
@@ -38,7 +44,9 @@ class FakeAuthDb implements CoreApiClientLike {
           : this.posSessions;
     const filtered = rows.filter((row) =>
       Object.entries(filter).every(([field, condition]) => {
-        const eq = (condition as Record<string, unknown>)?.eq;
+        const predicate = condition as Record<string, unknown> | undefined;
+        if (predicate && predicate.is === 'NULL') return row[field] == null;
+        const eq = predicate?.eq;
         return eq === undefined || row[field] === eq;
       }),
     );
@@ -87,6 +95,20 @@ class FakeAuthDb implements CoreApiClientLike {
       if (!row) throw new Error('throttle not found');
       Object.assign(row, data);
       return { updatePosLoginThrottle: row };
+    }
+
+    if (root === 'updatePosLoginThrottles') {
+      const filter = (args.filter ?? {}) as Record<string, unknown>;
+      const matches = this.posLoginThrottles.filter((row) =>
+        Object.entries(filter).every(([field, condition]) => {
+          const predicate = condition as Record<string, unknown> | undefined;
+          if (predicate && predicate.is === 'NULL') return row[field] == null;
+          const eq = predicate?.eq;
+          return eq === undefined || row[field] === eq;
+        }),
+      );
+      for (const row of matches) Object.assign(row, data);
+      return { updatePosLoginThrottles: matches };
     }
 
     throw new Error(`unsupported mutation ${root}`);
@@ -300,5 +322,58 @@ describe('POS authentication context', () => {
     }
 
     expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(401);
+  });
+
+  it('resolves the PIN candidate through the lookup index without a full scan', async () => {
+    const db = new FakeAuthDb();
+    const total = 60;
+    const pins: string[] = [];
+    for (let i = 0; i < total; i += 1) {
+      const pin = String(100000 + i);
+      pins.push(pin);
+      const id = `10000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+      db.posStaffs.push(
+        await staffRow(id, `Сотрудник ${i}`, 'WAITER', pin, {
+          pinLookup: computePinLookup(pin),
+        }),
+      );
+    }
+
+    const login = await authenticatePosStaff(db, { pin: pins[total - 1] });
+    expect(login.status).toBe(201);
+
+    const indexQuery = db.staffFilters.some(
+      (filter) =>
+        (filter.pinLookup as { eq?: string } | undefined)?.eq ===
+        computePinLookup(pins[total - 1]),
+    );
+    expect(indexQuery).toBe(true);
+    // No unbounded, unfiltered staff scan is issued.
+    expect(db.staffFilters.some((filter) => Object.keys(filter).length === 0)).toBe(false);
+  });
+
+  it('rejects a shared PIN split across migrated and legacy rows', async () => {
+    const db = new FakeAuthDb();
+    db.posStaffs.push(
+      await staffRow(STAFF, 'Айжан', 'WAITER', '1234', {
+        pinLookup: computePinLookup('1234'),
+      }),
+      await staffRow(ADMIN, 'Болат', 'WAITER', '1234'),
+    );
+
+    expect((await authenticatePosStaff(db, { pin: '1234' })).status).toBe(401);
+  });
+
+  it('locks out after concurrent failures on the same credential', async () => {
+    const db = new FakeAuthDb();
+    db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
+
+    await Promise.all(
+      Array.from({ length: 5 }, () =>
+        authenticatePosStaff(db, { pin: '0000', terminalId: 'race' }),
+      ),
+    );
+
+    expect((await authenticatePosStaff(db, { pin: '0000', terminalId: 'race' })).status).toBe(429);
   });
 });

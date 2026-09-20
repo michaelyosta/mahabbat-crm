@@ -22,12 +22,40 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
   if (!parsed.ok) return response(parsed.error, 400);
 
   // `isAuthRequired` has already validated the CRM/ Twenty workspace session
-  // before this handler runs. Mark only the printing configuration subset as
-  // CRM-authenticated; every other POS command still requires PosSession.
+  // before this handler runs. Printing administration from the CRM is an
+  // explicit allowlist decision: an ordinary workspace member must not be
+  // treated as a POS ADMIN. Every other POS command still requires PosSession.
+  const workspaceUserId =
+    typeof event.userWorkspaceId === 'string' && event.userWorkspaceId.length > 0
+      ? event.userWorkspaceId
+      : null;
+  const isPrintingCommand = POS_PRINTING_COMMANDS.has(parsed.data.command);
+  const hasPosSession = parsed.data.sessionToken !== undefined;
+
+  const printingAdminUserIds = (
+    process.env.MAHABBAT_PRINTING_ADMIN_USER_IDS ?? ''
+  )
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  if (
+    workspaceUserId !== null &&
+    !hasPosSession &&
+    isPrintingCommand &&
+    !printingAdminUserIds.includes(workspaceUserId)
+  ) {
+    return response(
+      {
+        code: 'COMMAND_FORBIDDEN',
+        message: 'Недостаточно прав для настройки печати.',
+      },
+      403,
+    );
+  }
+
   const crmPrintingRequest =
-    event.userWorkspaceId !== null &&
-    parsed.data.sessionToken === undefined &&
-    POS_PRINTING_COMMANDS.has(parsed.data.command);
+    workspaceUserId !== null && !hasPosSession && isPrintingCommand;
   const delegatedEnvelope = crmPrintingRequest
     ? { ...parsed.data, crmWorkspaceAuthenticated: true }
     : parsed.data;

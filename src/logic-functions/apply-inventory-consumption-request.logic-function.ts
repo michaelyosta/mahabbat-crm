@@ -6,15 +6,27 @@ import { processConsumptionRequest } from 'src/inventory/inventory-dispatch';
 type RequestRecord = { id?: string; orderId?: string; status?: string; idempotencyKey?: string };
 type Event = DatabaseEventPayload<ObjectRecordCreateEvent<RequestRecord> | ObjectRecordUpdateEvent<RequestRecord>>;
 
-const findLinesForOrder = async (client: { query: (q: unknown) => Promise<unknown> }, orderId: string) => {
-  const res = (await client.query({
-    posOrderLines: {
-      __args: { filter: { orderId: { eq: orderId } }, first: 100 },
-      edges: { node: { id: true, menuItemId: true, quantity: true, status: true, voidPreparedState: true, createdAt: true } },
-      pageInfo: { hasNextPage: true, endCursor: true },
-    },
-  })) as { posOrderLines?: { edges?: Array<{ node?: { id: string; menuItemId: string; quantity: number; status: string; voidPreparedState?: string | null; createdAt?: string } | null }> } };
-  return (res.posOrderLines?.edges ?? []).map(e => e?.node).filter(Boolean) as Array<{ id: string; menuItemId: string; quantity: number; status: string; voidPreparedState?: string | null; createdAt?: string }>;
+type OrderLineForConsumption = { id: string; menuItemId: string; quantity: number; status: string; voidPreparedState?: string | null; createdAt?: string };
+
+const MAX_ORDER_LINE_PAGES = 200;
+
+const findLinesForOrder = async (client: { query: (q: unknown) => Promise<unknown> }, orderId: string): Promise<OrderLineForConsumption[]> => {
+  const rows: OrderLineForConsumption[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < MAX_ORDER_LINE_PAGES; page += 1) {
+    const res = (await client.query({
+      posOrderLines: {
+        __args: { filter: { orderId: { eq: orderId } }, first: 100, ...(after ? { after } : {}) },
+        edges: { node: { id: true, menuItemId: true, quantity: true, status: true, voidPreparedState: true, createdAt: true } },
+        pageInfo: { hasNextPage: true, endCursor: true },
+      },
+    })) as { posOrderLines?: { edges?: Array<{ node?: OrderLineForConsumption | null }>; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null } };
+    const connection = res.posOrderLines;
+    rows.push(...(connection?.edges ?? []).map(e => e?.node).filter((n): n is OrderLineForConsumption => Boolean(n)));
+    if (!connection?.pageInfo?.hasNextPage || !connection.pageInfo.endCursor) break;
+    after = connection.pageInfo.endCursor;
+  }
+  return rows;
 };
 
 export const processInventoryRequest = async (client: InstanceType<typeof CoreApiClient> | { query: (q: unknown)=>Promise<unknown>; mutation: (m: unknown)=>Promise<unknown> }, orderId: string) => {
@@ -26,9 +38,11 @@ const handler = async (event: Event): Promise<void> => {
   const client = new CoreApiClient() as unknown as { query: (q: unknown)=>Promise<unknown>; mutation: (m: unknown)=>Promise<unknown> };
   // Destroyed events carry no snapshot and require no work.
   if (!event.properties?.after && event.name.endsWith('.destroyed')) return;
-  // Only PENDING requests are processed. Terminal statuses (APPLIED /
-  // FAILED_*) must never re-enter the processor: otherwise the processor's own
-  // status update emits another update event and the request never converges.
+  // React only to freshly created requests. The processor never triggers itself
+  // through its own status/attempt updates; retries of non-terminal requests
+  // are driven by the reconcile cron. This removes the self-trigger class
+  // entirely rather than relying on a status guard.
+  if (!event.name.endsWith('.created')) return;
   const after = event.properties?.after as RequestRecord | undefined;
   if (after?.status && after.status !== 'PENDING') return;
   // Resolve actual orderId from request record

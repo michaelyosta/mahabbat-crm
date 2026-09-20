@@ -31,7 +31,14 @@ export const encodeCyrillic = (text, profile = 'CP866') => {
       continue;
     }
     const code = character.codePointAt(0);
+    if (character === '\n' || character === '\r' || character === '\t') {
+      bytes.push(code);
+      continue;
+    }
     if (code < 0x80) {
+      // Drop C0 control bytes (ESC, GS, ...) so stored text cannot inject
+      // printer commands such as paper cut or cash-drawer kick.
+      if (code < 0x20 || code === 0x7f) continue;
       bytes.push(code);
       continue;
     }
@@ -54,10 +61,6 @@ export const encodeCyrillic = (text, profile = 'CP866') => {
     }
     if (profile !== 'WINDOWS1251' && code >= 0x440 && code <= 0x44f) {
       bytes.push(code - 0x360);
-      continue;
-    }
-    if (character === '\n' || character === '\r' || character === '\t') {
-      bytes.push(code);
       continue;
     }
     bytes.push(0x3f);

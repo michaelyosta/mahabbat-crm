@@ -100,6 +100,13 @@ export default defineObject({
           position: 1,
           color: 'gray',
         },
+        {
+          id: '9e3c4f56-7a89-4f01-8123-456789abcd13',
+          value: 'CONSUMED',
+          label: 'Закрыт по оплате',
+          position: 2,
+          color: 'green',
+        },
       ],
     },
     {

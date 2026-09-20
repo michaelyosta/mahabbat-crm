@@ -21,6 +21,9 @@ const PIN_SCRYPT_MAX_MEMORY = 32 * 1024 * 1024;
 const PIN_SALT_BYTES = 16;
 const DEFAULT_SESSION_IDLE_MINUTES = 15;
 const MAX_SESSION_IDLE_MINUTES = 24 * 60;
+// Absolute cap regardless of activity, so an idle-refreshed terminal session
+// cannot live forever.
+const MAX_SESSION_LIFETIME_MS = 12 * 60 * 60 * 1000;
 const MAX_LOGIN_FAILURES = 5;
 const LOCKOUT_MS = 60 * 1000;
 const MAX_STAFF_ROWS = 1000;
@@ -307,8 +310,8 @@ const THROTTLE_FIELDS = {
 };
 
 const pinLookupSecret = (): string =>
-  process.env.MAHABBAT_PIN_LOOKUP_SECRET ??
-  process.env.MAHABBAT_INTERNAL_ROUTE_SECRET ??
+  process.env.MAHABBAT_PIN_LOOKUP_SECRET ||
+  process.env.MAHABBAT_INTERNAL_ROUTE_SECRET ||
   '';
 
 // Deterministic, non-verifying index used only to select the single candidate
@@ -361,6 +364,12 @@ const rateLimitedResponse = (retryAfterSeconds: number): PosAuthResult =>
     retryAfterSeconds,
   });
 
+const mutationUpdatedRows = (result: unknown, root: string): number => {
+  const value = (result as Record<string, unknown> | null)?.[root];
+  if (Array.isArray(value)) return value.length;
+  return value && typeof value === 'object' && 'id' in value ? 1 : 0;
+};
+
 const recordThrottleFailure = async (
   client: CoreApiClientLike,
   key: string,
@@ -369,60 +378,68 @@ const recordThrottleFailure = async (
   lockoutMs: number,
   now = Date.now(),
 ): Promise<void> => {
-  const record = await findThrottle(client, key);
   const nowIso = new Date(now).toISOString();
 
-  if (!record?.id) {
+  // Compare-and-swap the counter on its previous value so two concurrent
+  // failures cannot read the same count and both write the same result
+  // (which would let a parallel attacker stay under the threshold).
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const record = await findThrottle(client, key);
+
+    if (!record?.id) {
+      try {
+        await client.mutation({
+          createPosLoginThrottle: {
+            __args: {
+              data: {
+                key,
+                failedCount: 1,
+                lockedUntil: null,
+                windowStartedAt: nowIso,
+              },
+            },
+            id: true,
+          },
+        });
+        return;
+      } catch {
+        // A concurrent worker created the row first; re-read and increment.
+        continue;
+      }
+    }
+
+    const windowStartedAt = record.windowStartedAt
+      ? Date.parse(record.windowStartedAt)
+      : Number.NaN;
+    const inWindow =
+      Number.isFinite(windowStartedAt) && now - windowStartedAt < windowMs;
+    const failedCount = (inWindow ? (record.failedCount ?? 0) : 0) + 1;
+    const lockedUntil =
+      failedCount >= maxFailures
+        ? new Date(now + lockoutMs).toISOString()
+        : record.lockedUntil ?? null;
+
     try {
-      await client.mutation({
-        createPosLoginThrottle: {
+      const result = await client.mutation({
+        updatePosLoginThrottles: {
           __args: {
+            filter: {
+              id: { eq: record.id },
+              failedCount: { eq: record.failedCount ?? 0 },
+            },
             data: {
-              key,
-              failedCount: 1,
-              lockedUntil: null,
-              windowStartedAt: nowIso,
+              failedCount,
+              lockedUntil,
+              windowStartedAt: inWindow ? record.windowStartedAt : nowIso,
             },
           },
           id: true,
         },
       });
+      if (mutationUpdatedRows(result, 'updatePosLoginThrottles') > 0) return;
     } catch {
-      // A concurrent worker may have created the row first; enforcement still
-      // applies on the next attempt via the durable read.
+      // Fall through and retry the CAS.
     }
-    return;
-  }
-
-  const windowStartedAt = record.windowStartedAt
-    ? Date.parse(record.windowStartedAt)
-    : Number.NaN;
-  const inWindow =
-    Number.isFinite(windowStartedAt) && now - windowStartedAt < windowMs;
-  const failedCount = (inWindow ? (record.failedCount ?? 0) : 0) + 1;
-  const lockedUntil =
-    failedCount >= maxFailures
-      ? new Date(now + lockoutMs).toISOString()
-      : record.lockedUntil ?? null;
-
-  try {
-    await client.mutation({
-      updatePosLoginThrottle: {
-        __args: {
-          id: record.id,
-          data: {
-            failedCount,
-            lockedUntil,
-            windowStartedAt: inWindow
-              ? record.windowStartedAt
-              : nowIso,
-          },
-        },
-        id: true,
-      },
-    });
-  } catch {
-    // Bounded failure: the next attempt re-reads the durable value.
   }
 };
 
@@ -509,7 +526,9 @@ export const authenticatePosStaff = async (
   );
   if (globalRetry > 0) return rateLimitedResponse(globalRetry);
 
-  const recordFailure = async (): Promise<void> => {
+  const recordFailure = async (
+    staff?: PosStaffRecord | null,
+  ): Promise<void> => {
     await recordThrottleFailure(
       client,
       credentialKey,
@@ -524,53 +543,142 @@ export const authenticatePosStaff = async (
       GLOBAL_WINDOW_MS,
       GLOBAL_LOCKOUT_MS,
     );
+    // Durable per-staff lockout: when the presented credential resolves to a
+    // specific staff row, count the failure against that employee too. This is
+    // independent of the client-supplied terminalId and of the presented PIN.
+    if (staff?.id) {
+      const failed = (staff.failedLoginCount ?? 0) + 1;
+      const lockedUntil =
+        failed >= MAX_LOGIN_FAILURES
+          ? new Date(Date.now() + LOCKOUT_MS).toISOString()
+          : staff.lockedUntil ?? null;
+      await updateStaffLoginState(client, staff, failed, lockedUntil);
+    }
   };
 
-  const staff = await queryRecords<PosStaffRecord>(
-    client,
-    'posStaffs',
-    pin ? {} : { cardIdentifier: { eq: cardIdentifier } },
-    STAFF_FIELDS,
-  );
+  const lookup = pin ? computePinLookup(pin) : null;
+
+  // Fast path: resolve the single candidate through the deterministic lookup
+  // index instead of fetching every staff row. `first: 2` is enough to detect
+  // an ambiguous (shared) PIN without a full scan.
+  const fastMatches = cardIdentifier
+    ? await queryRecords<PosStaffRecord>(
+        client,
+        'posStaffs',
+        { cardIdentifier: { eq: cardIdentifier } },
+        STAFF_FIELDS,
+        2,
+      )
+    : await queryRecords<PosStaffRecord>(
+        client,
+        'posStaffs',
+        { pinLookup: { eq: lookup } },
+        STAFF_FIELDS,
+        2,
+      );
 
   let candidate: PosStaffRecord | null = null;
   let inactiveCandidate = false;
 
   if (cardIdentifier) {
-    candidate = staff[0] ?? null;
+    const cardMatches = fastMatches.filter(
+      (row) => row.cardIdentifier === cardIdentifier,
+    );
+    if (cardMatches.length > 1) {
+      await recordFailure(cardMatches[0]);
+      return invalidCredentials();
+    }
+    candidate = cardMatches[0] ?? null;
+    if (candidate && isLocked(candidate)) {
+      await recordFailure(candidate);
+      return response(429, {
+        code: 'POS_STAFF_LOCKED',
+        message: 'Вход сотрудника временно заблокирован.',
+      });
+    }
   } else {
     const normalizedPin = pin as string;
-    const lookup = computePinLookup(normalizedPin);
     // Preserve the historical "the PIN must identify exactly one staff member"
     // rule on the fast path too: a shared PIN is ambiguous and denied, never
     // silently resolved to whichever row happens to be first.
-    const lookupMatches = staff.filter(
+    const lookupMatches = fastMatches.filter(
       (row) => Boolean(row.pinLookup) && row.pinLookup === lookup,
     );
 
     if (lookupMatches.length > 1) {
-      await recordFailure();
+      await recordFailure(lookupMatches[0]);
       return invalidCredentials();
     }
+
     if (lookupMatches.length === 1) {
       const match = lookupMatches[0];
+      if (isLocked(match)) {
+        await recordFailure(match);
+        return response(429, {
+          code: 'POS_STAFF_LOCKED',
+          message: 'Вход сотрудника временно заблокирован.',
+        });
+      }
+      // A migrated row can mask a still-legacy duplicate with the same PIN.
+      // While any legacy rows remain, confirm none of them share this PIN.
+      const legacy = await queryRecords<PosStaffRecord>(
+        client,
+        'posStaffs',
+        { pinLookup: { is: 'NULL' } },
+        STAFF_FIELDS,
+        MAX_STAFF_ROWS,
+      );
+      let legacyDuplicate = false;
+      for (const row of legacy) {
+        if (row.pinLookup) continue;
+        if (row.pinHash && (await verifyPosPin(normalizedPin, row.pinHash))) {
+          legacyDuplicate = true;
+          break;
+        }
+      }
+      if (legacyDuplicate) {
+        await recordFailure(match);
+        return invalidCredentials();
+      }
       if (match.pinHash && (await verifyPosPin(normalizedPin, match.pinHash))) {
         candidate = match;
+      } else {
+        await recordFailure(match);
+        return invalidCredentials();
       }
     } else {
-      // Only legacy rows without a lookup index need the expensive scrypt
-      // trial. After migration the loop is empty and login is O(1).
+      // Legacy deployment: only rows without a lookup index need the expensive
+      // scrypt trial. After migration this set is empty and login is O(1).
+      const legacyRows = await queryRecords<PosStaffRecord>(
+        client,
+        'posStaffs',
+        { pinLookup: { is: 'NULL' } },
+        STAFF_FIELDS,
+        MAX_STAFF_ROWS,
+      );
       const matches: PosStaffRecord[] = [];
-      for (const row of staff) {
+      for (const row of legacyRows) {
         if (row.pinLookup) continue;
         if (row.pinHash && (await verifyPosPin(normalizedPin, row.pinHash))) {
           matches.push(row);
         }
       }
 
+      if (matches.length > 1) {
+        await recordFailure(matches[0]);
+        return invalidCredentials();
+      }
+
       if (matches.length === 1) {
         candidate = matches[0];
         inactiveCandidate = candidate.isActive === false;
+        if (isLocked(candidate)) {
+          await recordFailure(candidate);
+          return response(429, {
+            code: 'POS_STAFF_LOCKED',
+            message: 'Вход сотрудника временно заблокирован.',
+          });
+        }
         try {
           await client.mutation({
             updatePosStaff: {
@@ -603,6 +711,9 @@ export const authenticatePosStaff = async (
   }
 
   await clearThrottle(client, credentialKey);
+  // A successful login must also lift the shared global window; otherwise an
+  // attacker who trips it once keeps every terminal locked out (F-02/A-09).
+  await clearThrottle(client, globalKey);
   if ((candidate.failedLoginCount ?? 0) !== 0 || candidate.lockedUntil) {
     await updateStaffLoginState(client, candidate, 0, null);
   }
@@ -693,7 +804,17 @@ export const getAuthenticatedPosContext = async (
     };
   }
 
-  if (session.revokedAt || Date.parse(session.expiresAt) <= Date.now()) {
+  const expiresAtMs = Date.parse(session.expiresAt);
+  const issuedAtMs = session.issuedAt ? Date.parse(session.issuedAt) : Number.NaN;
+  const beyondAbsoluteLifetime =
+    Number.isFinite(issuedAtMs) &&
+    Date.now() - issuedAtMs > MAX_SESSION_LIFETIME_MS;
+  if (
+    session.revokedAt ||
+    !Number.isFinite(expiresAtMs) ||
+    expiresAtMs <= Date.now() ||
+    beyondAbsoluteLifetime
+  ) {
     return {
       ok: false,
       result: response(401, {
