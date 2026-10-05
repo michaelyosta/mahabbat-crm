@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  assertSafeMicros,
+  isSafeMicros,
   lineAmountMicros,
   microsToCurrency,
   normalizeCurrency,
+  requireKztCurrency,
   sumActiveLinesMicros,
   zeroCurrency,
 } from 'src/pos/pos-money';
@@ -35,6 +38,22 @@ describe('pos-money', () => {
     ).toBe(3_000_000_000);
   });
 
+  it('throws at the 9e15 safe-integer boundary instead of wrapping', () => {
+    const near = 9_000_000_000_000_000;
+    expect(() =>
+      lineAmountMicros({ unitPrice: { amountMicros: near, currencyCode: 'KZT' }, quantity: 2 }),
+    ).toThrow(/overflow/);
+    expect(() =>
+      sumActiveLinesMicros([
+        { unitPrice: { amountMicros: near, currencyCode: 'KZT' }, quantity: 1, status: 'ACTIVE' },
+        { unitPrice: { amountMicros: near, currencyCode: 'KZT' }, quantity: 1, status: 'ACTIVE' },
+      ]),
+    ).toThrow(/overflow/);
+    // Just inside the boundary still computes.
+    expect(
+      lineAmountMicros({ unitPrice: { amountMicros: 4_500_000_000_000_000, currencyCode: 'KZT' }, quantity: 2 }),
+    ).toBe(9_000_000_000_000_000);
+  });
   it('clamps negative quantities to zero', () => {
     expect(
       lineAmountMicros({
@@ -42,6 +61,13 @@ describe('pos-money', () => {
         quantity: -1,
       }),
     ).toBe(0);
+  });
+
+  it('rejects non-KZT currency and unsafe micros', () => {
+    expect(() => requireKztCurrency({ amountMicros: 100, currencyCode: 'USD' })).toThrow(/KZT/);
+    expect(() => assertSafeMicros(Number.MAX_SAFE_INTEGER + 1)).toThrow(/safe integer/);
+    expect(isSafeMicros(Number.MAX_SAFE_INTEGER)).toBe(true);
+    expect(isSafeMicros(Number.MAX_SAFE_INTEGER + 1)).toBe(false);
   });
 
   it('sums only active lines', () => {

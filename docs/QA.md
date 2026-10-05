@@ -423,9 +423,12 @@
 - Disposable `:2020` only: a synthetic Customer (`HARDENING C5`,
   externalIdentityKey `HARDENING::MAHABBAT-C5-SYNTHETIC`) was created and 120
   ledger entries were loaded through the real `/rest/batch/loyaltyLedgerEntries`
-  path (100 `EARN` of `+10`, 20 `REDEEM` of `-5`; unique
-  customer+occurredAt+reason and idempotency-compatible keys, respecting the
-  persisted unique indexes).
+  path (100 `EARN` of `+10`, 20 `REDEEM` of `-5`; distinct
+  customer+occurredAt+reason values and idempotency-compatible keys, respecting
+  the persisted exactly-once boundary: unique `sourceRequestId` relation +
+  unique `idempotencyKey`. The legacy composite (customer, occurredAt, reason)
+  unique index was removed in P1 — same-millisecond same-reason adjustments
+  are legitimate and must not collide.)
 - The app-equivalent of the Customer 360 balance read (cursor-paginated
   `loyaltyLedgerEntries` filtered by `customerId`, the same pagination the
   front component uses for relations) returned **n=120, sum=900** on two full

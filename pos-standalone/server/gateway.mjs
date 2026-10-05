@@ -11,7 +11,10 @@ const SERVICE_API_KEY = process.env.TWENTY_API_KEY ?? process.env.MAHABBAT_API_K
 const INTERNAL_SECRET = process.env.MAHABBAT_INTERNAL_ROUTE_SECRET ?? '';
 const RESOLVER_ID = process.env.POS_COMMAND_RESOLVER_ID ?? '54be0dfa-2fd6-45bc-be93-6ba4c64a21d9';
 const STATIC_DIR = process.env.POS_STATIC_DIR ? path.resolve(process.env.POS_STATIC_DIR) : null;
-const CORS_ORIGINS = (process.env.POS_CORS_ORIGIN ?? '*')
+// Mahabbat P1: CORS allowlist. Empty/unset POS_CORS_ORIGIN = same-origin
+// only (no ACAO header). Explicit origins are reflected; '*' is back-compat
+// only (warns in logs) — venue setup writes empty, see FixP1Secrets half.
+const CORS_ORIGINS = (process.env.POS_CORS_ORIGIN ?? '')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
@@ -36,24 +39,76 @@ const ALLOWED_COLLECTIONS = new Set([
 ]);
 
 const hashSessionToken = (token) => createHash('sha256').update(token, 'utf8').digest('hex');
-const signBody = (body, secret) => createHmac('sha256', secret).update(JSON.stringify(body), 'utf8').digest('hex');
+const stableStringify = (value) => {
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  if (typeof value === 'object') {
+    const record = value;
+    const keys = Object.keys(record).filter((key) => {
+      const entry = record[key];
+      return entry !== undefined && typeof entry !== 'function' && typeof entry !== 'symbol';
+    }).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
+  }
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number') return Number.isFinite(value) ? JSON.stringify(value) : 'null';
+  return JSON.stringify(value) ?? 'null';
+};
+const signBody = (body, secret) => `v1=${createHmac('sha256', secret ?? INTERNAL_SECRET).update(stableStringify(body), 'utf8').digest('hex')}`;
 
 // A POS bootstrap loads several collections concurrently. Share only the
 // in-flight validation promise, then discard it immediately. This removes
 // duplicate GraphQL/staff lookups without making revocation stale.
 const sessionValidationInFlight = new Map();
 
-const corsHeaders = (origin) => {
-  if (!origin || CORS_ORIGINS.includes('*')) {
-    return origin && CORS_ORIGINS.includes('*')
-      ? { 'access-control-allow-origin': '*' }
-      : {};
+// Mahabbat P1: 32KB body cap on POST (413 beyond). Sized for PIN/auth +
+// command envelopes; POS payloads are small by construction.
+const GATEWAY_MAX_BODY_BYTES = Number(process.env.POS_GATEWAY_MAX_BODY_BYTES ?? 32 * 1024);
+
+// Mahabbat P1: token-bucket prefilter per IP+terminal, before any resolver
+// forward. Failing closed on shape errors; upstream POS throttles remain.
+const GATEWAY_BUCKET_CAPACITY = Number(process.env.POS_GATEWAY_BUCKET_CAPACITY ?? 30);
+const GATEWAY_BUCKET_WINDOW_MS = Number(process.env.POS_GATEWAY_BUCKET_WINDOW_MS ?? 60 * 1000);
+const gatewayBuckets = new Map();
+const gatewayPrefilterAllows = (ip, terminalId) => {
+  const now = Date.now();
+  const key = `${ip ?? 'unknown'}|${String(terminalId ?? '').slice(0, 128) || '-'}`;
+  const bucket = gatewayBuckets.get(key);
+  if (!bucket || now - bucket.windowStart >= GATEWAY_BUCKET_WINDOW_MS) {
+    gatewayBuckets.set(key, { count: 1, windowStart: now });
+    return true;
   }
-  if (!CORS_ORIGINS.includes(origin)) return { vary: 'Origin' };
-  return {
-    'access-control-allow-origin': origin,
-    vary: 'Origin',
-  };
+  bucket.count += 1;
+  if (bucket.count > GATEWAY_BUCKET_CAPACITY) return false;
+  return true;
+};
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of gatewayBuckets) {
+    if (now - bucket.windowStart >= GATEWAY_BUCKET_WINDOW_MS * 2) gatewayBuckets.delete(key);
+  }
+}, GATEWAY_BUCKET_WINDOW_MS).unref?.();
+
+const readJsonBody = async (req, { maxBytes = GATEWAY_MAX_BODY_BYTES } = {}) => {
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > maxBytes) return { tooLarge: true };
+    chunks.push(c);
+  }
+  const raw = Buffer.concat(chunks).toString('utf8');
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { return null; }
+};
+
+// Mahabbat P1: CORS reflector. Same-origin (no/unknown Origin) sends no ACAO.
+// Explicit '*' is back-compat only and warns once at startup; venue setup
+// writes an explicit allowlist or empty (see FixP1Secrets half).
+const corsHeaders = (origin) => {
+  if (CORS_ORIGINS.includes('*')) return { 'access-control-allow-origin': '*' };
+  if (!origin || !CORS_ORIGINS.includes(origin)) return { vary: 'Origin' };
+  return { 'access-control-allow-origin': origin, vary: 'Origin' };
 };
 
 const sendJson = (res, status, body, extraHeaders = {}, origin) => {
@@ -78,14 +133,6 @@ const bearerToken = (req) => {
   return m ? m[1].trim() : null;
 };
 
-const readJsonBody = async (req) => {
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  const raw = Buffer.concat(chunks).toString('utf8');
-  if (!raw) return {};
-  try { return JSON.parse(raw); } catch { return null; }
-};
-
 const forwardToResolver = async (envelope) => {
   if (!INTERNAL_SECRET) throw new Error('MAHABBAT_INTERNAL_ROUTE_SECRET not configured');
   if (!TWENTY_API_URL) throw new Error('TWENTY_API_URL not configured');
@@ -103,6 +150,20 @@ const forwardToResolver = async (envelope) => {
   let body;
   try { body = text ? JSON.parse(text) : {}; } catch { body = { message: text }; }
   return { status: r.status, body };
+};
+
+const GATEWAY_ERROR_MAP = {
+  POS_SESSION_REQUIRED: { status: 401, code: 'POS_SESSION_REQUIRED', message: 'Требуется действующая POS-сессия.' },
+  POS_SESSION_INVALID: { status: 401, code: 'POS_SESSION_INVALID', message: 'POS-сессия недействительна.' },
+  POS_SESSION_EXPIRED: { status: 401, code: 'POS_SESSION_EXPIRED', message: 'POS-сессия истекла или отозвана.' },
+  INVALID_COMMAND: { status: 400, code: 'INVALID_COMMAND', message: 'Неизвестная команда.' },
+  INVALID_ACTOR: { status: 400, code: 'INVALID_ACTOR', message: 'actor is server-derived' },
+  INVALID_COLLECTION: { status: 400, code: 'INVALID_COLLECTION', message: 'Неизвестная коллекция.' },
+};
+const gatewayError = (code, fallbackMessage) => {
+  const mapped = GATEWAY_ERROR_MAP[code];
+  if (mapped) return { status: mapped.status, body: { code: mapped.code, message: mapped.message } };
+  return { status: 502, body: { code: 'ROUTE_UNAVAILABLE', message: fallbackMessage ?? 'Нет связи с сервером' } };
 };
 
 // Validate POS session via service GraphQL: lookup posSessions by tokenHash, then staff.
@@ -256,13 +317,27 @@ const handler = async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/health') {
+    // Trimmed on purpose: gateway presence only. Queue depth, resolver state
+    // and printer bindings never leave this host over an unauthenticated GET.
     send(200, { status: 'ok', service: 'pos-gateway' });
     log(200);
     return;
   }
 
   if (req.method === 'POST' && url.pathname === '/api/pos/auth') {
+    // Mahabbat P1: token-bucket prefilter per IP+terminal, before resolver.
+    const preTerminal = req.headers['x-pos-terminal'] ?? undefined;
+    if (!gatewayPrefilterAllows(req.socket?.remoteAddress, preTerminal)) {
+      send(429, { code: 'GATEWAY_RATE_LIMITED', message: 'Слишком много запросов. Повторите позже.' }, { 'retry-after': '60' });
+      log(429, { command: 'authenticatePosStaff', prefilter: true });
+      return;
+    }
     const body = await readJsonBody(req);
+    if (body?.tooLarge) {
+      send(413, { code: 'BODY_TOO_LARGE', message: 'Тело запроса превышает 32KB.' });
+      log(413, { command: 'authenticatePosStaff' });
+      return;
+    }
     if (!body || typeof body.pin !== 'string') {
       send(400, { code: 'INVALID_POS_CREDENTIALS', message: 'Введите PIN' });
       log(400, { command: 'authenticatePosStaff' });
@@ -284,20 +359,39 @@ const handler = async (req, res) => {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/pos/command') {
+    // Mahabbat P1: prefilter BEFORE auth/session logic — floods never reach
+    // the resolver or the session validators.
+    const cmdTerminal =
+      req.headers['x-pos-terminal'] ??
+      req.headers['x-terminal-id'] ??
+      undefined;
+    if (!gatewayPrefilterAllows(req.socket?.remoteAddress, cmdTerminal)) {
+      send(429, { code: 'GATEWAY_RATE_LIMITED', message: 'Слишком много запросов. Повторите позже.' }, { 'retry-after': '60' });
+      log(429, { prefilter: true });
+      return;
+    }
     const token = bearerToken(req);
     if (!token) {
-      send(401, { code: 'POS_SESSION_REQUIRED', message: 'Требуется действующая POS-сессия.' });
+      const missing = gatewayError('POS_SESSION_REQUIRED');
+      send(missing.status, missing.body);
       log(401, { command: 'unknown' });
       return;
     }
     const body = await readJsonBody(req);
+    if (body?.tooLarge) {
+      send(413, { code: 'BODY_TOO_LARGE', message: 'Тело запроса превышает 32KB.' });
+      log(413);
+      return;
+    }
     if (!body || typeof body.command !== 'string') {
-      send(400, { code: 'INVALID_COMMAND', message: 'command required' });
+      const invalid = gatewayError('INVALID_COMMAND');
+      send(invalid.status, { ...invalid.body, message: 'command required' });
       log(400);
       return;
     }
     if (['role', 'staffId', 'actorStaffId', 'actor', 'ownerStaffId'].some((k) => body.payload && typeof body.payload === 'object' && k in body.payload)) {
-      send(400, { code: 'INVALID_ACTOR', message: 'actor is server-derived' });
+      const invalidActor = gatewayError('INVALID_ACTOR');
+      send(invalidActor.status, invalidActor.body);
       log(400, { command: body.command });
       return;
     }
@@ -316,13 +410,15 @@ const handler = async (req, res) => {
   if (req.method === 'GET' && url.pathname.startsWith('/api/pos/rest/')) {
     const token = bearerToken(req);
     if (!token) {
-      send(401, { code: 'POS_SESSION_REQUIRED', message: 'Требуется действующая POS-сессия.' });
+      const missing = gatewayError('POS_SESSION_REQUIRED');
+      send(missing.status, missing.body);
       log(401, { path: url.pathname });
       return;
     }
     const collection = decodeURIComponent(url.pathname.replace('/api/pos/rest/', '').split('/')[0]);
     if (!ALLOWED_COLLECTIONS.has(collection)) {
-      send(400, { code: 'INVALID_COLLECTION', message: `Unknown collection ${collection}` });
+      const invalid = gatewayError('INVALID_COLLECTION');
+      send(invalid.status, { ...invalid.body, message: `Unknown collection ${collection}` });
       log(400);
       return;
     }
@@ -345,6 +441,14 @@ const handler = async (req, res) => {
       log(200, { static: url.pathname });
       return;
     }
+    // SPA fallback must never serve index.html to an API-shaped path: an
+    // unknown /api/* route is a machine error and stays JSON 404 so the POS
+    // front can distinguish "no route" from "offline HTML".
+    if (url.pathname.startsWith('/api/')) {
+      send(404, { code: 'NOT_FOUND', message: 'Not found' });
+      log(404);
+      return;
+    }
   }
 
   send(404, { code: 'NOT_FOUND', message: 'Not found' });
@@ -359,5 +463,8 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
+  if (CORS_ORIGINS.includes('*')) {
+    console.error(JSON.stringify({ msg: 'pos-gateway CORS wildcard enabled (back-compat only); set POS_CORS_ORIGIN to an explicit allowlist or empty' }));
+  }
   console.log(JSON.stringify({ msg: 'pos-gateway listening', host: HOST, port: PORT, apiUrl: TWENTY_API_URL, resolver: RESOLVER_ID, staticDir: STATIC_DIR ?? '(none)' }));
 });

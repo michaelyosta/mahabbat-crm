@@ -26,8 +26,7 @@ navigation, page layouts, front components и Apps SDK.
 
 ## Архитектура и версии
 
-- Upstream platform: `twentycrm/twenty:v2.29.0`.
-- Twenty core modifications: **0**.
+- Upstream platform: `twentycrm/twenty:v2.29.0`, plus the Mahabbat server fork (headless bootstrap, production API-key flag, signup disabled — see deployment `mahabbat-twenty/MAHABBAT_FORK.md`).
 - Mahabbat source: `src/`.
 - Tests and verification: `src/**/__tests__`, `src/**/*.test.ts`, `scripts/`.
 - Deployment templates: `deploy/`.

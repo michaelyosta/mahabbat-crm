@@ -14,11 +14,13 @@ import {
   executeFinalizeCount,
 } from 'src/inventory/inventory-dispatch';
 import {
+  assertSafeMicros,
   divideRoundHalfUp,
   gramsToMicros,
   kgToMicros,
   scaledQuantityMicros,
 } from 'src/inventory/inventory-units';
+import { computeNewWeightedAverage, computeProductionUnitCost, quantityCostTotal } from 'src/inventory/inventory-costing';
 
 // simplified fake client mirroring FakePosDb logic for inventory
 type Row = Record<string, unknown> & { id: string };
@@ -191,6 +193,14 @@ describe('inventory units', () => {
   });
   it('scaled quantity', () => {
     expect(scaledQuantityMicros(500_000, 5_000_000, 1_000_000)).toBe(2_500_000);
+  });
+  it('rejects unsafe integers at the 9e15 boundary', () => {
+    expect(() => assertSafeMicros(Number.MAX_SAFE_INTEGER + 1)).toThrow(/safe integer/);
+    expect(() => scaledQuantityMicros(9_000_000_000_000_000, 2, 1)).toThrow(/overflow/);
+    expect(() => divideRoundHalfUp(9_000_000_000_000_000, 1)).not.toThrow();
+    expect(() => computeNewWeightedAverage(9_000_000_000_000_000, 2, 1_000_000, 1)).toThrow(/overflow|safe integer/);
+    expect(() => computeProductionUnitCost([{ qtyMicros: 9_000_000_000_000_000, avgCostMicros: 2 }], 1)).toThrow(/overflow/);
+    expect(() => quantityCostTotal(9_000_000_000_000_000, 2_000)).toThrow(/overflow/);
   });
 });
 
@@ -728,4 +738,99 @@ describe('revision ledger reads beyond the 500-row page', () => {
       expect(watermark.endsWith(`|${count}`)).toBe(true);
     });
   }
+});
+
+describe('partial group resume with the same key', () => {
+  it('receive 2/3 lines: retry completes the missing leg', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const a = await itemId(db, 'PR-A');
+    const b = await itemId(db, 'PR-B');
+    const c = await itemId(db, 'PR-C');
+    const lines = [
+      { stockItemId: a, quantityMicros: kgToMicros(1), unitCostMicros: 500 },
+      { stockItemId: b, quantityMicros: kgToMicros(1), unitCostMicros: 600 },
+      { stockItemId: c, quantityMicros: kgToMicros(1), unitCostMicros: 700 },
+    ];
+    // Simulate a crash after 2/3 appends: only the first two legs exist in
+    // the ledger; the retry must post just the missing third leg.
+    db.seed('inventoryStockMovements', {
+      id: 'seed-recv-a', movementType: 'RECEIPT', stockItemId: a, locationId: k,
+      quantityDeltaMicros: kgToMicros(1), unitCostMicros: 500, sourceType: 'RECEIPT',
+      sourceId: 'recv-partial', occurredAt: new Date().toISOString(),
+      idempotencyKey: `recv-partial:${a}:${k}`,
+    });
+    db.seed('inventoryStockMovements', {
+      id: 'seed-recv-b', movementType: 'RECEIPT', stockItemId: b, locationId: k,
+      quantityDeltaMicros: kgToMicros(1), unitCostMicros: 600, sourceType: 'RECEIPT',
+      sourceId: 'recv-partial', occurredAt: new Date().toISOString(),
+      idempotencyKey: `recv-partial:${b}:${k}`,
+    });
+    const retry = await executeReceiveStock(db as any, { locationId: k, lines, idempotencyKey: 'recv-partial' }, admin);
+    expect(retry.status).toBe(201);
+    expect(db.rows.inventoryStockMovements.filter((m) => m.sourceId === 'recv-partial')).toHaveLength(3);
+    // Full replay is a no-op.
+    const replay = await executeReceiveStock(db as any, { locationId: k, lines, idempotencyKey: 'recv-partial' }, admin);
+    expect(replay.status).toBe(200);
+    expect((replay.body as { replay: boolean }).replay).toBe(true);
+    expect(db.rows.inventoryStockMovements.filter((m) => m.sourceId === 'recv-partial')).toHaveLength(3);
+  });
+  it('receive with a bad second line writes nothing', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const good = await itemId(db, 'PR-Good');
+    const res = await executeReceiveStock(db as any, {
+      locationId: k,
+      lines: [
+        { stockItemId: good, quantityMicros: kgToMicros(1), unitCostMicros: 500 },
+        { stockItemId: 'missing-item', quantityMicros: kgToMicros(1), unitCostMicros: 600 },
+      ],
+      idempotencyKey: 'recv-badline',
+    }, admin);
+    expect(res.status).toBe(400);
+    expect(db.rows.inventoryStockMovements.filter((m) => m.sourceId === 'recv-badline')).toHaveLength(0);
+  });
+  it('transfer with a fallen IN leg completes on retry', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const s = await locId(db, 'Склад');
+    const it = await itemId(db, 'PR-T');
+    await executeReceiveStock(db as any, { locationId: k, lines: [{ stockItemId: it, quantityMicros: kgToMicros(5), unitCostMicros: 500 }], idempotencyKey: 'rc-tr' }, admin);
+    // Simulate OUT landed, IN crashed.
+    db.seed('inventoryStockMovements', {
+      id: 'seed-tr-out', movementType: 'TRANSFER_OUT', stockItemId: it, locationId: k,
+      quantityDeltaMicros: -kgToMicros(1), unitCostMicros: 500, sourceType: 'TRANSFER',
+      sourceId: 'tr-partial', occurredAt: new Date().toISOString(), idempotencyKey: 'tr-partial:OUT',
+    });
+    const retry = await executeTransferStock(db as any, { stockItemId: it, quantityMicros: kgToMicros(1), sourceLocationId: k, destLocationId: s, idempotencyKey: 'tr-partial' }, admin);
+    expect(retry.status).toBe(201);
+    expect(db.rows.inventoryStockMovements.filter((m) => m.sourceId === 'tr-partial')).toHaveLength(2);
+    const replay = await executeTransferStock(db as any, { stockItemId: it, quantityMicros: kgToMicros(1), sourceLocationId: k, destLocationId: s, idempotencyKey: 'tr-partial' }, admin);
+    expect(replay.status).toBe(200);
+    expect((replay.body as { replay: boolean }).replay).toBe(true);
+  });
+  it('produce with a mid-loop failure completes on retry', async () => {
+    const db = new FakeDb();
+    const k = await locId(db, 'Кухня');
+    const t = await itemId(db, 'PR-PT');
+    const o = await itemId(db, 'PR-PO');
+    const s = await itemId(db, 'PR-PS', 'SEMI_FINISHED');
+    await executeReceiveStock(db as any, { locationId: k, lines: [{ stockItemId: t, quantityMicros: kgToMicros(10), unitCostMicros: 800 }, { stockItemId: o, quantityMicros: kgToMicros(10), unitCostMicros: 1000 }], idempotencyKey: 'rc-pr' }, admin);
+    await executeUpsertRecipe(db as any, { label: 's', targetKind: 'SEMI_FINISHED', targetId: s, lines: [{ stockItemId: t, quantityMicros: 500_000 }, { stockItemId: o, quantityMicros: 500_000 }], yieldQuantityMicros: 1_000_000, idempotencyKey: 'rr-pr' }, admin);
+    // Simulate a crash after the first INPUT append: one leg present.
+    db.seed('inventoryStockMovements', {
+      id: 'seed-prod-in-t', movementType: 'PRODUCTION_INPUT', stockItemId: t, locationId: k,
+      quantityDeltaMicros: -kgToMicros(2.5), unitCostMicros: 800, sourceType: 'PRODUCTION',
+      sourceId: 'prod-partial', occurredAt: new Date().toISOString(), idempotencyKey: `prod-partial:IN:${t}`,
+    });
+    // Fail the batch post once so the per-key fallback path is exercised.
+    db.failMutationRoot = 'createInventoryStockMovements';
+    const retry = await executeProduceSemi(db as any, { stockItemId: s, quantityMicros: kgToMicros(5), locationId: k, idempotencyKey: 'prod-partial' }, admin);
+    expect(retry.status).toBe(201);
+    expect(db.rows.inventoryStockMovements.filter((m) => m.sourceId === 'prod-partial')).toHaveLength(3); // 2 IN + OUT
+    const replay = await executeProduceSemi(db as any, { stockItemId: s, quantityMicros: kgToMicros(5), locationId: k, idempotencyKey: 'prod-partial' }, admin);
+    expect(replay.status).toBe(200);
+    expect((replay.body as { replay: boolean }).replay).toBe(true);
+    expect(db.rows.inventoryStockMovements.filter((m) => m.sourceId === 'prod-partial')).toHaveLength(3);
+  });
 });

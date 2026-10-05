@@ -5,7 +5,6 @@ import {
   computePinLookup,
   getAuthenticatedPosContext,
   hashPosPin,
-  posSessionIdleTtlMs,
   refreshPosSessionActivity,
   resetPosAuthRateLimiterForTests,
   revokePosSession,
@@ -142,18 +141,50 @@ describe('POS authentication context', () => {
     }
   });
 
-  it('uses a configurable idle timeout and falls back safely', () => {
-    expect(posSessionIdleTtlMs()).toBe(15 * 60 * 1000);
-    expect(posSessionIdleTtlMs('30')).toBe(30 * 60 * 1000);
-    expect(posSessionIdleTtlMs('0')).toBe(15 * 60 * 1000);
-    expect(posSessionIdleTtlMs('not-a-number')).toBe(15 * 60 * 1000);
+  it('caps idle TTL per role (WAITER 15m, ADMIN 5m)', async () => {
+    const { posIdleTtlMsForRole } = await import('src/pos/pos-auth');
+    expect(posIdleTtlMsForRole('WAITER')).toBe(15 * 60 * 1000);
+    expect(posIdleTtlMsForRole('ADMIN')).toBe(5 * 60 * 1000);
+    expect(posIdleTtlMsForRole('WAITER', '30')).toBe(15 * 60 * 1000);
+  });
+
+  it('expires sessions past the absolute 12h ceiling even when idle is fresh', async () => {
+    const db = new FakeAuthDb();
+    db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
+    const login = await authenticatePosStaff(db, { pin: '1234' });
+    const loginBody = login.body as unknown as Record<string, unknown>;
+    const token = loginBody.sessionToken as string;
+    db.posSessions[0].issuedAt = new Date(Date.now() - 13 * 3600 * 1000).toISOString();
+    db.posSessions[0].expiresAt = new Date(Date.now() + 60 * 1000).toISOString();
+    const checked = await getAuthenticatedPosContext(db, token);
+    expect(checked.ok).toBe(false);
+  });
+
+  it('warns 2 minutes before the idle deadline (re-PIN hint)', async () => {
+    const { posSessionNeedsRepinWarning } = await import('src/pos/pos-auth');
+    expect(posSessionNeedsRepinWarning(new Date(Date.now() + 90 * 1000).toISOString())).toBe(true);
+    expect(posSessionNeedsRepinWarning(new Date(Date.now() + 10 * 60 * 1000).toISOString())).toBe(false);
+  });
+
+  it('refuses PIN login without a lookup secret outside dev/test (fail-closed)', async () => {
+    const saved = process.env.MAHABBAT_PIN_LOOKUP_SECRET;
+    const savedNode = process.env.NODE_ENV;
+    delete process.env.MAHABBAT_PIN_LOOKUP_SECRET;
+    delete process.env.MAHABBAT_INTERNAL_ROUTE_SECRET;
+    process.env.NODE_ENV = 'production';
+    const db = new FakeAuthDb();
+    db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
+    await expect(authenticatePosStaff(db, { pin: '1234' })).rejects.toThrow('PIN lookup secret is not configured');
+    if (saved !== undefined) process.env.MAHABBAT_PIN_LOOKUP_SECRET = saved;
+    if (savedNode !== undefined) process.env.NODE_ENV = savedNode;
   });
 
   it('restarts the idle countdown after an authenticated POS action', async () => {
     const db = new FakeAuthDb();
     db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
     const login = await authenticatePosStaff(db, { pin: '1234' });
-    const token = (login.body as Record<string, unknown>).sessionToken as string;
+    const loginBody = login.body as unknown as Record<string, unknown>;
+    const token = loginBody.sessionToken as string;
     const authenticated = await getAuthenticatedPosContext(db, token);
     expect(authenticated.ok).toBe(true);
     if (!authenticated.ok) return;
@@ -182,7 +213,7 @@ describe('POS authentication context', () => {
     expect(((login.body as Record<string, unknown>).staff as Record<string, unknown>).role).toBe('ADMIN');
   });
 
-  it('denies wrong PIN, inactive card and repeated brute-force attempts', async () => {
+  it('denies wrong PIN, inactive card and applies progressive delay (no ban)', async () => {
     const db = new FakeAuthDb();
     db.posStaffs.push(
       await staffRow(STAFF, 'Айжан', 'WAITER', '1234', {
@@ -197,17 +228,20 @@ describe('POS authentication context', () => {
     expect((await authenticatePosStaff(db, { pin: '9999' })).status).toBe(401);
     expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-X' })).status).toBe(403);
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(401);
-    }
-    expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(429);
+    // Second attempt on the same credential hits the progressive delay
+    // (429 POS_LOGIN_DELAY, retry in 1s) instead of a ban.
+    const delayed = await authenticatePosStaff(db, { pin: '9999' });
+    expect(delayed.status).toBe(429);
+    expect(delayed.body && typeof delayed.body === 'object' && 'code' in delayed.body ? delayed.body.code : undefined).toBe('POS_LOGIN_DELAY');
+    expect(delayed.body && typeof delayed.body === 'object' && 'retryAfterSeconds' in delayed.body ? delayed.body.retryAfterSeconds : undefined).toBe(1);
   });
 
   it('denies expired, revoked and tampered sessions', async () => {
     const db = new FakeAuthDb();
     db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
     const login = await authenticatePosStaff(db, { pin: '1234' });
-    const token = (login.body as Record<string, unknown>).sessionToken as string;
+    const loginBody = login.body as unknown as Record<string, unknown>;
+    const token = loginBody.sessionToken as string;
 
     const active = await getAuthenticatedPosContext(db, token);
     expect(active.ok).toBe(true);
@@ -227,7 +261,8 @@ describe('POS authentication context', () => {
     const db = new FakeAuthDb();
     db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
     const login = await authenticatePosStaff(db, { pin: '1234' });
-    const token = (login.body as Record<string, unknown>).sessionToken as string;
+    const loginBody = login.body as unknown as Record<string, unknown>;
+    const token = loginBody.sessionToken as string;
     const context = await getAuthenticatedPosContext(db, token);
     expect(context.ok).toBe(true);
     if (!context.ok) return;
@@ -236,38 +271,46 @@ describe('POS authentication context', () => {
     expect((await getAuthenticatedPosContext(db, token)).ok).toBe(false);
   });
 
-  it('keeps the lockout when the client rotates terminalId', async () => {
+  it('keeps the delay when the client rotates terminalId (per-terminal bucket)', async () => {
     const db = new FakeAuthDb();
     db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const result = await authenticatePosStaff(db, {
-        pin: '0000',
-        terminalId: `terminal-${attempt}`,
-      });
-      expect(result.status).toBe(401);
-    }
+    expect((await authenticatePosStaff(db, { pin: '0000', terminalId: 't-1' })).status).toBe(401);
 
+    // Same wrong PIN from a rotated terminal still hits the credential
+    // progressive delay — rotating terminalId does not reset it.
     const rotated = await authenticatePosStaff(db, {
       pin: '0000',
       terminalId: 'a-brand-new-terminal-id',
     });
     expect(rotated.status).toBe(429);
-    expect((rotated.body as { code: string }).code).toBe('POS_LOGIN_RATE_LIMITED');
+    const rotatedBody = rotated.body as unknown;
+    expect((rotatedBody && typeof rotatedBody === 'object' && 'code' in rotatedBody ? rotatedBody.code : undefined)).toBe('POS_LOGIN_DELAY');
   });
 
-  it('applies a durable global bound across credential rotation', async () => {
+  it('steps up to ADMIN PIN instead of locking the whole till (global bound)', async () => {
     const db = new FakeAuthDb();
     db.posStaffs.push(await staffRow(STAFF, 'Айжан', 'WAITER', '1234'));
+    db.posStaffs.push(await staffRow(ADMIN, 'Болат', 'ADMIN', '2468'));
 
+    // Drive the venue-wide counter past the bound. Each wrong PIN records one
+    // global failure; per-credential/terminal delays are bypassed with a fresh
+    // terminal per attempt so every attempt reaches recordFailure (otherwise
+    // the local delay gates absorb attempts 2..30 and global never fills).
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const pin = String(1000 + attempt);
-      const result = await authenticatePosStaff(db, { pin, terminalId: 'global-test' });
-      expect(result.status).toBe(401);
+      await authenticatePosStaff(db, { pin, terminalId: `global-test-${attempt}` });
     }
 
-    const next = await authenticatePosStaff(db, { pin: '9999', terminalId: 'global-test' });
-    expect(next.status).toBe(429);
+    // WAITER login now asks for ADMIN step-up (403), not a till-wide 429 ban.
+    const waiter = await authenticatePosStaff(db, { pin: '1234', terminalId: 'global-test' });
+    expect(waiter.status).toBe(403);
+    const waiterBody = waiter.body as unknown;
+    expect((waiterBody && typeof waiterBody === 'object' && 'code' in waiterBody ? waiterBody.code : undefined)).toBe('POS_ADMIN_STEP_UP_REQUIRED');
+
+    // ADMIN login still proceeds through the step-up.
+    const admin = await authenticatePosStaff(db, { pin: '2468', terminalId: 'global-test' });
+    expect(admin.status).toBe(201);
   });
 
   it('rejects a shared PIN even on the lookup fast path', async () => {
@@ -281,22 +324,19 @@ describe('POS authentication context', () => {
     expect((await authenticatePosStaff(db, { pin: '1234' })).status).toBe(401);
   });
 
-  it('rejects while locked and recovers after the durable lock expires', async () => {
+  it('delays repeat failures and recovers after the window resets', async () => {
     const db = new FakeAuthDb();
     db.posStaffs.push(
       await staffRow(STAFF, 'Айжан', 'WAITER', '1234', { cardIdentifier: 'CARD-A' }),
     );
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(401);
-    }
-    expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(429);
+    expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(401);
+    const delayed = await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' });
+    expect(delayed.status).toBe(429);
 
     for (const row of db.posLoginThrottles) {
-      if (typeof row.lockedUntil === 'string') {
-        row.lockedUntil = new Date(Date.now() - 1000).toISOString();
-      }
       row.failedCount = 0;
+      row.windowStartedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     }
 
     expect((await authenticatePosStaff(db, { cardIdentifier: 'CARD-WRONG' })).status).toBe(401);

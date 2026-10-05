@@ -21,20 +21,26 @@ const PIN_SCRYPT_MAX_MEMORY = 32 * 1024 * 1024;
 const PIN_SALT_BYTES = 16;
 const DEFAULT_SESSION_IDLE_MINUTES = 15;
 const MAX_SESSION_IDLE_MINUTES = 24 * 60;
+// Mahabbat P1: absolute session ceiling (12h) + role TTLs. Idle expiry is
+// refreshed per command; the absolute ceiling never moves (fail-closed).
+const ABSOLUTE_SESSION_MAX_MS = 12 * 60 * 60 * 1000;
+const ROLE_SESSION_IDLE_MINUTES: Record<PosActorRole, number> = {
+  WAITER: 15,
+  ADMIN: 5,
+};
+//Warn 2 minutes before the idle deadline so the UI can offer re-PIN.
+const SESSION_EXPIRY_WARNING_MS = 2 * 60 * 1000;
+// Progressive login delay: 1s → 2s → 5s → 15s (per credential/terminal).
+// Terminal-scoped bucket; rotate the terminal and the delay follows the
+// credential bucket, it does not reset.
+const LOGIN_DELAY_STEPS_MS = [1000, 2000, 5000, 15_000];
 const MAX_LOGIN_FAILURES = 5;
 const LOCKOUT_MS = 60 * 1000;
 const MAX_STAFF_ROWS = 1000;
-// Server-owned global bound so rotating the credential or the client-supplied
-// terminalId cannot bypass brute-force protection. Durable (stored in the
-// database) so it survives stateless resolver invocations and process restarts.
+const MAX_LEGACY_PIN_SCAN_ROWS = 200;
 const GLOBAL_MAX_FAILURES = 30;
 const GLOBAL_WINDOW_MS = 5 * 60 * 1000;
 const GLOBAL_LOCKOUT_MS = 60 * 1000;
-
-type Connection<T> = {
-  edges?: Array<{ node?: T | null } | null>;
-};
-
 export const posSessionIdleTtlMs = (
   configuredMinutes = process.env.MAHABBAT_POS_SESSION_IDLE_MINUTES,
 ): number => {
@@ -50,6 +56,9 @@ export const posSessionIdleTtlMs = (
     return DEFAULT_SESSION_IDLE_MINUTES * 60 * 1000;
   }
   return minutes * 60 * 1000;
+};
+type Connection<T> = {
+  edges?: Array<{ node?: T | null } | null>;
 };
 
 type PosStaffRecord = {
@@ -90,6 +99,31 @@ export type AuthenticatedPosContext = {
   expiresAt: string;
   terminalId?: string | null;
 };
+
+// Mahabbat P1: per-role idle TTL (WAITER 15m, ADMIN 5m). The configured
+// MAHABBAT_POS_SESSION_IDLE_MINUTES caps WAITER only; ADMIN never exceeds 5m.
+export const posIdleTtlMsForRole = (
+  role: PosActorRole,
+  configuredMinutes = process.env.MAHABBAT_POS_SESSION_IDLE_MINUTES,
+): number => {
+  const adminTtlMs = ROLE_SESSION_IDLE_MINUTES.ADMIN * 60 * 1000;
+  if (role === 'ADMIN') return adminTtlMs;
+  return Math.min(posSessionIdleTtlMs(configuredMinutes), adminTtlMs * 3);
+};
+
+// Mahabbat P1: absolute deadline = issuedAt + 12h. Never extended by
+// refreshPosSessionActivity; past it the client must re-PIN (new session).
+export const posAbsoluteExpiryMs = (issuedAt: string | Date): number =>
+  new Date(issuedAt).getTime() + ABSOLUTE_SESSION_MAX_MS;
+
+export const posSessionNeedsRepinWarning = (
+  expiresAt: string | Date,
+  now = Date.now(),
+): boolean => {
+  const remaining = new Date(expiresAt).getTime() - now;
+  return remaining > 0 && remaining <= SESSION_EXPIRY_WARNING_MS;
+};
+
 
 export type PosAuthResult = {
   status: number;
@@ -306,10 +340,24 @@ const THROTTLE_FIELDS = {
   windowStartedAt: true,
 };
 
-const pinLookupSecret = (): string =>
-  process.env.MAHABBAT_PIN_LOOKUP_SECRET ??
-  process.env.MAHABBAT_INTERNAL_ROUTE_SECRET ??
-  '';
+// Mahabbat P1: the PIN-lookup HMAC secret is fail-closed in production. Outside
+// production (dev/test/CI without NODE_ENV=production) an empty secret falls back
+// to unsalted lookup so unit tests run; prod throws unless a secret is set.
+const pinLookupSecret = (): string => {
+  const secret =
+    process.env.MAHABBAT_PIN_LOOKUP_SECRET ??
+    process.env.MAHABBAT_INTERNAL_ROUTE_SECRET ??
+    '';
+  if (secret) return secret;
+  const insecureAllowed =
+    process.env.MAHABBAT_ALLOW_INSECURE_PIN_LOOKUP === 'true';
+  const nodeEnv = process.env.NODE_ENV ?? '';
+  if (nodeEnv !== 'production') return '';
+  if (insecureAllowed) return '';
+  throw new Error(
+    'PIN lookup secret is not configured (MAHABBAT_PIN_LOOKUP_SECRET). Refusing to start insecure.',
+  );
+};
 
 // Deterministic, non-verifying index used only to select the single candidate
 // row before running scrypt. It is not a credential and cannot be used to
@@ -343,7 +391,6 @@ const findThrottle = async (
       1,
     )
   )[0] ?? null;
-
 const throttleRetryAfterSeconds = (
   record: PosLoginThrottleRecord | null,
   now = Date.now(),
@@ -353,6 +400,23 @@ const throttleRetryAfterSeconds = (
     ? Math.ceil((lockedUntil - now) / 1000)
     : 0;
 };
+
+
+// Mahabbat P1: progressive login delay. No ban, no HTTP 429 storm for the
+// whole till: each failed attempt waits 1s → 2s → 5s → 15s (capped). The
+// delay is derived from the durable failedCount so it survives restarts.
+export const loginDelayMsForFailures = (failedCount: number): number => {
+  if (failedCount <= 0) return 0;
+  const step = Math.min(failedCount, LOGIN_DELAY_STEPS_MS.length) - 1;
+  return LOGIN_DELAY_STEPS_MS[step];
+};
+
+const loginDelayResponse = (delayMs: number): PosAuthResult =>
+  response(429, {
+    code: 'POS_LOGIN_DELAY',
+    message: 'Слишком много попыток входа. Повторите позже.',
+    retryAfterSeconds: Math.ceil(delayMs / 1000),
+  });
 
 const rateLimitedResponse = (retryAfterSeconds: number): PosAuthResult =>
   response(429, {
@@ -364,11 +428,16 @@ const rateLimitedResponse = (retryAfterSeconds: number): PosAuthResult =>
 const recordThrottleFailure = async (
   client: CoreApiClientLike,
   key: string,
-  maxFailures: number,
+  _maxFailures: number,
   windowMs: number,
-  lockoutMs: number,
+  _lockoutMs: number,
   now = Date.now(),
 ): Promise<void> => {
+  // Mahabbat P1: progressive delay instead of a ban. The durable counter
+  // drives loginDelayMsForFailures (1s → 2s → 5s → 15s, capped); lockedUntil
+  // is never set, so no credential, terminal, or global bucket can ban
+  // logins — the global bucket steps up to ADMIN PIN instead (see
+  // globalStepUpRequired in authenticatePosStaff).
   const record = await findThrottle(client, key);
   const nowIso = new Date(now).toISOString();
 
@@ -400,10 +469,6 @@ const recordThrottleFailure = async (
   const inWindow =
     Number.isFinite(windowStartedAt) && now - windowStartedAt < windowMs;
   const failedCount = (inWindow ? (record.failedCount ?? 0) : 0) + 1;
-  const lockedUntil =
-    failedCount >= maxFailures
-      ? new Date(now + lockoutMs).toISOString()
-      : record.lockedUntil ?? null;
 
   try {
     await client.mutation({
@@ -412,7 +477,7 @@ const recordThrottleFailure = async (
           id: record.id,
           data: {
             failedCount,
-            lockedUntil,
+            lockedUntil: null,
             windowStartedAt: inWindow
               ? record.windowStartedAt
               : nowIso,
@@ -492,22 +557,42 @@ export const authenticatePosStaff = async (
     });
   }
 
-  // Server-owned throttle keys: the credential fingerprint plus a global key.
-  // Neither depends on the client-supplied terminalId, and both are persisted
-  // so rotating terminalId or restarting a worker cannot bypass protection.
+  // Mahabbat P1: server-owned throttle keys — credential fingerprint, the
+  // terminal-scoped bucket, plus a global step-up key. None trusts the
+  // client-supplied terminalId alone; all are persisted so rotating
+  // terminalId or restarting a worker cannot bypass protection. The throttle
+  // check runs BEFORE any staff scan or scrypt trial (P1: throttle pre-scan).
   const credentialKey = cardIdentifier
     ? `cred:card:${credentialFingerprint('card', cardIdentifier)}`
     : `cred:pin:${credentialFingerprint('pin', pin as string)}`;
+  const terminalKey = terminalId
+    ? `terminal:${terminalId.slice(0, 128)}`
+    : null;
   const globalKey = 'global';
 
-  const credentialRetry = throttleRetryAfterSeconds(
-    await findThrottle(client, credentialKey),
+  // Mahabbat P1: the global key never locks the whole till. Past the bound
+  // it steps up to ADMIN-PIN instead of 429 (see globalStepUpRequired below);
+  // a success clears it. Checked BEFORE per-credential/terminal delays so a
+  // venue-wide attack still surfaces as step-up, not a local 429.
+  const globalRecord = await findThrottle(client, globalKey);
+  const globalStepUpRequired =
+    (globalRecord?.failedCount ?? 0) >= GLOBAL_MAX_FAILURES;
+  const credentialRecord = await findThrottle(client, credentialKey);
+  const credentialDelayMs = loginDelayMsForFailures(
+    credentialRecord?.failedCount ?? 0,
   );
-  if (credentialRetry > 0) return rateLimitedResponse(credentialRetry);
-  const globalRetry = throttleRetryAfterSeconds(
-    await findThrottle(client, globalKey),
-  );
-  if (globalRetry > 0) return rateLimitedResponse(globalRetry);
+  const credentialRetry = throttleRetryAfterSeconds(credentialRecord);
+  if (!globalStepUpRequired && credentialRetry > 0) return rateLimitedResponse(credentialRetry);
+  if (!globalStepUpRequired && credentialDelayMs > 0) return loginDelayResponse(credentialDelayMs);
+  if (terminalKey) {
+    const terminalRecord = await findThrottle(client, terminalKey);
+    const terminalDelayMs = loginDelayMsForFailures(
+      terminalRecord?.failedCount ?? 0,
+    );
+    const terminalRetry = throttleRetryAfterSeconds(terminalRecord);
+    if (!globalStepUpRequired && terminalRetry > 0) return rateLimitedResponse(terminalRetry);
+    if (!globalStepUpRequired && terminalDelayMs > 0) return loginDelayResponse(terminalDelayMs);
+  }
 
   const recordFailure = async (): Promise<void> => {
     await recordThrottleFailure(
@@ -517,6 +602,15 @@ export const authenticatePosStaff = async (
       GLOBAL_WINDOW_MS,
       LOCKOUT_MS,
     );
+    if (terminalKey) {
+      await recordThrottleFailure(
+        client,
+        terminalKey,
+        MAX_LOGIN_FAILURES,
+        GLOBAL_WINDOW_MS,
+        LOCKOUT_MS,
+      );
+    }
     await recordThrottleFailure(
       client,
       globalKey,
@@ -559,10 +653,16 @@ export const authenticatePosStaff = async (
       }
     } else {
       // Only legacy rows without a lookup index need the expensive scrypt
-      // trial. After migration the loop is empty and login is O(1).
+      // trial. The scan is capped (P1) so a huge staff table cannot turn a
+      // login into a CPU-exhaustion loop; beyond the cap the PIN is treated
+      // as unknown. After migration the loop is empty and login is O(1).
+      const legacyRows = staff.filter((row) => !row.pinLookup);
+      if (legacyRows.length > MAX_LEGACY_PIN_SCAN_ROWS) {
+        await recordFailure();
+        return invalidCredentials();
+      }
       const matches: PosStaffRecord[] = [];
-      for (const row of staff) {
-        if (row.pinLookup) continue;
+      for (const row of legacyRows) {
         if (row.pinHash && (await verifyPosPin(normalizedPin, row.pinHash))) {
           matches.push(row);
         }
@@ -602,15 +702,27 @@ export const authenticatePosStaff = async (
     return invalidCredentials();
   }
 
+  // Mahabbat P1: global step-up. When the venue-wide failure bound is hit,
+  // non-ADMIN logins are asked for an ADMIN PIN instead of locking the whole
+  // till with 429; ADMIN logins proceed. Any success clears the global key.
+  const candidateRole = roleFromValue(candidate.staffRole);
+  if (globalStepUpRequired && candidateRole !== 'ADMIN' && !cardIdentifier) {
+    await recordFailure();
+    return response(403, {
+      code: 'POS_ADMIN_STEP_UP_REQUIRED',
+      message:
+        'Слишком много попыток входа на этой кассе. Попросите администратора подтвердить вход своим PIN.',
+    });
+  }
+
   await clearThrottle(client, credentialKey);
+  if (terminalKey) await clearThrottle(client, terminalKey);
+  await clearThrottle(client, globalKey);
   if ((candidate.failedLoginCount ?? 0) !== 0 || candidate.lockedUntil) {
     await updateStaffLoginState(client, candidate, 0, null);
   }
 
   const issuedAt = new Date();
-  const expiresAt = new Date(issuedAt.getTime() + posSessionIdleTtlMs());
-  const sessionToken = randomBytes(32).toString('base64url');
-  const sessionId = randomUUID();
   const role = roleFromValue(candidate.staffRole);
 
   if (!role) {
@@ -619,6 +731,15 @@ export const authenticatePosStaff = async (
       message: 'Роль сотрудника POS настроена некорректно.',
     });
   }
+
+  // Mahabbat P1: role TTL idle deadline, absolute 12h ceiling from issuedAt.
+  const expiresAt = new Date(issuedAt.getTime() + posIdleTtlMsForRole(role));
+  const absoluteExpiresAt = new Date(posAbsoluteExpiryMs(issuedAt));
+  if (expiresAt.getTime() > absoluteExpiresAt.getTime()) {
+    throw new Error('unreachable: idle TTL exceeds absolute ceiling');
+  }
+  const sessionToken = randomBytes(32).toString('base64url');
+  const sessionId = randomUUID();
 
   const created = (await client.mutation({
     createPosSession: {
@@ -649,6 +770,10 @@ export const authenticatePosStaff = async (
     sessionId,
     sessionToken,
     expiresAt: expiresAt.toISOString(),
+    absoluteExpiresAt: absoluteExpiresAt.toISOString(),
+    rePinWarningAt: new Date(
+      expiresAt.getTime() - SESSION_EXPIRY_WARNING_MS,
+    ).toISOString(),
     staff: {
       id: candidate.id,
       displayName: candidate.displayName ?? 'Сотрудник',
@@ -664,7 +789,11 @@ export const getAuthenticatedPosContext = async (
   | { ok: true; context: AuthenticatedPosContext }
   | { ok: false; result: PosAuthResult }
 > => {
-  if (typeof sessionToken !== 'string' || sessionToken.length < 32 || sessionToken.length > 256) {
+  if (
+    typeof sessionToken !== 'string' ||
+    sessionToken.length < 32 ||
+    sessionToken.length > 256
+  ) {
     return {
       ok: false,
       result: response(401, {
@@ -691,6 +820,22 @@ export const getAuthenticatedPosContext = async (
         message: 'POS-сессия недействительна.',
       }),
     };
+  }
+
+  // Mahabbat P1: absolute 12h ceiling from issuedAt. Past it the session is
+  // expired even if the idle deadline was refreshed — the client must re-PIN.
+  if (session.issuedAt) {
+    const absoluteExpiry = posAbsoluteExpiryMs(session.issuedAt);
+    if (Date.now() >= absoluteExpiry) {
+      return {
+        ok: false,
+        result: response(401, {
+          code: 'POS_SESSION_EXPIRED',
+          message:
+            'POS-сессия истекла (превышен абсолютный лимит 12 часов). Войдите снова.',
+        }),
+      };
+    }
   }
 
   if (session.revokedAt || Date.parse(session.expiresAt) <= Date.now()) {
@@ -741,9 +886,25 @@ export const refreshPosSessionActivity = async (
   client: CoreApiClientLike,
   context: AuthenticatedPosContext,
   now = new Date(),
-  idleTtlMs = posSessionIdleTtlMs(),
+  idleTtlMs = posIdleTtlMsForRole(context.role),
 ): Promise<AuthenticatedPosContext> => {
-  const expiresAt = new Date(now.getTime() + idleTtlMs).toISOString();
+  // Mahabbat P1: role TTL idle deadline; never extend past the absolute 12h
+  // ceiling — near it the deadline clamps, past it the caller re-PINs.
+  // The default TTL is role-derived so callers that pass nothing (notably
+  // the pos-command resolver) cannot widen ADMIN to the WAITER default.
+  const sessions = await queryRecords<PosSessionRecord>(
+    client,
+    'posSessions',
+    { id: { eq: context.sessionRecordId } },
+    SESSION_FIELDS,
+    1,
+  );
+  const issuedAt = sessions[0]?.issuedAt;
+  const absoluteExpiry = issuedAt ? posAbsoluteExpiryMs(issuedAt) : null;
+  const idleExpiry = now.getTime() + idleTtlMs;
+  const expiresAt = new Date(
+    absoluteExpiry === null ? idleExpiry : Math.min(idleExpiry, absoluteExpiry),
+  ).toISOString();
   await client.mutation({
     updatePosSession: {
       __args: {

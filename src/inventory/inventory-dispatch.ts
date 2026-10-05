@@ -212,6 +212,30 @@ const appendMovement = async (
   const raced = await findMovementByIdempotency(c, input.idempotencyKey);
   return raced ? { ...raced, created: false } : null;
 };
+type NewMovementInput = Omit<MovementRecord, 'id'> & { idempotencyKey: string };
+
+// Batch ledger post mirroring postRevisionMovements: one mutation for the
+// whole leg set. Returns false on any failure so the caller falls back to
+// per-key resume; the caller re-reads the group to verify all-or-nothing.
+const postMovementBatch = async (c: CoreApiClientLike, inputs: NewMovementInput[]): Promise<boolean> => {
+  if (inputs.length === 0) return true;
+  try {
+    const seen: Record<string, true> = {};
+    const unique = inputs.filter((input) => (seen[input.idempotencyKey] ? false : (seen[input.idempotencyKey] = true)));
+    const result = await c.mutation({
+      createInventoryStockMovements: {
+        __args: { data: unique.map((input) => ({ ...input, id: deterministicMovementId(input) })), upsert: true },
+        id: true,
+      },
+    });
+    const created = (result as Record<string, unknown>)?.createInventoryStockMovements;
+    return Array.isArray(created)
+      && created.length === unique.length
+      && created.every((movement) => (movement as Record<string, unknown>)?.id);
+  } catch {
+    return false;
+  }
+};
 
 const reconcileBalanceProjection = async (c: CoreApiClientLike, itemId: string, locationId: string): Promise<void> => {
   const movements = await queryConnection<MovementRecord>(c, 'inventoryStockMovements', { filter: { stockItemId: { eq: itemId }, locationId: { eq: locationId } }, first: 500 }, MOV_FIELDS);
@@ -315,29 +339,56 @@ export const executeReceiveStock = async (
   if (loc.isActive === false) return error('LOCATION_INACTIVE', 'Точка неактивна.');
   const revisionLock = await rejectMovementDuringRevision(c, [payload.locationId]);
   if (revisionLock) return revisionLock;
-  // idempotency: check movements with sourceId == idempotencyKey already exists
-  const existingGroup = await findMovementsBySource(c, payload.idempotencyKey);
-  if (existingGroup.length > 0) return ok(200, { receiptId: payload.idempotencyKey, lineCount: existingGroup.length, replay: true });
-  const now = new Date().toISOString();
-  let created = 0;
+  // Pre-validate ALL lines before the first append: a partial group written
+  // before a bad line would otherwise strand ledger rows for a failed receipt.
+  if (payload.lines.length === 0) return error('INVALID_QTY', 'Нужна хотя бы одна строка прихода.');
   for (const line of payload.lines) {
     if (!Number.isSafeInteger(line.quantityMicros) || line.quantityMicros <= 0) return error('INVALID_QTY', 'Количество должно быть положительным.');
     if (!Number.isSafeInteger(line.unitCostMicros) || line.unitCostMicros < 0) return error('INVALID_COST', 'Цена неверна.');
     const item = await findItemById(c, line.stockItemId);
     if (!item) return error('ITEM_NOT_FOUND', 'Позиция не найдена.');
-    const bal = await ensureBalance(c, line.stockItemId, payload.locationId);
-    const totalCost = quantityCostTotal(line.quantityMicros, line.unitCostMicros);
-    const movKey = `${payload.idempotencyKey}:${line.stockItemId}:${payload.locationId}`;
-    const mov = await appendMovement(c, {
-      movementType: 'RECEIPT', stockItemId: line.stockItemId, locationId: payload.locationId,
-      quantityDeltaMicros: line.quantityMicros, unitCostMicros: line.unitCostMicros, totalCostMicros: totalCost,
-      sourceType: 'RECEIPT', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: movKey, reason: payload.comment ?? null,
-    });
-    if (!mov) return error('CONFLICT', 'Приход не проведён.');
-    await applyMovementToProjection(c, mov, line.stockItemId, payload.locationId, bal, line.quantityMicros, line.unitCostMicros, 'RECEIPT');
-    created += 1;
   }
-  return ok(201, { receiptId: payload.idempotencyKey, lineCount: created });
+  const now = new Date().toISOString();
+  const lineKey = (stockItemId: string) => `${payload.idempotencyKey}:${stockItemId}:${payload.locationId}`;
+  const group = await findMovementsBySource(c, payload.idempotencyKey);
+  const present = new Set(group.map((m) => m.idempotencyKey));
+  if (payload.lines.every((line) => present.has(lineKey(line.stockItemId)))) {
+    return ok(200, { receiptId: payload.idempotencyKey, lineCount: payload.lines.length, replay: true });
+  }
+  // Missing legs only: post the whole residue as one batch; a partial batch
+  // write is safe because the same key resumes and completes the remainder.
+  const missing = payload.lines.filter((line) => !present.has(lineKey(line.stockItemId)));
+  const posted = await postMovementBatch(c, missing.map((line) => ({
+    movementType: 'RECEIPT', stockItemId: line.stockItemId, locationId: payload.locationId,
+    quantityDeltaMicros: line.quantityMicros, unitCostMicros: line.unitCostMicros,
+    totalCostMicros: quantityCostTotal(line.quantityMicros, line.unitCostMicros),
+    sourceType: 'RECEIPT', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId,
+    occurredAt: now, idempotencyKey: lineKey(line.stockItemId), reason: payload.comment ?? null,
+  })));
+  if (!posted) {
+    // Batch failed partway (or raced): append the missing legs one by one,
+    // skipping keys that already landed, so a retry completes the group.
+    for (const line of missing) {
+      const key = lineKey(line.stockItemId);
+      if (await findMovementByIdempotency(c, key)) continue;
+      const mov = await appendMovement(c, {
+        movementType: 'RECEIPT', stockItemId: line.stockItemId, locationId: payload.locationId,
+        quantityDeltaMicros: line.quantityMicros, unitCostMicros: line.unitCostMicros,
+        totalCostMicros: quantityCostTotal(line.quantityMicros, line.unitCostMicros),
+        sourceType: 'RECEIPT', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId,
+        occurredAt: now, idempotencyKey: key, reason: payload.comment ?? null,
+      });
+      if (!mov && !(await findMovementByIdempotency(c, key))) return error('CONFLICT', 'Приход не проведён.');
+    }
+  }
+  const completed = await findMovementsBySource(c, payload.idempotencyKey);
+  if (completed.length < payload.lines.length) return error('CONFLICT', 'Приход проведён частично. Повторите запрос с тем же ключом.');
+  for (const line of payload.lines) {
+    const bal = await ensureBalance(c, line.stockItemId, payload.locationId);
+    const existing = await findMovementByIdempotency(c, lineKey(line.stockItemId));
+    if (existing) await applyMovementToProjection(c, { ...existing, created: false }, line.stockItemId, payload.locationId, bal, line.quantityMicros, line.unitCostMicros, 'RECEIPT');
+  }
+  return ok(201, { receiptId: payload.idempotencyKey, lineCount: payload.lines.length });
 };
 
 // WriteOff
@@ -379,9 +430,13 @@ export const executeTransferStock = async (
   const admin = requireAdmin(actor.role); if (admin) return admin;
   if (payload.sourceLocationId === payload.destLocationId) return error('INVALID_TRANSFER', 'Точки должны отличаться.');
   if (!Number.isSafeInteger(payload.quantityMicros) || payload.quantityMicros <= 0) return error('INVALID_QTY', 'Количество неверно.');
-  const existing = await findMovementsBySource(c, payload.idempotencyKey);
-  if (existing.length === 2) return ok(200, { transferId: payload.idempotencyKey, replay: true });
-  if (existing.length > 0) return error('CONFLICT', 'Перемещение уже частично проведено.');
+  const outKey = `${payload.idempotencyKey}:OUT`;
+  const inKey = `${payload.idempotencyKey}:IN`;
+  const group = await findMovementsBySource(c, payload.idempotencyKey);
+  const hasOut = group.some((m) => m.idempotencyKey === outKey);
+  const hasIn = group.some((m) => m.idempotencyKey === inKey);
+  if (hasOut && hasIn) return ok(200, { transferId: payload.idempotencyKey, replay: true });
+  if (group.length > 2 || group.some((m) => m.idempotencyKey !== outKey && m.idempotencyKey !== inKey)) return error('CONFLICT', 'Перемещение уже частично проведено.');
   const srcLoc = await findLocationById(c, payload.sourceLocationId);
   const dstLoc = await findLocationById(c, payload.destLocationId);
   if (!srcLoc || !dstLoc) return error('LOCATION_NOT_FOUND', 'Точка не найдена.');
@@ -392,23 +447,33 @@ export const executeTransferStock = async (
   const srcBal = await ensureBalance(c, payload.stockItemId, payload.sourceLocationId);
   const snapCost = srcBal.averageCostMicros ?? 0;
   const now = new Date().toISOString();
-  const outKey = `${payload.idempotencyKey}:OUT`;
-  const inKey = `${payload.idempotencyKey}:IN`;
-  const outMov = await appendMovement(c, {
+  // Post the missing legs as one batch; a partial batch write resumes below
+  // by completing whichever leg is still absent.
+  const legs: NewMovementInput[] = [];
+  if (!hasOut) legs.push({
     movementType: 'TRANSFER_OUT', stockItemId: payload.stockItemId, locationId: payload.sourceLocationId,
     quantityDeltaMicros: -payload.quantityMicros, unitCostMicros: snapCost, totalCostMicros: -quantityCostTotal(payload.quantityMicros, snapCost),
     sourceType: 'TRANSFER', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: outKey,
   });
-  if (!outMov) return error('CONFLICT', 'Перемещение OUT не проведено.');
-  const dstMov = await appendMovement(c, {
+  if (!hasIn) legs.push({
     movementType: 'TRANSFER_IN', stockItemId: payload.stockItemId, locationId: payload.destLocationId,
     quantityDeltaMicros: payload.quantityMicros, unitCostMicros: snapCost, totalCostMicros: quantityCostTotal(payload.quantityMicros, snapCost),
     sourceType: 'TRANSFER', sourceId: payload.idempotencyKey, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: inKey,
   });
-  if (!dstMov) return error('CONFLICT', 'Перемещение IN не проведено.');
+  const posted = await postMovementBatch(c, legs);
+  if (!posted) {
+    for (const leg of legs) {
+      if (await findMovementByIdempotency(c, leg.idempotencyKey)) continue;
+      const mov = await appendMovement(c, leg);
+      if (!mov && !(await findMovementByIdempotency(c, leg.idempotencyKey))) return error('CONFLICT', 'Перемещение проведено частично. Повторите запрос с тем же ключом.');
+    }
+  }
+  const outMov = await findMovementByIdempotency(c, outKey);
+  const dstMov = await findMovementByIdempotency(c, inKey);
+  if (!outMov || !dstMov) return error('CONFLICT', 'Перемещение проведено частично. Повторите запрос с тем же ключом.');
   const dstBal = await ensureBalance(c, payload.stockItemId, payload.destLocationId);
-  await applyMovementToProjection(c, outMov, payload.stockItemId, payload.sourceLocationId, srcBal, -payload.quantityMicros, snapCost, 'TRANSFER_OUT');
-  await applyMovementToProjection(c, dstMov, payload.stockItemId, payload.destLocationId, dstBal, payload.quantityMicros, snapCost, 'RECEIPT');
+  await applyMovementToProjection(c, { ...outMov, created: false }, payload.stockItemId, payload.sourceLocationId, srcBal, -payload.quantityMicros, snapCost, 'TRANSFER_OUT');
+  await applyMovementToProjection(c, { ...dstMov, created: false }, payload.stockItemId, payload.destLocationId, dstBal, payload.quantityMicros, snapCost, 'RECEIPT');
   return ok(201, { transferId: payload.idempotencyKey });
 };
 
@@ -452,13 +517,22 @@ export const executeUpsertRecipe = async (
   if (!['MENU_ITEM','SEMI_FINISHED'].includes(payload.targetKind)) return error('INVALID_RECIPE', 'Тип цели неверен.');
   if (!Number.isSafeInteger(payload.yieldQuantityMicros) || payload.yieldQuantityMicros <= 0) return error('INVALID_YIELD', 'Выход неверен.');
   if (payload.lines.length === 0) return error('INVALID_RECIPE', 'Нужен хотя бы один ингредиент.');
+  // Fold duplicate ingredient rows before validation/storage so one position
+  // maps to one recipe line with the summed quantity.
+  const foldedInput = new Map<string, number>();
   for (const line of payload.lines) {
     if (!Number.isSafeInteger(line.quantityMicros) || line.quantityMicros <= 0) return error('INVALID_QTY', 'Количество ингредиента неверно.');
+    const sum = (foldedInput.get(line.stockItemId) ?? 0) + line.quantityMicros;
+    if (!Number.isSafeInteger(sum)) return error('QUANTITY_OVERFLOW', 'Количество ингредиента слишком велико.');
+    foldedInput.set(line.stockItemId, sum);
+  }
+  const dedupedLines = [...foldedInput.entries()].map(([stockItemId, quantityMicros]) => ({ stockItemId, quantityMicros }));
+  for (const line of dedupedLines) {
     const item = await findItemById(c, line.stockItemId);
     if (!item) return error('ITEM_NOT_FOUND', `Ингредиент ${line.stockItemId} не найден.`);
   }
   // self-cycle check
-  if (payload.targetKind === 'SEMI_FINISHED' && payload.lines.some(l => l.stockItemId === payload.targetId)) return error('RECIPE_CYCLE', 'Калькуляция создаёт циклическую зависимость');
+  if (payload.targetKind === 'SEMI_FINISHED' && dedupedLines.some(l => l.stockItemId === payload.targetId)) return error('RECIPE_CYCLE', 'Калькуляция создаёт циклическую зависимость');
   // Build existing graph for cycle check
   const allRecipes = await queryConnection<RecipeRecord>(c, 'inventoryRecipes', {}, RECIPE_FIELDS);
   const graph = new Map<string, string[]>();
@@ -472,7 +546,7 @@ export const executeUpsertRecipe = async (
   }
   // check indirect cycle
   const tempGraph = new Map(graph);
-  tempGraph.set(payload.targetId, payload.lines.map(l => l.stockItemId));
+  tempGraph.set(payload.targetId, dedupedLines.map(l => l.stockItemId));
   // simple DFS cycle detection
   const hasCycle = (() => {
     const visited = new Set<string>();
@@ -513,8 +587,8 @@ export const executeUpsertRecipe = async (
     const res = (await c.mutation({ createInventoryRecipeVersion: { __args: { data: { recipeId: recipe.id, versionNumber: nextNum, yieldQuantityMicros: payload.yieldQuantityMicros, effectiveFrom: new Date().toISOString(), status: 'ACTIVE', createdByStaffId: actor.staffId, idempotencyKey: payload.idempotencyKey } }, id: true } })) as { createInventoryRecipeVersion?: RecipeVersionRecord };
     const ver = res.createInventoryRecipeVersion;
     if (!ver?.id) throw new Error('no ver');
-    for (let i = 0; i < payload.lines.length; i++) {
-      const line = payload.lines[i];
+    for (let i = 0; i < dedupedLines.length; i++) {
+      const line = dedupedLines[i];
       await c.mutation({ createInventoryRecipeLine: { __args: { data: { recipeVersionId: ver.id, stockItemId: line.stockItemId, quantityMicros: line.quantityMicros, sortOrder: i } }, id: true } });
     }
     if (active) await c.mutation({ updateInventoryRecipeVersion: { __args: { id: active.id, data: { status: 'SUPERSEDED' } }, id: true } });
@@ -541,55 +615,95 @@ export const executeProduceSemi = async (
   if (!loc) return error('LOCATION_NOT_FOUND', 'Точка не найдена.');
   const revisionLock = await rejectMovementDuringRevision(c, [payload.locationId]);
   if (revisionLock) return revisionLock;
-  const existing = await findMovementsBySource(c, payload.idempotencyKey);
-  if (existing.length > 0) return ok(200, { productionId: payload.idempotencyKey, replay: true });
-
-  // resolve recipe version
+  // Resolve + pre-validate the whole plan before the first append: recipe
+  // match, per-input quantities, and single unit cost are all derived up
+  // front, so a mid-loop failure can no longer strand a partial INPUT set.
   let ver: RecipeVersionRecord | null = null;
-  if (payload.recipeVersionId) ver = await findRecipeVersionById(c, payload.recipeVersionId);
-  else {
+  if (payload.recipeVersionId) {
+    ver = await findRecipeVersionById(c, payload.recipeVersionId);
+    if (ver) {
+      const owner = await findRecipeByTarget(c, 'SEMI_FINISHED', payload.stockItemId);
+      if (!owner || ver.recipeId !== owner.id) return error('RECIPE_NOT_FOUND', 'Версия калькуляции не относится к позиции.');
+      if (ver.status !== 'ACTIVE') return error('RECIPE_NOT_FOUND', 'Версия калькуляции не активна.');
+    }
+  } else {
     const rec = await findRecipeByTarget(c, 'SEMI_FINISHED', payload.stockItemId);
     if (!rec) return error('RECIPE_NOT_FOUND', 'Калькуляция не найдена.');
     const vers = await findRecipeVersions(c, rec.id);
-    ver = vers.find(v => v.status === 'ACTIVE') ?? null;
+    ver = vers.find((v) => v.status === 'ACTIVE') ?? null;
   }
   if (!ver) return error('RECIPE_NOT_FOUND', 'Версия калькуляции не найдена.');
-  const lines = await findRecipeLines(c, ver.id);
-  if (lines.length === 0) return error('RECIPE_EMPTY', 'Калькуляция пуста.');
+  const rawLines = await findRecipeLines(c, ver.id);
+  if (rawLines.length === 0) return error('RECIPE_EMPTY', 'Калькуляция пуста.');
+  // Fold duplicate ingredient rows deterministically: same stockItemId sums
+  // into one input leg so a sloppy recipe version cannot double-post.
+  const folded = new Map<string, number>();
+  for (const raw of rawLines) {
+    if (!Number.isSafeInteger(raw.quantityMicros) || (raw.quantityMicros as number) <= 0) return error('INVALID_QTY', 'Количество ингредиента неверно.');
+    const id = String(raw.stockItemId);
+    const sum = (folded.get(id) ?? 0) + (raw.quantityMicros as number);
+    if (!Number.isSafeInteger(sum)) return error('QUANTITY_OVERFLOW', 'Количество ингредиента слишком велико.');
+    folded.set(id, sum);
+  }
+  const lines = [...folded.entries()].map(([stockItemId, quantityMicros]) => ({ stockItemId, quantityMicros }));
+  if (!Number.isSafeInteger(ver.yieldQuantityMicros) || (ver.yieldQuantityMicros as number) <= 0) return error('INVALID_YIELD', 'Выход калькуляции неверен.');
   const recipeYield = ver.yieldQuantityMicros as number;
   const now = new Date().toISOString();
-  // compute inputs
-  const inputs: Array<{ stockItemId: string; requiredMicros: number; avgCost: number }> = [];
+  const outKey = `${payload.idempotencyKey}:OUT:${payload.stockItemId}`;
+  const inputs: Array<{ stockItemId: string; requiredMicros: number; avgCost: number; key: string }> = [];
   for (const line of lines) {
+    const ingredient = await findItemById(c, line.stockItemId as string);
+    if (!ingredient) return error('ITEM_NOT_FOUND', 'Ингредиент не найден.');
     const required = scaledQuantityMicros(line.quantityMicros as number, payload.quantityMicros, recipeYield);
+    if (!Number.isSafeInteger(required) || required <= 0) return error('INVALID_QTY', 'Количество ингредиента неверно.');
     const bal = await ensureBalance(c, line.stockItemId as string, payload.locationId);
-    inputs.push({ stockItemId: line.stockItemId as string, requiredMicros: required, avgCost: bal.averageCostMicros ?? 0 });
+    inputs.push({ stockItemId: line.stockItemId as string, requiredMicros: required, avgCost: bal.averageCostMicros ?? 0, key: `${payload.idempotencyKey}:IN:${line.stockItemId}` });
   }
-  // compute production unit cost
-  const unitCost = computeProductionUnitCost(inputs.map(i => ({ qtyMicros: i.requiredMicros, avgCostMicros: i.avgCost })), payload.quantityMicros);
-  // create INPUT movements
+  const group = await findMovementsBySource(c, payload.idempotencyKey);
+  const presentKeys: Record<string, true> = {};
+  for (const m of group) presentKeys[String(m.idempotencyKey)] = true;
+  const completeKeys = [...inputs.map((i) => i.key), outKey];
+  if (completeKeys.every((key) => presentKeys[key])) return ok(200, { productionId: payload.idempotencyKey, replay: true });
+  if (group.length > 0 && group.some((m) => !completeKeys.includes(String(m.idempotencyKey)))) return error('CONFLICT', 'Производство уже частично проведено.');
+  const unitCost = computeProductionUnitCost(inputs.map((i) => ({ qtyMicros: i.requiredMicros, avgCostMicros: i.avgCost })), payload.quantityMicros);
+  const outTotal = quantityCostTotal(payload.quantityMicros, unitCost);
+  const residue: NewMovementInput[] = [];
   for (const inp of inputs) {
+    if (presentKeys[inp.key]) continue;
     const total = quantityCostTotal(inp.requiredMicros, inp.avgCost);
-    const key = `${payload.idempotencyKey}:IN:${inp.stockItemId}`;
-    const inputMovement = await appendMovement(c, {
+    residue.push({
       movementType: 'PRODUCTION_INPUT', stockItemId: inp.stockItemId, locationId: payload.locationId,
       quantityDeltaMicros: -inp.requiredMicros, unitCostMicros: inp.avgCost, totalCostMicros: -total,
-      sourceType: 'PRODUCTION', sourceId: payload.idempotencyKey, recipeVersionId: ver.id, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: key,
+      sourceType: 'PRODUCTION', sourceId: payload.idempotencyKey, recipeVersionId: ver.id, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: inp.key,
     });
-    if (!inputMovement) return error('CONFLICT', 'Производство не проведено.');
-    const bal = await ensureBalance(c, inp.stockItemId, payload.locationId);
-    await applyMovementToProjection(c, inputMovement, inp.stockItemId, payload.locationId, bal, -inp.requiredMicros, inp.avgCost, 'PRODUCTION_INPUT');
   }
-  // OUTPUT
-  const outTotal = quantityCostTotal(payload.quantityMicros, unitCost);
-  const outputMovement = await appendMovement(c, {
+  if (!presentKeys[outKey]) residue.push({
     movementType: 'PRODUCTION_OUTPUT', stockItemId: payload.stockItemId, locationId: payload.locationId,
     quantityDeltaMicros: payload.quantityMicros, unitCostMicros: unitCost, totalCostMicros: outTotal,
-    sourceType: 'PRODUCTION', sourceId: payload.idempotencyKey, recipeVersionId: ver.id, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: `${payload.idempotencyKey}:OUT:${payload.stockItemId}`,
+    sourceType: 'PRODUCTION', sourceId: payload.idempotencyKey, recipeVersionId: ver.id, actorStaffId: actor.staffId, occurredAt: now, idempotencyKey: outKey,
   });
-  if (!outputMovement) return error('CONFLICT', 'Производство не проведено.');
+  // Single atomic batch for all INPUT + OUTPUT legs, mirroring
+  // postRevisionMovements. A failed batch falls back to per-key resume.
+  const posted = await postMovementBatch(c, residue);
+  if (!posted) {
+    for (const leg of residue) {
+      if (await findMovementByIdempotency(c, leg.idempotencyKey)) continue;
+      const mov = await appendMovement(c, leg);
+      if (!mov && !(await findMovementByIdempotency(c, leg.idempotencyKey))) return error('CONFLICT', 'Производство проведено частично. Повторите запрос с тем же ключом.');
+    }
+  }
+  const finished = await findMovementsBySource(c, payload.idempotencyKey);
+  const finishedKeys: Record<string, true> = {};
+  for (const m of finished) finishedKeys[String(m.idempotencyKey)] = true;
+  if (!completeKeys.every((key) => finishedKeys[key])) return error('CONFLICT', 'Производство проведено частично. Повторите запрос с тем же ключом.');
+  for (const inp of inputs) {
+    const bal = await ensureBalance(c, inp.stockItemId, payload.locationId);
+    const movement = await findMovementByIdempotency(c, inp.key);
+    if (movement) await applyMovementToProjection(c, { ...movement, created: false }, inp.stockItemId, payload.locationId, bal, -inp.requiredMicros, inp.avgCost, 'PRODUCTION_INPUT');
+  }
   const outBal = await ensureBalance(c, payload.stockItemId, payload.locationId);
-  await applyMovementToProjection(c, outputMovement, payload.stockItemId, payload.locationId, outBal, payload.quantityMicros, unitCost, 'PRODUCTION');
+  const outMovement = await findMovementByIdempotency(c, outKey);
+  if (outMovement) await applyMovementToProjection(c, { ...outMovement, created: false }, payload.stockItemId, payload.locationId, outBal, payload.quantityMicros, unitCost, 'PRODUCTION');
   return ok(201, { productionId: payload.idempotencyKey, unitCostMicros: unitCost });
 };
 
@@ -1041,8 +1155,15 @@ const restoreRevisionClaim = async (c: CoreApiClientLike, plan: RevisionPostingP
 };
 
 const stageRevisionLines = async (c: CoreApiClientLike, plan: RevisionPostingPlan): Promise<void> => {
+  // lineCreates use deterministic ids per (count, item, key), so a retry
+  // after a crash upserts instead of duplicating the staged row.
   for (const line of plan.lineCreates) {
-    await c.mutation({ createInventoryCountLine: { __args: { data: line }, id: true } });
+    try {
+      await c.mutation({ createInventoryCountLine: { __args: { data: line }, id: true } });
+    } catch {
+      const raced = await queryConnection<CountLineRecord>(c, 'inventoryCountLines', { filter: { countId: { eq: line.countId }, stockItemId: { eq: line.stockItemId } }, first: 1 }, COUNT_LINE_FIELDS);
+      if (!raced[0]) throw revisionError('COUNT_LINE_WRITE_FAILED', 'Строка ревизии не сохранена.');
+    }
   }
   for (const line of plan.lineUpdates) {
     const result = await c.mutation({ updateInventoryCountLine: { __args: { id: line.id, data: line.data }, id: true } });
@@ -1099,7 +1220,7 @@ export const executeFinalizeCount = async (
     return ok(201, { countId: count.id, movements: plan.movements.length });
   } catch (caught) {
     if (plan && !movementBatchCommitted) await restoreRevisionClaim(c, plan);
-    if (caught && typeof caught === 'object' && 'code' in caught && ['REVISION_STALE', 'REVISION_IN_PROGRESS', 'INVALID_QTY', 'RESOLUTION_INVALID', 'RECIPE_NOT_FOUND', 'RECIPE_EMPTY', 'BALANCE_NOT_FOUND', 'ITEM_NOT_FOUND', 'LOCATION_NOT_FOUND', 'UNIT_INVALID', 'DUPLICATE_ACTUAL', 'DUPLICATE_COUNT_LINE', 'EXPECTED_QTY_INVALID', 'QUANTITY_OVERFLOW', 'MOVEMENT_KEY_CONFLICT', 'COUNT_LINE_WRITE_FAILED', 'REVISION_LIMIT_EXCEEDED'].includes(String((caught as { code?: unknown }).code))) {
+    if (caught && typeof caught === 'object' && 'code' in caught && ['REVISION_STALE', 'REVISION_IN_PROGRESS', 'REVISION_WATERMARK_INVALID', 'REVISION_MOVEMENT_BATCH_FAILED', 'COUNT_POST_FAILED', 'INVALID_QTY', 'INVALID_YIELD', 'INVALID_RECIPE', 'INVALID_ITEM_TYPE', 'INVALID_TRANSFER', 'INVALID_INPUT', 'INVALID_COST', 'INVALID_UNIT', 'RESOLUTION_INVALID', 'RECIPE_NOT_FOUND', 'RECIPE_EMPTY', 'RECIPE_CYCLE', 'BALANCE_NOT_FOUND', 'BALANCE_CONFLICT', 'ITEM_NOT_FOUND', 'LOCATION_NOT_FOUND', 'LOCATION_INACTIVE', 'COUNT_NOT_FOUND', 'COUNT_STATUS', 'UNIT_INVALID', 'DUPLICATE_ACTUAL', 'DUPLICATE_COUNT_LINE', 'EXPECTED_QTY_INVALID', 'QUANTITY_OVERFLOW', 'MOVEMENT_KEY_CONFLICT', 'COUNT_LINE_WRITE_FAILED', 'REVISION_LIMIT_EXCEEDED', 'REVISION_RETRY_REQUIRED', 'CONFLICT'].includes(String((caught as { code?: unknown }).code))) {
       return error(String((caught as { code: string }).code), (caught as unknown as Error).message);
     }
     throw caught;

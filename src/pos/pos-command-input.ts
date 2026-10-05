@@ -98,6 +98,7 @@ export type RecordPaymentPayload = {
   amountMicros: number;
   tenderedAmountMicros?: number;
   idempotencyKey: string;
+  forceUnprintedPrecheck?: boolean;
 };
 
 export type CloseOrderPayload = {
@@ -194,6 +195,7 @@ export type SetMenuItemProductionStationPayload = {
 export type RetryPrintJobPayload = {
   printJobId: string;
   idempotencyKey: string;
+  confirmedPrinterName?: string;
 };
 
 export type TestPrinterDevicePayload = {
@@ -474,7 +476,6 @@ const parsePrecheckPayload = (payload: unknown): ParseResult<PrecheckPayload> =>
   if (!parsedKey.ok) return parsedKey;
   return { ok: true, data: { orderId, idempotencyKey: parsedKey.data } };
 };
-
 const parseRecordPaymentPayload = (
   payload: unknown,
 ): ParseResult<RecordPaymentPayload> => {
@@ -487,6 +488,7 @@ const parseRecordPaymentPayload = (
     amountMicros,
     tenderedAmountMicros,
     idempotencyKey,
+    forceUnprintedPrecheck,
   } = payload as Record<string, unknown>;
   if (!isUuid(orderId) || !isUuid(paymentMethodId)) {
     return invalid('INVALID_PAYLOAD', 'orderId and paymentMethodId must be UUIDs');
@@ -506,6 +508,9 @@ const parseRecordPaymentPayload = (
   ) {
     return invalid('INVALID_PAYLOAD', 'tenderedAmountMicros must be a positive safe integer');
   }
+  if (forceUnprintedPrecheck !== undefined && typeof forceUnprintedPrecheck !== 'boolean') {
+    return invalid('INVALID_PAYLOAD', 'forceUnprintedPrecheck must be a boolean');
+  }
   const parsedKey = parseIdempotencyKey(idempotencyKey);
   if (!parsedKey.ok) return parsedKey;
   return {
@@ -516,6 +521,7 @@ const parseRecordPaymentPayload = (
       amountMicros,
       ...(tenderedAmountMicros !== undefined ? { tenderedAmountMicros } : {}),
       idempotencyKey: parsedKey.data,
+      ...(forceUnprintedPrecheck !== undefined ? { forceUnprintedPrecheck } : {}),
     },
   };
 };
@@ -735,7 +741,9 @@ const parseRetryPrintJobPayload = (payload: unknown): ParseResult<RetryPrintJobP
   if (!isUuid(value.printJobId)) return invalid('INVALID_PAYLOAD', 'printJobId must be a UUID');
   const key = parseIdempotencyKey(value.idempotencyKey);
   if (!key.ok) return key;
-  return { ok: true, data: { printJobId: value.printJobId, idempotencyKey: key.data } };
+  if (value.confirmedPrinterName !== undefined && typeof value.confirmedPrinterName !== 'string') return invalid('INVALID_PAYLOAD', 'confirmedPrinterName must be a string');
+  const confirmed = typeof value.confirmedPrinterName === 'string' && value.confirmedPrinterName.trim() ? value.confirmedPrinterName.slice(0, 256) : undefined;
+  return { ok: true, data: { printJobId: value.printJobId, idempotencyKey: key.data, ...(confirmed ? { confirmedPrinterName: confirmed } : {}) } };
 };
 
 const parseTestPrinterDevicePayload = (payload: unknown): ParseResult<TestPrinterDevicePayload> => {

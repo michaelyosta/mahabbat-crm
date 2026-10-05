@@ -16,9 +16,11 @@ import {
   type PosCommand,
 } from 'src/pos/pos-permissions';
 import {
+  assertSafeMicros,
   microsToCurrency,
   normalizeCurrency,
   POS_CURRENCY_CODE,
+  requireKztCurrency,
   sumActiveLinesMicros,
 } from 'src/pos/pos-money';
 import {
@@ -279,6 +281,7 @@ export const POS_ERROR_CODES = [
   'PRINT_CONFIG_INVALID',
   'PRECHECK_NOT_FOUND',
   'PRECHECK_NOT_ACTIVE',
+  'PRECHECK_NOT_PRINTED',
   'PAYMENT_METHOD_NOT_FOUND',
   'PAYMENT_METHOD_INACTIVE',
   'PAYMENT_NOT_FOUND',
@@ -637,15 +640,14 @@ const findActiveStopListEntry = async (
     client,
     'posStopListEntries',
     {
-      filter: { menuItemId: { eq: menuItemId }, isActive: { eq: true } },
-      first: 1,
+      filter: { menuItemId: { eq: menuItemId } },
+      first: 100,
     },
     STOP_LIST_FIELDS,
   );
 
-  return entries.find((entry) => entry.isActive === true) ?? null;
+  return entries.find((entry) => entry.menuItemId === menuItemId && entry.isActive === true) ?? null;
 };
-
 const findStopListEntryByMenuItem = async (
   client: CoreApiClientLike,
   menuItemId: string,
@@ -1145,28 +1147,41 @@ const updateLinesTotals = async (
     }
   }
 
-  const currentSubtotal = normalizeCurrency(order.subtotal);
-  const currentTotal = normalizeCurrency(order.total);
+  // Compare-and-swap the order projection so a concurrent payment/close that
+  // advanced paidTotal or status is not overwritten with a stale recompute:
+  // the loser re-reads and converges instead of clobbering the newer total.
+  // Orders are created with subtotal/total null, so a null row matches a null
+  // expectation without a nested currency filter.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const fresh = attempt === 0 ? order : ((await findOrderById(client, order.id)) ?? order);
+    const currentSubtotal = normalizeCurrency(fresh.subtotal);
+    const currentTotal = normalizeCurrency(fresh.total);
 
-  const needsTotalsUpdate =
-    subtotal === null ||
-    currentSubtotal.amountMicros !== subtotal.amountMicros ||
-    currentSubtotal.currencyCode !== subtotal.currencyCode ||
-    currentTotal.amountMicros !== subtotal.amountMicros ||
-    currentTotal.currencyCode !== subtotal.currencyCode;
+    const needsTotalsUpdate =
+      subtotal === null ||
+      currentSubtotal.amountMicros !== subtotal.amountMicros ||
+      currentSubtotal.currencyCode !== subtotal.currencyCode ||
+      currentTotal.amountMicros !== subtotal.amountMicros ||
+      currentTotal.currencyCode !== subtotal.currencyCode;
 
-  const nextStatus = nextPosOrderStatusAfterLineChange(
-    order.status as PosOrderStatus,
-    activeLines.length,
-  );
+    const nextStatus = nextPosOrderStatusAfterLineChange(
+      fresh.status as PosOrderStatus,
+      activeLines.length,
+    );
 
-  const needsStatusUpdate = nextStatus !== order.status;
+    const needsStatusUpdate = nextStatus !== fresh.status;
 
-  if (needsTotalsUpdate || needsStatusUpdate) {
-    await client.mutation({
-      updatePosOrder: {
+    if (!needsTotalsUpdate && !needsStatusUpdate) {
+      return { activeLineCount: activeLines.length };
+    }
+
+    const filter: Record<string, unknown> = { id: { eq: order.id }, status: { eq: fresh.status } };
+    if (fresh.subtotal != null) filter.subtotal = currencyFilter(currentSubtotal.amountMicros);
+    if (fresh.total != null) filter.total = currencyFilter(currentTotal.amountMicros);
+    const result = await client.mutation({
+      updatePosOrders: {
         __args: {
-          id: order.id,
+          filter,
           data: {
             ...(needsTotalsUpdate ? { subtotal, total: subtotal } : {}),
             ...(needsStatusUpdate ? { status: nextStatus } : {}),
@@ -1175,6 +1190,9 @@ const updateLinesTotals = async (
         id: true,
       },
     });
+    if (mutationUpdatedRows(result, 'updatePosOrders') > 0) {
+      return { activeLineCount: activeLines.length };
+    }
   }
 
   return { activeLineCount: activeLines.length };
@@ -1803,6 +1821,14 @@ export const executeAddLine = async (
     return errorResult('MENU_ITEM_INACTIVE', 'Menu item is not active.');
   }
 
+  let unitPrice: { amountMicros: number; currencyCode: string };
+  try {
+    unitPrice = requireKztCurrency(menuItem.price, 'unitPrice');
+    assertSafeMicros(unitPrice.amountMicros, 'unitPrice.amountMicros');
+  } catch {
+    return errorResult('MENU_ITEM_INACTIVE', 'Menu item has an invalid price.');
+  }
+
   const stopListed = await findActiveStopListEntry(client, payload.menuItemId);
 
   if (stopListed) {
@@ -1830,7 +1856,12 @@ export const executeAddLine = async (
     return okResult(200, { lineId: existingByIdempotency.id });
   }
 
-  const unitPrice = normalizeCurrency(menuItem.price);
+  try {
+    assertSafeMicros(payload.quantity, 'quantity');
+    assertSafeMicros(unitPrice.amountMicros * Math.max(0, payload.quantity), 'quantity*unitPrice');
+  } catch {
+    return errorResult('CONFLICT', 'Line quantity overflows the safe integer range.');
+  }
 
   try {
     const result = (await client.mutation({
@@ -1909,6 +1940,13 @@ export const executeChangeLineQuantity = async (
   if (editableIssue) return editableIssue;
 
   const kitchenSentQuantity = line.kitchenSentQuantity ?? 0;
+  const currentQuantity = line.quantity ?? 0;
+  if (payload.quantity < currentQuantity && kitchenSentQuantity > 0) {
+    return errorResult(
+      'LINE_ALREADY_SENT',
+      'A partially sent line cannot be decreased directly: void the line through voidOrderLines instead.',
+    );
+  }
   if (payload.quantity < kitchenSentQuantity) {
     return errorResult(
       'LINE_ALREADY_SENT',
@@ -2000,6 +2038,9 @@ export const executeAddStopListEntry = async (
     return errorResult('MENU_ITEM_NOT_FOUND', 'Menu item does not exist.');
   }
 
+  // Add and clear use the same idempotency namespace on the object, so a
+  // replayed add-key that was consumed by a clear is rejected instead of
+  // silently flipping the entry back to active.
   const replay = await findStopListEntryByIdempotencyKey(
     client,
     payload.idempotencyKey,
@@ -2008,9 +2049,11 @@ export const executeAddStopListEntry = async (
     if (replay.menuItemId !== payload.menuItemId || replay.createdByStaffId !== actor.staffId) {
       return idempotencyConflict('The idempotency key belongs to another stop-list context.');
     }
+    if (replay.isActive !== true && replay.clearedByStaffId === actor.staffId) {
+      return idempotencyConflict('The idempotency key was already consumed by a stop-list clear.');
+    }
     return okResult(200, { stopListEntryId: replay.id, isActive: replay.isActive === true });
   }
-
   const existing = await findStopListEntryByMenuItem(client, payload.menuItemId);
   if (existing) {
     if (existing.isActive === true) {
@@ -2033,6 +2076,12 @@ export const executeAddStopListEntry = async (
         id: true,
       },
     });
+    await createOperationalEvent(client, {
+      eventType: 'STOP_LIST_ENTRY_ADDED',
+      actorStaffId: actor.staffId,
+      details: { menuItemId: payload.menuItemId, stopListEntryId: existing.id },
+      idempotencyKey: `stoplist-add:${existing.id}:${payload.idempotencyKey}`,
+    });
     return okResult(200, { stopListEntryId: existing.id, isActive: true });
   }
 
@@ -2054,6 +2103,12 @@ export const executeAddStopListEntry = async (
     })) as { createPosStopListEntry?: StopListEntryRecord };
     const created = result.createPosStopListEntry;
     if (!created?.id) throw new Error('Stop-list entry was created but not readable.');
+    await createOperationalEvent(client, {
+      eventType: 'STOP_LIST_ENTRY_ADDED',
+      actorStaffId: actor.staffId,
+      details: { menuItemId: payload.menuItemId, stopListEntryId: created.id },
+      idempotencyKey: `stoplist-add:${created.id}:${payload.idempotencyKey}`,
+    });
     return okResult(201, { stopListEntryId: created.id, isActive: true });
   } catch {
     const raced = await findStopListEntryByMenuItem(client, payload.menuItemId);
@@ -2076,18 +2131,25 @@ export const executeClearStopListEntry = async (
     client,
     payload.idempotencyKey,
   );
-  if (replay) {
-    if (replay.menuItemId !== payload.menuItemId || replay.clearedByStaffId !== actor.staffId) {
+  const existing = await findStopListEntryByMenuItem(client, payload.menuItemId);
+  if (replay && existing && replay.id === existing.id && existing.isActive === true) {
+    if (replay.menuItemId !== payload.menuItemId) {
       return idempotencyConflict('The idempotency key belongs to another stop-list context.');
     }
-    return okResult(200, { stopListEntryId: replay.id, isActive: replay.isActive === true });
+    // Same-key clear of an active entry created under that key: this clear
+    // consumes and retires the key rather than replaying a no-op.
+  } else if (replay) {
+    if (replay.menuItemId !== payload.menuItemId) {
+      return idempotencyConflict('The idempotency key belongs to another stop-list context.');
+    }
+    if (replay.clearedByStaffId !== actor.staffId && replay.createdByStaffId !== actor.staffId) {
+      return idempotencyConflict('The idempotency key belongs to another stop-list context.');
+    }
+    return okResult(200, { stopListEntryId: replay.id, isActive: false });
   }
-
-  const existing = await findStopListEntryByMenuItem(client, payload.menuItemId);
   if (!existing || existing.isActive !== true) {
     return okResult(200, { stopListEntryId: existing?.id ?? null, isActive: false });
   }
-
   await client.mutation({
     updatePosStopListEntry: {
       __args: {
@@ -2101,6 +2163,12 @@ export const executeClearStopListEntry = async (
       },
       id: true,
     },
+  });
+  await createOperationalEvent(client, {
+    eventType: 'STOP_LIST_ENTRY_CLEARED',
+    actorStaffId: actor.staffId,
+    details: { menuItemId: payload.menuItemId, stopListEntryId: existing.id },
+    idempotencyKey: `stoplist-clear:${existing.id}:${payload.idempotencyKey}`,
   });
   return okResult(200, { stopListEntryId: existing.id, isActive: false });
 };
@@ -2446,13 +2514,44 @@ export const executeVoidOrderLines = async (
   }
   const order = await findOrderById(client, orderId);
   if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+  // A retry after a crash lands on VOIDED lines (and a CANCELLED order once
+  // the last line was voided): reconcile it before the editability gate
+  // instead of rejecting. Foreign voids stay rejected below.
+  const alreadyVoided = existingLines.filter((line) => line.status === 'VOIDED');
+  const toVoid = existingLines.filter((line) => line.status === 'ACTIVE');
+  for (const line of alreadyVoided) {
+    const sameReason = (line.voidReason ?? undefined) === (payload.reason ?? undefined) ||
+      (payload.reason === undefined && line.voidReason === 'REMOVED_BEFORE_KITCHEN');
+    if (!sameReason || line.voidedByStaffId !== actor.staffId || line.voidPreparedState !== payload.preparedState) {
+      return errorResult('VOID_LINE_INVALID', 'Only active lines can be voided.');
+    }
+  }
+  if (toVoid.length === 0 && alreadyVoided.length > 0) {
+    const totals = await updateLinesTotals(client, order);
+    const details = {
+      orderId,
+      lineIds: payload.lineIds,
+      preparedState: payload.preparedState,
+      ...(payload.reason ? { reason: payload.reason } : {}),
+      activeLineCount: totals.activeLineCount,
+    };
+    const event = await createOperationalEvent(client, {
+      eventType: 'VOID_ORDER_LINES',
+      actorStaffId: actor.staffId,
+      orderId,
+      details,
+      idempotencyKey: payload.idempotencyKey,
+    });
+    if (!event?.id) return errorResult('CONFLICT', 'Void operation audit could not be recorded.');
+    return okResult(200, { ...details, eventId: event.id, cancellationTicketId: null, replay: true });
+  }
   const editableIssue = assertOrderEditableForActor(order, actor);
   if (editableIssue) return editableIssue;
-  if (existingLines.some((line) => line.status !== 'ACTIVE')) {
+  if (existingLines.some((line) => line.status !== 'ACTIVE' && line.status !== 'VOIDED')) {
     return errorResult('VOID_LINE_INVALID', 'Only active lines can be voided.');
   }
 
-  for (const line of existingLines) {
+  for (const line of toVoid) {
     await client.mutation({
       updatePosOrderLine: {
         __args: {
@@ -2742,6 +2841,14 @@ export const executeCreatePrecheck = async (
   const order = await findOrderById(client, payload.orderId);
   if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
 
+  // Ownership (not editability) is checked before any replay branch (like
+  // printKitchenTicket): a locked PRECHECK_PRINTED order still replays its
+  // own precheck, but a waiter must not re-emit another waiter's precheck by
+  // guessing its idempotency key.
+  if (!orderCanBeEditedBy(order.ownerStaffId, actor)) {
+    return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
+  }
+
   const existingByIdempotency = await findPrecheckByIdempotencyKey(
     client,
     payload.idempotencyKey,
@@ -2860,6 +2967,21 @@ export const executeCancelPrecheck = async (
     return precheckResponse(replay, refreshed, 200);
   }
 
+  // A closed order must never be resurrected through cancel: the terminal
+  // state wins even if the active-key index still yields a row.
+  if (order.status === 'CLOSED' || order.status === 'CANCELLED') {
+    return {
+      status: 409,
+      body: { code: 'PRECHECK_NOT_ACTIVE', message: 'Order is already closed.' },
+    };
+  }
+  if (order.status !== 'PRECHECK_PRINTED') {
+    return {
+      status: 409,
+      body: { code: 'PRECHECK_NOT_ACTIVE', message: 'Order has no printed precheck to cancel.' },
+    };
+  }
+
   const active = await findActivePrecheckByOrderId(client, payload.orderId);
   if (!active) {
     return errorResult('PRECHECK_NOT_FOUND', 'No active precheck exists for this order.');
@@ -2867,10 +2989,10 @@ export const executeCancelPrecheck = async (
 
   const cancelledAt = new Date().toISOString();
   try {
-    await client.mutation({
-      updatePosPrecheck: {
+    const result = await client.mutation({
+      updatePosPrechecks: {
         __args: {
-          id: active.id,
+          filter: { id: { eq: active.id }, status: { eq: 'ACTIVE' } },
           data: {
             status: 'CANCELLED',
             activeOrderKey: null,
@@ -2889,6 +3011,22 @@ export const executeCancelPrecheck = async (
         printStatus: true,
       },
     });
+    if (mutationUpdatedRows(result, 'updatePosPrechecks') === 0) {
+      const raced = await findPrecheckByCancelIdempotencyKey(client, payload.idempotencyKey);
+      if (raced) {
+        await repairCancelledPrecheckOrder(client, order);
+        const refreshed = (await findOrderById(client, payload.orderId)) ?? order;
+        return precheckResponse(raced, refreshed, 200);
+      }
+      const loserActive = await findActivePrecheckByOrderId(client, payload.orderId);
+      if (!loserActive || loserActive.id !== active.id) {
+        return {
+          status: 409,
+          body: { code: 'PRECHECK_NOT_ACTIVE', message: 'Precheck was cancelled concurrently.' },
+        };
+      }
+      return errorResult('CONFLICT', 'Precheck could not be cancelled.');
+    }
   } catch {
     const raced = await findPrecheckByCancelIdempotencyKey(client, payload.idempotencyKey);
     if (!raced) return errorResult('CONFLICT', 'Precheck could not be cancelled.');
@@ -2896,10 +3034,14 @@ export const executeCancelPrecheck = async (
     const refreshed = (await findOrderById(client, payload.orderId)) ?? order;
     return precheckResponse(raced, refreshed, 200);
   }
-
+  // CAS the order back to IN_PROGRESS only from PRECHECK_PRINTED: a
+  // concurrent close to CLOSED must win over this cancel.
   await client.mutation({
-    updatePosOrder: {
-      __args: { id: order.id, data: { status: 'IN_PROGRESS' } },
+    updatePosOrders: {
+      __args: {
+        filter: { id: { eq: order.id }, status: { eq: 'PRECHECK_PRINTED' } },
+        data: { status: 'IN_PROGRESS' },
+      },
       id: true,
     },
   });
@@ -2914,6 +3056,39 @@ export const executeCancelPrecheck = async (
   };
   const editableOrder = (await findOrderById(client, payload.orderId)) ?? order;
   return precheckResponse(cancelled, editableOrder, 200);
+};
+
+const PRINT_JOB_STATUS_FIELDS: NodeSelection = { id: true, status: true };
+
+const precheckPrintGate = async (
+  client: CoreApiClientLike,
+  precheckId: string,
+  precheckPrintStatus: string | null | undefined,
+): Promise<{ aggregate: string | null; printed: boolean; failed: boolean }> => {
+  const jobs = await queryConnection<{ id: string; status?: string | null }>(
+    client,
+    'posPrintJobs',
+    { filter: { sourceType: { eq: 'PRECHECK' }, sourceId: { eq: precheckId } }, first: 100 },
+    PRINT_JOB_STATUS_FIELDS,
+  );
+  const statuses = jobs.map((job) => job.status ?? null);
+  const aggregate =
+    statuses.includes('OUTCOME_UNKNOWN')
+      ? 'OUTCOME_UNKNOWN'
+      : statuses.includes('FAILED')
+        ? 'FAILED'
+        : statuses.includes('DISPATCHING')
+          ? 'DISPATCHING'
+          : statuses.includes('QUEUED')
+            ? 'QUEUED'
+            : statuses.length > 0 && statuses.every((status) => status === 'CONFIRMED')
+              ? 'CONFIRMED'
+              : statuses.length > 0
+                ? 'SENT'
+                : (precheckPrintStatus ?? null);
+  const printed = aggregate === 'SENT' || aggregate === 'CONFIRMED';
+  const failed = aggregate === 'FAILED' || aggregate === 'OUTCOME_UNKNOWN';
+  return { aggregate, printed, failed };
 };
 
 const paymentTotals = (order: OrderRecord) => {
@@ -3016,6 +3191,7 @@ export const executeRecordPayment = async (
     amountMicros: number;
     tenderedAmountMicros?: number;
     idempotencyKey: string;
+    forceUnprintedPrecheck?: boolean;
   },
   actor: PosActor,
 ): Promise<CommandResult> => {
@@ -3075,6 +3251,38 @@ export const executeRecordPayment = async (
 
   if (order.status !== 'PRECHECK_PRINTED') {
     return errorResult('PAYMENT_ORDER_STATE', 'Payments require a printed precheck.');
+  }
+
+  // The order lock (PRECHECK_PRINTED) only proves a snapshot exists — it says
+  // nothing about the paper reaching the guest. Gate the FIRST payment on the
+  // spooler aggregate so a QUEUED/DISPATCHING precheck cannot be settled
+  // before it is SENT; FAILED/OUTCOME_UNKNOWN needs an explicit ADMIN
+  // override. Follow-up payments ride on the first payment's proof.
+  const orderHasPayment = normalizeCurrency(order.paidTotal).amountMicros > 0;
+  if (!orderHasPayment && !existing) {
+    const activePrecheck = await findActivePrecheckByOrderId(client, payload.orderId);
+    if (!activePrecheck) {
+      return errorResult('PRECHECK_NOT_FOUND', 'No active precheck exists for this order.');
+    }
+    const gate = await precheckPrintGate(client, activePrecheck.id, activePrecheck.printStatus);
+    if (!gate.printed) {
+      if (gate.failed && payload.forceUnprintedPrecheck === true && actor.role === 'ADMIN') {
+        // Explicit operator override: settle without a printed precheck.
+      } else if (gate.failed && payload.forceUnprintedPrecheck === true) {
+        return {
+          status: 403,
+          body: { code: 'COMMAND_FORBIDDEN', message: 'Only an ADMIN can settle without a printed precheck.' },
+        };
+      } else {
+        return {
+          status: 400,
+          body: {
+            code: 'PRECHECK_NOT_PRINTED',
+            message: `Precheck print status is ${gate.aggregate ?? 'UNKNOWN'}; payment requires SENT.`,
+          },
+        };
+      }
+    }
   }
 
   // Derive applied/change for creation: need current remaining.
@@ -3331,6 +3539,25 @@ export const executeCloseOrder = async (
     closeIdempotencyKey: payload.idempotencyKey,
     claimToken: null,
   };
+  // Closing is terminal for the precheck too: drop the active-order lock so
+  // no cancel/replay path can flip a CLOSED order back to IN_PROGRESS.
+  try {
+    const activePrecheck = await findActivePrecheckByOrderId(client, payload.orderId);
+    if (activePrecheck) {
+      await client.mutation({
+        updatePosPrechecks: {
+          __args: {
+            filter: { id: { eq: activePrecheck.id }, status: { eq: 'ACTIVE' } },
+            data: { activeOrderKey: null },
+          },
+          id: true,
+        },
+      });
+    }
+  } catch {
+    // The order close already won; a stale active key is harmless because
+    // cancelPrecheck refuses CLOSED orders up front.
+  }
   await ensureInventoryConsumptionRequest(client, order.id);
   return closeOrderResponse(closed, 201);
 };
@@ -3599,6 +3826,28 @@ export const executeAttachReservationToOrder = async (
   if (order.tableId !== reservation.tableId) return errorResult('RESERVATION_TABLE_MISMATCH', 'Reservation and order must use the same table.');
   if (reservation.orderId && reservation.orderId !== payload.orderId) return errorResult('CONFLICT', 'Reservation is already attached to another order.');
   if (order.ownerStaffId !== actor.staffId && actor.role !== 'ADMIN') return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
+  // Idempotency is checked before any mutation: a retry with the same key
+  // reconciles against the already-attached state instead of re-applying
+  // prepayments with fresh random keys.
+  const replay = await findOperationalEventByIdempotencyKey(client, payload.idempotencyKey);
+  if (replay) {
+    const details = parseEventDetails(replay);
+    return okResult(200, { ...details, eventId: replay.id, replay: true });
+  }
+  if (reservation.orderId === payload.orderId) {
+    const prepayments = await findPrepaymentsByReservation(client, reservation.id);
+    const alreadyApplied = prepayments.filter((row) => row.status === 'APPLIED' && row.orderId === payload.orderId).map((row) => row.id);
+    const refreshed = (await reconcileOrderPrepaidTotal(client, payload.orderId)) ?? order;
+    const details = { reservationId: reservation.id, orderId: payload.orderId, appliedPrepaymentIds: alreadyApplied, prepaidMicros: normalizeCurrency(refreshed.prepaidTotal).amountMicros, remainingMicros: paymentTotals(refreshed).remainingMicros };
+    await createOperationalEvent(client, {
+      eventType: 'RESERVATION_ATTACHED_TO_ORDER',
+      actorStaffId: actor.staffId,
+      orderId: payload.orderId,
+      details,
+      idempotencyKey: payload.idempotencyKey,
+    });
+    return okResult(200, { ...details, replay: true });
+  }
   try {
     await client.mutation({ updatePosReservation: { __args: { id: reservation.id, data: { orderId: payload.orderId } }, id: true } });
   } catch {
@@ -3613,9 +3862,17 @@ export const executeAttachReservationToOrder = async (
     applied.push(prepayment.id);
   }
   const refreshed = (await reconcileOrderPrepaidTotal(client, payload.orderId)) ?? order;
-  return okResult(200, { reservationId: reservation.id, orderId: payload.orderId, appliedPrepaymentIds: applied, prepaidMicros: normalizeCurrency(refreshed.prepaidTotal).amountMicros, remainingMicros: paymentTotals(refreshed).remainingMicros });
+  const details = { reservationId: reservation.id, orderId: payload.orderId, appliedPrepaymentIds: applied, prepaidMicros: normalizeCurrency(refreshed.prepaidTotal).amountMicros, remainingMicros: paymentTotals(refreshed).remainingMicros };
+  const event = await createOperationalEvent(client, {
+    eventType: 'RESERVATION_ATTACHED_TO_ORDER',
+    actorStaffId: actor.staffId,
+    orderId: payload.orderId,
+    details,
+    idempotencyKey: payload.idempotencyKey,
+  });
+  if (!event?.id) return errorResult('CONFLICT', 'Reservation attach audit could not be recorded.');
+  return okResult(200, { ...details, eventId: event.id });
 };
-
 export const dispatchPosCommand = async (
   client: CoreApiClientLike,
   command: PosCommand,
@@ -3744,6 +4001,9 @@ export const dispatchPosCommand = async (
             ? { tenderedAmountMicros: payload.tenderedAmountMicros as number }
             : {}),
           idempotencyKey: payload.idempotencyKey as string,
+          ...(typeof payload.forceUnprintedPrecheck === 'boolean'
+            ? { forceUnprintedPrecheck: payload.forceUnprintedPrecheck }
+            : {}),
         },
         actor,
       );
@@ -3846,6 +4106,7 @@ export const dispatchPosCommand = async (
       return executeRetryPrintJob(client, {
         printJobId: payload.printJobId as string,
         idempotencyKey: payload.idempotencyKey as string,
+        ...(typeof payload.confirmedPrinterName === 'string' ? { confirmedPrinterName: payload.confirmedPrinterName } : {}),
       }, actor.staffId);
     case 'testPrinterDevice':
       return executeTestPrinterDevice(client, {

@@ -13,6 +13,13 @@ export const baseUnitForKind = (kind: UnitKind): BaseUnit => {
 export const isValidQuantityMicros = (value: unknown): boolean =>
   typeof value === 'number' && Number.isSafeInteger(value);
 
+export const assertSafeMicros = (value: unknown, field = 'quantityMicros'): number => {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    throw new Error(`${field} must be a safe integer.`);
+  }
+  return value;
+};
+
 export const gramsToMicros = (grams: number): number => Math.round(grams * MICROS_PER_UNIT);
 export const kgToMicros = (kg: number): number => Math.round(kg * 1000 * MICROS_PER_UNIT);
 export const mlToMicros = (ml: number): number => Math.round(ml * MICROS_PER_UNIT);
@@ -40,12 +47,14 @@ export const microsToDisplay = (micros: number, unitKind: UnitKind): string => {
 // deterministic divide round half up for MWA (both positive)
 export const divideRoundHalfUp = (numerator: number, denominator: number): number => {
   if (denominator === 0) throw new Error('Division by zero');
+  assertSafeMicros(numerator, 'numerator');
+  assertSafeMicros(denominator, 'denominator');
   // both expected non-negative for costing; handle negative by sign
   const sign = numerator * denominator < 0 ? -1 : 1;
   const absNum = Math.abs(numerator);
   const absDen = Math.abs(denominator);
   const result = Math.floor((absNum + absDen / 2) / absDen);
-  return sign * result;
+  return sign * assertSafeMicros(result, 'quotient');
 };
 
 // scaled quantity: lineQty * requestedYield / recipeYield
@@ -55,7 +64,12 @@ export const scaledQuantityMicros = (
   recipeYieldMicros: number,
 ): number => {
   if (recipeYieldMicros <= 0) throw new Error('Invalid recipe yield');
+  assertSafeMicros(lineQtyMicros, 'lineQtyMicros');
+  assertSafeMicros(requestedYieldMicros, 'requestedYieldMicros');
+  assertSafeMicros(recipeYieldMicros, 'recipeYieldMicros');
+  const product = lineQtyMicros * requestedYieldMicros;
+  if (!Number.isSafeInteger(product)) throw new Error('scaledQuantityMicros overflow: product exceeds safe integer range.');
   // deterministic integer: (line * requested) / yield
   // use divideRoundHalfUp
-  return divideRoundHalfUp(lineQtyMicros * requestedYieldMicros, recipeYieldMicros);
+  return divideRoundHalfUp(product, recipeYieldMicros);
 };

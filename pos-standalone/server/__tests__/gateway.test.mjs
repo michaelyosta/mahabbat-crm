@@ -19,12 +19,24 @@ const json = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(text);
 };
-
 const readBody = async (req) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const text = Buffer.concat(chunks).toString('utf8');
   return text ? JSON.parse(text) : {};
+};
+
+const canonicalForTest = (value) => {
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalForTest(item)).join(',')}]`;
+  if (typeof value === 'object') {
+    const record = value;
+    const keys = Object.keys(record).filter((key) => record[key] !== undefined).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalForTest(record[key])}`).join(',')}}`;
+  }
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number') return Number.isFinite(value) ? JSON.stringify(value) : 'null';
+  return JSON.stringify(value) ?? 'null';
 };
 
 const listen = async (server) => {
@@ -74,9 +86,9 @@ before(async () => {
       const body = req.method === 'POST' ? await readBody(req) : null;
 
       if (req.url.startsWith('/webhooks/server/')) {
-        const expected = createHmac('sha256', INTERNAL_SECRET)
-          .update(JSON.stringify(body), 'utf8')
-          .digest('hex');
+        const expected = `v1=${createHmac('sha256', INTERNAL_SECRET)
+          .update(canonicalForTest(body), 'utf8')
+          .digest('hex')}`;
         assert.equal(req.headers['x-mahabbat-signature'], expected);
         state.resolverCalls.push(body);
 

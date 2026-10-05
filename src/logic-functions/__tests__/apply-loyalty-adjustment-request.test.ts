@@ -220,6 +220,18 @@ describe('processLoyaltyAdjustmentRequest', () => {
       expect([...client.ledger.values()][0].sourceRequestId).toBe(REQUEST_ID);
     });
 
+    it('creates two adjustments with an identical reason without collision', async () => {
+      const client = new FakeCoreClient();
+      const secondId = 'e1f7a2b1-0000-4000-8000-000000000009';
+      const secondKey = 'd4f7a2b1-0000-4000-8000-000000000009';
+      client.requests.set(REQUEST_ID, pendingRequest());
+      client.requests.set(secondId, pendingRequest({ id: secondId, idempotencyKey: secondKey }));
+
+      await processLoyaltyAdjustmentRequest(client as unknown as CoreApiClientLike, REQUEST_ID);
+      await processLoyaltyAdjustmentRequest(client as unknown as CoreApiClientLike, secondId);
+
+      expect(client.ledger.size).toBe(2);
+    });
     it('reconciles a PENDING snapshot instead of creating a second entry after a crash', async () => {
       const client = new FakeCoreClient();
       const appliedLedger: LedgerRecord = {

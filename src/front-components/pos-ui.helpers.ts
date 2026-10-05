@@ -219,8 +219,14 @@ const POS_ERROR_MESSAGES: Record<string, string> = {
   STOP_LISTED: 'Блюдо находится в стоп-листе',
   LINE_NOT_FOUND: 'Позиция заказа не найдена',
   LINE_NOT_EDITABLE: 'Эту позицию уже нельзя изменить',
-  LINE_ALREADY_SENT: 'Отправленную позицию нельзя изменить обычным действием',
+  LINE_ALREADY_SENT: 'Отправленную позицию нельзя изменить обычным действием — попросите администратора отменить её через «Отмену блюда»',
   STOP_LIST_NOT_FOUND: 'Позиция уже снята со стоп-листа',
+  KITCHEN_TICKET_NOT_FOUND: 'Кухонный тикет не найден. Отправьте блюда на кухню заново',
+  PRINT_JOB_NOT_FOUND: 'Задание печати не найдено. Отправьте печать заново',
+  PRINTER_DEVICE_NOT_FOUND: 'Принтер не найден. Проверьте настройку печати',
+  PRODUCTION_STATION_NOT_FOUND: 'Место печати не найдено. Проверьте маршруты печати',
+  PRINT_CONFIG_INVALID: 'Настройка печати некорректна. Проверьте устройство и ширину бумаги',
+  UNKNOWN_REPRINT_NOT_CONFIRMED: 'Сначала проверьте бумагу в принтере и подтвердите повтор вводом его названия',
   PRECHECK_NOT_FOUND: 'Активный пречек не найден',
   PRECHECK_NOT_ACTIVE: 'Пречек уже отменён',
   PAYMENT_METHOD_NOT_FOUND: 'Способ оплаты не найден',
@@ -239,10 +245,18 @@ const POS_ERROR_MESSAGES: Record<string, string> = {
   PREPAYMENT_EXCEEDS_ORDER: 'Предоплата больше суммы заказа',
   STAFF_NOT_FOUND: 'Сотрудник не найден',
   STAFF_INACTIVE: 'Сотрудник отключён',
+  POS_STAFF_LOCKED: 'Смена заблокирована: слишком много неверных попыток входа. Подождите и попробуйте снова',
+  POS_STAFF_INACTIVE: 'Сотрудник отключён администратором. Обратитесь к администратору',
+  POS_SESSION_EXPIRED: 'Сессия завершена. Войдите по PIN снова',
+  POS_SESSION_INVALID: 'Сессия недействительна. Войдите по PIN снова',
+  POS_SESSION_REQUIRED: 'Войдите по PIN, чтобы продолжить',
+  POS_LOGIN_RATE_LIMITED: 'Слишком много попыток входа. Подождите и попробуйте снова',
   GUEST_TRANSFER_INVALID: 'Позиции можно перенести только между гостями одного заказа',
   VOID_LINE_INVALID: 'Выбранную позицию нельзя отменить',
   IDEMPOTENCY_CONFLICT: 'Повторный запрос не совпал с исходной операцией',
   CONFLICT: 'Данные уже изменились на другом терминале. Обновите экран',
+  PRECHECK_NOT_PRINTED: 'Пречек ещё не напечатан. Дождитесь печати',
+  INVALID_SIGNATURE: 'Нет связи с сервером. Проверьте сеть и попробуйте снова',
 };
 
 export const uuid = (): string => {
@@ -274,10 +288,15 @@ export const micros = (
 
 export const money = (
   value: Currency | number | string | null | undefined,
-): string =>
-  `${new Intl.NumberFormat('ru-KZ', { maximumFractionDigits: 0 }).format(
-    Math.round(micros(value) / 1_000_000),
-  )} ₸`;
+): string => {
+  const total = micros(value);
+  const whole = Math.trunc(total / 1_000_000);
+  const tiyin = Math.abs(total % 1_000_000);
+  const head = new Intl.NumberFormat('ru-KZ', { maximumFractionDigits: 0 }).format(whole);
+  if (!tiyin) return `${head} ₸`;
+  const cents = String(Math.round(tiyin / 10_000)).padStart(2, '0');
+  return `${head},${cents} ₸`;
+};
 
 export const summarizePosDayPayments = ({
   payments,

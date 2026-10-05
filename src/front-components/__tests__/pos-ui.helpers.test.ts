@@ -101,6 +101,30 @@ describe('POS UI presentation helpers', () => {
     );
   });
 
+  it('maps LOCKED/INACTIVE/print/prepayment codes to honest Russian copy', () => {
+    expect(commandError({ body: { code: 'POS_STAFF_LOCKED' } })).toBe(
+      'Смена заблокирована: слишком много неверных попыток входа. Подождите и попробуйте снова',
+    );
+    expect(commandError({ body: { code: 'POS_STAFF_INACTIVE' } })).toBe(
+      'Сотрудник отключён администратором. Обратитесь к администратору',
+    );
+    expect(commandError({ body: { code: 'POS_SESSION_EXPIRED' } })).toBe(
+      'Сессия завершена. Войдите по PIN снова',
+    );
+    expect(commandError({ body: { code: 'KITCHEN_TICKET_NOT_FOUND' } })).toBe(
+      'Кухонный тикет не найден. Отправьте блюда на кухню заново',
+    );
+    expect(commandError({ body: { code: 'PRINT_JOB_NOT_FOUND' } })).toBe(
+      'Задание печати не найдено. Отправьте печать заново',
+    );
+    expect(commandError({ body: { code: 'PREPAYMENT_EXCEEDS_ORDER' } })).toBe(
+      'Предоплата больше суммы заказа',
+    );
+    expect(commandError({ body: { code: 'UNKNOWN_REPRINT_NOT_CONFIRMED' } })).toBe(
+      'Сначала проверьте бумагу в принтере и подтвердите повтор вводом его названия',
+    );
+  });
+
   it('summarizes only successful visible-order payments for the local day', () => {
     const now = new Date(2026, 7, 26, 12).getTime();
     const today = new Date(2026, 7, 26, 9).toISOString();

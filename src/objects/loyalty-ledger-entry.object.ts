@@ -31,6 +31,9 @@ export const LOYALTY_SOURCE_FIELD_UNIVERSAL_IDENTIFIER =
   'dd5c39dc-0325-440a-9009-919676b58463';
 export const LOYALTY_UNIQUE_CUSTOMER_OCCURRED_AT_REASON_INDEX_UNIVERSAL_IDENTIFIER =
   'cc2619e1-6990-415e-9f2c-ef18fae65049';
+// Removed in P1: the composite unique (customer, occurredAt, reason) rejected
+// two legitimate adjustments made in the same millisecond with the same
+// reason. Exactly-once is owned by sourceRequestId + idempotencyKey.
 export const LOYALTY_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER =
   '28493870-e6f8-47c0-ab9c-57061e3912e6';
 export const LOYALTY_UNIQUE_IDEMPOTENCY_KEY_INDEX_UNIVERSAL_IDENTIFIER =

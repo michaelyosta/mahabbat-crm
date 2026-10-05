@@ -20,6 +20,8 @@ export const POS_PRINT_JOB_PAYLOAD_SNAPSHOT_FIELD_UNIVERSAL_IDENTIFIER =
   'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c3b';
 export const POS_PRINT_JOB_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER =
   'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c3c';
+export const POS_PRINT_JOB_TRANSPORT_ATTEMPTS_FIELD_UNIVERSAL_IDENTIFIER =
+  'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c4c';
 export const POS_PRINT_JOB_ATTEMPT_COUNT_FIELD_UNIVERSAL_IDENTIFIER =
   'c3f2e6fa-7b94-4d15-bc83-4f9a0e2d6c3d';
 export const POS_PRINT_JOB_LAST_ATTEMPT_AT_FIELD_UNIVERSAL_IDENTIFIER =
@@ -132,7 +134,7 @@ export default defineObject({
     { universalIdentifier: POS_PRINT_JOB_PAYLOAD_SNAPSHOT_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.TEXT, name: 'payloadSnapshot', label: 'Snapshot документа', description: 'Immutable JSON для повторяемого рендера исторического документа', icon: 'IconDatabase', isNullable: false, defaultValue: "''", isUIEditable: false, universalSettings: { displayedMaxRows: 8 } },
     { universalIdentifier: POS_PRINT_JOB_IDEMPOTENCY_KEY_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.TEXT, name: 'idempotencyKey', label: 'Ключ задания', description: 'Детерминированный ключ обычной доставки', icon: 'IconRepeat', isNullable: false, defaultValue: "''", isUIEditable: false },
     { universalIdentifier: POS_PRINT_JOB_ATTEMPT_COUNT_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.NUMBER, name: 'attemptCount', label: 'Попытки', description: 'Число начатых dispatch попыток', icon: 'IconRepeat', isNullable: false, defaultValue: 0, isUIEditable: false, universalSettings: { dataType: NumberDataType.INT } },
-    { universalIdentifier: POS_PRINT_JOB_LAST_ATTEMPT_AT_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.DATE_TIME, name: 'lastAttemptAt', label: 'Последняя попытка', description: 'Время последней dispatch попытки', icon: 'IconClock', isNullable: true, defaultValue: null, isUIEditable: false },
+    { universalIdentifier: POS_PRINT_JOB_TRANSPORT_ATTEMPTS_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.NUMBER, name: 'transportAttempts', label: 'Транспортные попытки', description: 'Число физических отправок bytes на принтер; отдельно от claim-попыток', icon: 'IconSend', isNullable: false, defaultValue: 0, isUIEditable: false, universalSettings: { dataType: NumberDataType.INT } },
     { universalIdentifier: POS_PRINT_JOB_LAST_ERROR_CODE_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.TEXT, name: 'lastErrorCode', label: 'Код ошибки', description: 'Безопасный код ошибки доставки', icon: 'IconAlertTriangle', isNullable: true, defaultValue: null, isUIEditable: false },
     { universalIdentifier: POS_PRINT_JOB_LAST_ERROR_MESSAGE_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.TEXT, name: 'lastErrorMessage', label: 'Ошибка', description: 'Операционное сообщение без секретов', icon: 'IconAlertCircle', isNullable: true, defaultValue: null, isUIEditable: false },
     { universalIdentifier: POS_PRINT_JOB_SENT_AT_FIELD_UNIVERSAL_IDENTIFIER, type: FieldType.DATE_TIME, name: 'sentAt', label: 'Отправлено', description: 'Время, когда gateway завершил передачу bytes', icon: 'IconSend', isNullable: true, defaultValue: null, isUIEditable: false },

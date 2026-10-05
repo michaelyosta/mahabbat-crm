@@ -56,10 +56,20 @@ export const createTwentyPosApi = (
       setSession(null);
     },
     list: async (collection) => {
-      const payload = await rest.get(`/rest/${collection}`, {
-        query: { limit: 200 },
-      });
-      return listRows<PosRow>(payload as unknown as Record<string, unknown>, collection);
+      const PAGE_LIMIT = 200;
+      const MAX_PAGES = 25;
+      const rows: PosRow[] = [];
+      let offset: number | undefined;
+      for (let page = 0; page < MAX_PAGES; page += 1) {
+        const payload = await rest.get(`/rest/${collection}`, {
+          query: { limit: PAGE_LIMIT, ...(offset !== undefined ? { offset } : {}) },
+        });
+        const chunk = listRows<PosRow>(payload as unknown as Record<string, unknown>, collection);
+        rows.push(...chunk);
+        if (chunk.length < PAGE_LIMIT) return rows;
+        offset = (offset ?? 0) + PAGE_LIMIT;
+      }
+      throw new Error(`Слишком много записей в ${collection}: показаны первые ${rows.length}.`);
     },
     command: async (name, payload) => {
       const session = getSession();

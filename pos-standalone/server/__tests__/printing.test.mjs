@@ -79,10 +79,24 @@ test('precheck renderer is explicitly non-fiscal and contains guest totals', () 
   assert.match(text, /125/);
 });
 
-test('transport classification is fail-closed around partial writes', () => {
-  assert.deepEqual(classifyTransportError({ phase: 'connect', bytesSent: 0 }), { outcome: 'FAILED', code: 'CONNECTION_FAILED_BEFORE_SEND', retryable: true });
-  assert.deepEqual(classifyTransportError({ phase: 'write', bytesSent: 0 }), { outcome: 'FAILED', code: 'CONNECTION_FAILED_BEFORE_SEND', retryable: true });
-  assert.deepEqual(classifyTransportError({ phase: 'write', bytesSent: 4 }), { outcome: 'OUTCOME_UNKNOWN', code: 'CONNECTION_DROPPED_AFTER_WRITE', retryable: false });
+test('spooler classification never leaves a job without outcome or retry flag', async () => {
+  const { classifySpoolerError, WindowsSpoolerPrinterTransport } = await import('../windows-printer-provider.mjs');
+  assert.deepEqual(classifySpoolerError(Object.assign(new Error('boom'), { code: 'WINDOWS_SPOOLER_ERROR' })), { outcome: 'FAILED', code: 'WINDOWS_SPOOLER_ERROR', retryable: true });
+  assert.deepEqual(classifySpoolerError(Object.assign(new Error('Windows printer provider timed out'), { code: 'WINDOWS_SPOOLER_TIMEOUT' })), { outcome: 'OUTCOME_UNKNOWN', code: 'WINDOWS_SPOOLER_TIMEOUT', retryable: false });
+  assert.deepEqual(classifySpoolerError(Object.assign(new Error('WritePrinter failed: 5'), { code: 'WINDOWS_SPOOLER_ERROR' })), { outcome: 'OUTCOME_UNKNOWN', code: 'WINDOWS_SPOOLER_PARTIAL_WRITE', retryable: false });
+  const transport = new WindowsSpoolerPrinterTransport();
+  await assert.rejects(
+    transport.send(Buffer.from('ticket'), {}, { run: async () => '[]' }),
+    (error) => error.outcome === 'FAILED' && error.retryable === false && error.code === 'SYSTEM_PRINTER_NOT_BOUND',
+  );
+  await assert.rejects(
+    transport.send(Buffer.from('ticket'), { systemQueueName: 'Kitchen' }, { run: async ({ script }) => (script.includes('Get-Printer') ? JSON.stringify([{ Name: 'Kitchen', PrinterStatus: 'Normal' }]) : (() => { throw Object.assign(new Error('pipe broken'), { code: 'WINDOWS_SPOOLER_ERROR' }); })()) }),
+    (error) => error.outcome === 'FAILED' && error.retryable === true,
+  );
+  await assert.rejects(
+    transport.send(Buffer.from('ticket'), { systemQueueName: 'Kitchen' }, { run: async ({ script }) => (script.includes('Get-Printer') ? JSON.stringify([{ Name: 'Kitchen', PrinterStatus: 'Normal' }]) : (() => { throw Object.assign(new Error('WritePrinter wrote 3 of 6 bytes'), { code: 'WINDOWS_SPOOLER_ERROR' }); })()) }),
+    (error) => error.outcome === 'OUTCOME_UNKNOWN' && error.retryable === false,
+  );
 });
 
 test('raw TCP transport completes a simulator write as SENT', async () => {
@@ -118,5 +132,22 @@ test('printer simulator leaves a timeout connection open until the client decide
     await assert.rejects(sendTo(address, Buffer.from('timeout'), 50), /timeout/);
   } finally {
     await simulator.stop();
+  }
+});
+test('ESC/POS renderer covers the 58/80 x CP866/1251/UTF8 matrix', () => {
+  const snapshot = {
+    tableNumber: 'T1', waiterName: 'Айгерим', orderId: 'order-1',
+    createdAt: '2026-09-13T00:00:00.000Z',
+    stationSections: [{ stationName: 'Кухня', lines: [{ quantity: 1, itemNameSnapshot: 'Бешбармак', action: 'ADD' }] }],
+  };
+  const widths = { 58: 32, 80: 48 };
+  for (const paperWidth of ['58', '80']) {
+    for (const encodingProfile of ['CP866', 'WINDOWS1251', 'UTF8']) {
+      const bytes = renderKitchen(snapshot, { paperWidth, encodingProfile, cutSupport: false });
+      assert.ok(bytes.includes(0x1b), `${paperWidth}/${encodingProfile} must emit ESC`);
+      assert.ok(bytes.includes(0x1d) === false, `${paperWidth}/${encodingProfile} keeps cut disabled`);
+      const lines = bytes.toString(encodingProfile === 'UTF8' ? 'utf8' : 'latin1').split('\n');
+      assert.ok(lines.every((line) => Buffer.byteLength(line, encodingProfile === 'UTF8' ? 'utf8' : 'latin1') <= widths[paperWidth] + 24), `${paperWidth}/${encodingProfile} stays within paper width`);
+    }
   }
 });

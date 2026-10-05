@@ -46,6 +46,7 @@ export type PrintJobRecord = ExistingRecord & {
   payloadSnapshot?: string | null;
   idempotencyKey?: string | null;
   attemptCount?: number | null;
+  transportAttempts?: number | null;
   lastAttemptAt?: string | null;
   lastErrorCode?: string | null;
   lastErrorMessage?: string | null;
@@ -135,6 +136,7 @@ export const PRINT_JOB_FIELDS: NodeSelection = {
   payloadSnapshot: true,
   idempotencyKey: true,
   attemptCount: true,
+  transportAttempts: true,
   lastAttemptAt: true,
   lastErrorCode: true,
   lastErrorMessage: true,
@@ -242,7 +244,9 @@ export const aggregatePrintStatus = (jobs: PrintJobRecord[]): string | null => {
   if (statuses.has('FAILED')) return 'FAILED';
   if (statuses.has('DISPATCHING')) return 'DISPATCHING';
   if (statuses.has('QUEUED')) return 'QUEUED';
-  if ([...statuses].every((status) => status === 'CONFIRMED')) return 'CONFIRMED';
+  // CONFIRMED is unreachable: the spooler transport never returns a reliable
+  // ACK, so legacy CONFIRMED rows count as delivered alongside SENT.
+  if ([...statuses].every((status) => status === 'SENT' || status === 'CONFIRMED')) return 'SENT';
   return 'SENT';
 };
 
@@ -390,6 +394,9 @@ export const enqueueKitchenPrintJobs = async (
     snapshot?: Pick<KitchenContext, 'tableNumber' | 'waiterName' | 'createdAt'>;
   },
 ): Promise<PrintJobRecord[]> => {
+  // Whole-ticket grouping: every printer group (kitchen + bar) shares one
+  // createdAt so the claim queue orders ticket groups, not fragments. The
+  // gateway then claims oldest groups first, CANCELLATION first.
   const createdAt = input.snapshot?.createdAt ?? new Date().toISOString();
   const context = input.snapshot
     ? { orderId: input.orderId, ...input.snapshot }
@@ -438,6 +445,7 @@ export const enqueueKitchenPrintJobs = async (
       status: group.routeErrorCode ? 'FAILED' : 'QUEUED',
       payloadSnapshot: serializeSnapshot({ ...payload, routeErrorCode: group.routeErrorCode ?? null, routeErrorMessage: group.routeErrorMessage ?? null }),
       attemptCount: 0,
+      transportAttempts: 0,
       lastErrorCode: group.routeErrorCode ?? null,
       lastErrorMessage: group.routeErrorMessage ?? null,
       createdAt,
@@ -497,6 +505,7 @@ export const enqueuePrecheckPrintJob = async (
     status: missing ? 'FAILED' : 'QUEUED',
     payloadSnapshot: serializeSnapshot({ version: 1, ...snapshot, documentType: 'PRECHECK', isReprint: Boolean(options?.reprintOfJobId), printerSnapshot: printerDestinationSnapshot(printer), routeErrorCode: missing ? 'PRECHECK_PRINTER_NOT_CONFIGURED' : null, routeErrorMessage: missing ? 'Не выбран принтер пречеков.' : null }),
     attemptCount: 0,
+    transportAttempts: 0,
     lastErrorCode: missing ? 'PRECHECK_PRINTER_NOT_CONFIGURED' : null,
     lastErrorMessage: missing ? 'Не выбран принтер пречеков.' : null,
     createdAt: snapshot.createdAt,
@@ -541,6 +550,7 @@ export const enqueueTestPrintJob = async (
       createdAt,
     }),
     attemptCount: 0,
+    transportAttempts: 0,
     lastErrorCode: null,
     lastErrorMessage: null,
     createdAt,
@@ -551,11 +561,27 @@ export const enqueueTestPrintJob = async (
 
 export const executeRetryPrintJob = async (
   client: CoreApiClientLike,
-  payload: { printJobId: string; idempotencyKey: string },
+  payload: { printJobId: string; idempotencyKey: string; confirmedPrinterName?: string },
   actorStaffId: string,
 ): Promise<{ status: number; body: unknown }> => {
   const source = await findPrintJob(client, payload.printJobId);
   if (!source) return { status: 400, body: { code: 'PRINT_JOB_NOT_FOUND', message: 'Задание печати не найдено.' } };
+  // Blind reprint of an UNKNOWN job would duplicate paper: require an explicit
+  // confirmation carrying the printer name the administrator physically
+  // checked. FAILED/QUEUED/SENT jobs keep the old path.
+  if (source.status === 'OUTCOME_UNKNOWN') {
+    const printerName = typeof payload.confirmedPrinterName === 'string' ? payload.confirmedPrinterName.trim() : '';
+    if (!printerName) {
+      return { status: 409, body: { code: 'UNKNOWN_REPRINT_NOT_CONFIRMED', message: 'Проверьте принтер и подтвердите повтор, указав название принтера.' } };
+    }
+    if (source.printerDeviceId) {
+      const printer = await findPrinter(client, source.printerDeviceId);
+      const expectedLabel = String(printer?.label ?? printer?.systemQueueName ?? '').trim();
+      if (expectedLabel && printerName !== expectedLabel) {
+        return { status: 409, body: { code: 'UNKNOWN_REPRINT_PRINTER_MISMATCH', message: `Название принтера не совпадает: ожидается «${expectedLabel}».` } };
+      }
+    }
+  }
   const newKey = `REPRINT:${source.id}:${payload.idempotencyKey}`;
   const existing = await findPrintJobByKey(client, newKey);
   if (existing) return { status: 200, body: { printJobId: existing.id, status: existing.status, reprint: true, replay: true } };
@@ -654,22 +680,44 @@ export const staleDispatchingJobs = async (
   const jobs = await findPrintJobsForGateway(client, 'DISPATCHING');
   return jobs.filter((job) => {
     const claimed = job.claimedAt ? Date.parse(job.claimedAt) : Number.NaN;
-    return !Number.isFinite(claimed) || now - claimed >= leaseMs;
+    const heartbeat = job.lastAttemptAt ? Date.parse(job.lastAttemptAt) : Number.NaN;
+    const freshest = Math.max(Number.isFinite(claimed) ? claimed : Number.NaN, Number.isFinite(heartbeat) ? heartbeat : Number.NaN);
+    return !Number.isFinite(freshest) || now - freshest >= leaseMs;
   });
 };
 
+// Crash recovery split. A live gateway renews lastAttemptAt as a heartbeat
+// while it owns the DISPATCHING lease:
+// - never sent (lastErrorCode GATEWAY_CRASH_BEFORE_SEND or a stale lease with
+//   no send attempt) → back to QUEUED with attemptCount+1 for a clean retry;
+// - bytes may have left the process → OUTCOME_UNKNOWN, never silently
+//   reprinted; an administrator creates an explicit reprint after checking
+//   the printer. Jobs already marked by the new path are left untouched.
 export const markGatewayRestartUnknown = async (
   client: CoreApiClientLike,
   leaseMs: number,
+  now = Date.now(),
 ): Promise<PrintJobRecord[]> => {
-  const stale = await staleDispatchingJobs(client, leaseMs);
+  const stale = await staleDispatchingJobs(client, leaseMs, now);
   const updated: PrintJobRecord[] = [];
   for (const job of stale) {
-    const next = await updatePrintJob(client, job.id, {
-      status: 'OUTCOME_UNKNOWN',
-      lastErrorCode: 'GATEWAY_RESTART_DURING_DISPATCH',
-      lastErrorMessage: 'Gateway был перезапущен во время отправки; бумага могла выйти.',
-    });
+    const crashBeforeSend = job.lastErrorCode === 'GATEWAY_CRASH_BEFORE_SEND' || job.sentAt == null && job.lastErrorCode == null;
+    const patch = crashBeforeSend
+      ? {
+        status: 'QUEUED',
+        claimToken: null,
+        claimedAt: null,
+        gatewayId: null,
+        attemptCount: (job.attemptCount ?? 0) + 1,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+      }
+      : {
+        status: 'OUTCOME_UNKNOWN',
+        lastErrorCode: 'GATEWAY_RESTART_DURING_DISPATCH',
+        lastErrorMessage: 'Gateway был перезапущен во время отправки; бумага могла выйти.',
+      };
+    const next = await updatePrintJob(client, job.id, patch);
     if (next) {
       updated.push(next);
       if ((next.sourceType === 'KITCHEN_TICKET' || next.sourceType === 'PRECHECK') && next.sourceId) {
@@ -680,4 +728,13 @@ export const markGatewayRestartUnknown = async (
   return updated;
 };
 
+// Reconcile-before-UNKNOWN: an idempotent status probe the gateway calls
+// before marking a job UNKNOWN. Reporting the live status lets a job that in
+// fact completed (or safely requeueable) avoid a blind UNKNOWN marking, and
+// blocks a blind reprint of UNKNOWN jobs without a printer-name confirmation.
+export const reconcileDispatchingJobs = async (
+  client: CoreApiClientLike,
+  leaseMs: number,
+  now = Date.now(),
+): Promise<PrintJobRecord[]> => markGatewayRestartUnknown(client, leaseMs, now);
 export const _internal = { findPrinter, findStation, findPrintJob, findPrintJobByKey, queryConnection };

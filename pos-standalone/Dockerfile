@@ -1,6 +1,6 @@
 # Mahabbat POS standalone gateway + web
 # Build stage: compile standalone web (Vite) against src/pos-ui source
-FROM node:24-alpine AS web-build
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS web-build
 WORKDIR /app
 
 COPY src ./mahabbat-app/src
@@ -14,7 +14,7 @@ RUN npm ci
 RUN npm run build
 
 # Runtime stage: Node gateway serving /api + static (no extra npm install)
-FROM node:24-alpine AS runtime
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS runtime
 WORKDIR /app
 COPY --from=web-build /app/mahabbat-app/pos-standalone/dist-web ./dist-web
 COPY pos-standalone/server ./server

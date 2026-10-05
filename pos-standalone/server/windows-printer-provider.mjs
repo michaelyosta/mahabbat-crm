@@ -68,6 +68,40 @@ try {
 Write-Output '{"status":"SENT"}'
 `;
 
+const SPOOLER_PARTIAL_WRITE_PATTERNS = [/writeprinter/i, /wrote \d+ of \d+ bytes/i];
+const SPOOLER_NOT_FOUND_PATTERNS = [/does not contain the selected printer queue/i, /printer queue name is empty/i];
+
+// Fail-closed classification: every spooler failure carries an explicit outcome
+// plus a retry flag so a job can never stay in DISPATCHING with an undefined
+// outcome. Errors before any byte may have left the process are FAILED and
+// retryable; timeouts and partial writes are OUTCOME_UNKNOWN and never retried.
+export const classifySpoolerError = (error) => {
+  const code = String(error?.code ?? '');
+  const message = String(error?.message ?? '');
+  if (code === 'WINDOWS_SPOOLER_TIMEOUT' || /timed out/i.test(message)) {
+    return { outcome: 'OUTCOME_UNKNOWN', code: 'WINDOWS_SPOOLER_TIMEOUT', retryable: false };
+  }
+  if (SPOOLER_PARTIAL_WRITE_PATTERNS.some((pattern) => pattern.test(message))) {
+    return { outcome: 'OUTCOME_UNKNOWN', code: 'WINDOWS_SPOOLER_PARTIAL_WRITE', retryable: false };
+  }
+  if (code === 'WINDOWS_PRINTER_NOT_FOUND' || code === 'SYSTEM_PRINTER_NOT_BOUND' || SPOOLER_NOT_FOUND_PATTERNS.some((pattern) => pattern.test(message))) {
+    return { outcome: 'FAILED', code: code || 'WINDOWS_PRINTER_NOT_FOUND', retryable: false };
+  }
+  if (code === 'WINDOWS_SPOOLER_UNAVAILABLE') {
+    return { outcome: 'FAILED', code, retryable: false };
+  }
+  return { outcome: 'FAILED', code: code || 'WINDOWS_SPOOLER_ERROR', retryable: true };
+};
+
+const withSpoolerOutcome = (error) => {
+  const classified = classifySpoolerError(error);
+  const normalized = error instanceof Error ? error : new Error(String(error?.message ?? error ?? classified.code));
+  if (normalized.outcome == null) normalized.outcome = classified.outcome;
+  if (normalized.retryable == null) normalized.retryable = classified.retryable;
+  if (normalized.code == null) normalized.code = classified.code;
+  return normalized;
+};
+
 const runPowerShell = ({ script, input = '', env = {}, timeoutMs = 15_000 } = {}) => new Promise((resolve, reject) => {
   const child = spawn(POWERSHELL, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
     windowsHide: true,
@@ -83,7 +117,7 @@ const runPowerShell = ({ script, input = '', env = {}, timeoutMs = 15_000 } = {}
     child.kill();
     const error = new Error('Windows printer provider timed out');
     error.code = 'WINDOWS_SPOOLER_TIMEOUT';
-    reject(error);
+    reject(withSpoolerOutcome(error));
   }, timeoutMs);
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
@@ -94,7 +128,7 @@ const runPowerShell = ({ script, input = '', env = {}, timeoutMs = 15_000 } = {}
     settled = true;
     clearTimeout(timer);
     error.code = error.code === 'ENOENT' ? 'WINDOWS_SPOOLER_UNAVAILABLE' : error.code;
-    reject(error);
+    reject(withSpoolerOutcome(error));
   });
   child.once('close', (code) => {
     if (settled) return;
@@ -103,7 +137,7 @@ const runPowerShell = ({ script, input = '', env = {}, timeoutMs = 15_000 } = {}
     if (code !== 0) {
       const error = new Error(stderr.trim() || `PowerShell exited with code ${code}`);
       error.code = 'WINDOWS_SPOOLER_ERROR';
-      reject(error);
+      reject(withSpoolerOutcome(error));
       return;
     }
     resolve(stdout.trim());
@@ -152,27 +186,31 @@ export const listWindowsPrinters = async ({ run = runPowerShell, now = new Date(
 };
 
 export class WindowsSpoolerPrinterTransport {
-  async send(bytes, device) {
+  async send(bytes, device, { run = runPowerShell } = {}) {
     const queue = String(device?.systemQueueName ?? '').trim();
     if (!queue) {
-      const error = new Error('Windows system printer binding is missing');
-      error.code = 'SYSTEM_PRINTER_NOT_BOUND';
-      error.outcome = 'FAILED';
-      error.retryable = false;
+      const error = withSpoolerOutcome(Object.assign(new Error('Windows system printer binding is missing'), { code: 'SYSTEM_PRINTER_NOT_BOUND' }));
       throw error;
     }
-    const printers = await listWindowsPrinters();
+    let printers;
+    try {
+      const output = await run({ script: DISCOVERY_SCRIPT });
+      printers = parseSystemPrinterRows(output);
+    } catch (error) {
+      throw withSpoolerOutcome(error);
+    }
     const discovered = printers.find((printer) => printer.systemQueueName === queue);
     if (!discovered) {
-      const error = new Error('Windows does not contain the selected printer queue');
-      error.code = 'WINDOWS_PRINTER_NOT_FOUND';
-      error.outcome = 'FAILED';
-      error.retryable = false;
+      const error = withSpoolerOutcome(Object.assign(new Error('Windows does not contain the selected printer queue'), { code: 'WINDOWS_PRINTER_NOT_FOUND' }));
       throw error;
     }
-    await runPowerShell({ script: WRITE_RAW_SCRIPT, env: { MAHABBAT_PRINT_QUEUE_NAME: queue }, input: Buffer.from(bytes).toString('base64'), timeoutMs: 30_000 });
+    try {
+      await run({ script: WRITE_RAW_SCRIPT, env: { MAHABBAT_PRINT_QUEUE_NAME: queue }, input: Buffer.from(bytes).toString('base64'), timeoutMs: 30_000 });
+    } catch (error) {
+      throw withSpoolerOutcome(error);
+    }
     return { outcome: 'SENT', bytesSent: bytes.length };
   }
 }
 
-export const _internal = { runPowerShell, DISCOVERY_SCRIPT, WRITE_RAW_SCRIPT };
+export const _internal = { runPowerShell, DISCOVERY_SCRIPT, WRITE_RAW_SCRIPT, classifySpoolerError, withSpoolerOutcome };

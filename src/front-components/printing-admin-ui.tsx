@@ -19,7 +19,7 @@ type Printer = Row & {
   status?: string;
 };
 type Station = Row & { label?: string; printerDeviceId?: string | null; isActive?: boolean };
-type Job = Row & { label?: string; status?: string; documentType?: string; lastErrorMessage?: string; createdAt?: string };
+type Job = Row & { label?: string; status?: string; documentType?: string; lastErrorMessage?: string; createdAt?: string; printerDeviceId?: string | null };
 type SystemPrinter = {
   id: string;
   name: string;
@@ -72,8 +72,8 @@ const statusLabel = (printer: Printer, system: SystemPrinter | null): string => 
   return 'Состояние неизвестно';
 };
 
-const capabilityLabel = (value: string | undefined): string => value === 'SUPPORTED' ? 'Поддерживается' : value === 'UNSUPPORTED' ? 'Не поддерживается' : 'Совместимость не проверена';
-const jobStatusLabel = (value: string | undefined): string => ({ QUEUED: 'В очереди', DISPATCHING: 'Отправляется', SENT: 'Отправлено на принтер', CONFIRMED: 'Подтверждено', FAILED: 'Ошибка печати', OUTCOME_UNKNOWN: 'Результат неизвестен' }[value ?? ''] ?? 'Состояние неизвестно');
+const capabilityLabel = (value: string | undefined): string => value === 'SUPPORTED' ? 'Поддерживается' : value === 'UNSUPPORTED' ? 'Не поддерживается' : value === 'UNKNOWN' ? 'Бумага не подтверждена — проверьте принтер перед печатью' : 'Совместимость не проверена';
+const jobStatusLabel = (value: string | undefined): string => ({ QUEUED: 'В очереди', DISPATCHING: 'Отправляется', SENT: 'Отправлено на принтер (бумага не подтверждена)', FAILED: 'Ошибка печати', OUTCOME_UNKNOWN: 'Результат неизвестен — проверьте бумагу в принтере и введите его название перед повтором' }[value ?? ''] ?? 'Состояние неизвестно');
 
 const safeMessage = (value: unknown): string => {
   const message = value instanceof Error ? value.message : String(value);
@@ -118,6 +118,7 @@ export const PrintingAdmin = () => {
   const [error, setError] = useState('');
   const [discoveryError, setDiscoveryError] = useState('');
   const [notice, setNotice] = useState('');
+  const [showHiddenDevices, setShowHiddenDevices] = useState(false);
 
   const discover = useCallback(async () => {
     setDiscoveryLoading(true);
@@ -201,7 +202,7 @@ export const PrintingAdmin = () => {
   const testPrint = async (printer: Printer) => {
     try {
       await command('testPrinterDevice', { printerDeviceId: printer.id, idempotencyKey: UUID() });
-      setNotice('Тестовая печать отправлена на принтер');
+      setNotice('Тестовая печать отправлена на принтер. Проверьте бумагу перед повтором — повторная отправка вслепую напечатает дубль.');
       globalThis.setTimeout(() => { void load(); }, 1200);
     } catch (value) { setError(safeMessage(value)); }
   };
@@ -224,8 +225,26 @@ export const PrintingAdmin = () => {
     } catch (value) { setError(safeMessage(value)); }
   };
 
-  const retry = async (job: Job) => {
-    if (!globalThis.confirm?.('Создать отдельное задание повторной печати?')) return;
+  const retry = async (job: Job, printerName?: string) => {
+    // UNKNOWN jobs may already be on paper: block a blind reprint. The retry
+    // stays locked until the administrator types the printer name they
+    // physically checked (server re-verifies it against the job binding).
+    if (job.status === 'OUTCOME_UNKNOWN') {
+      const confirmed = typeof printerName === 'string' && printerName.trim() ? printerName.trim() : globalThis.prompt?.('Проверьте бумагу в принтере, затем введите его название для подтверждения повтора:')?.trim() ?? '';
+      if (!confirmed) {
+        setError('Повтор задания с неизвестным результатом заблокирован: введите название проверенного принтера.');
+        return;
+      }
+      try {
+        await command('retryPrintJob', { printJobId: job.id, idempotencyKey: UUID(), confirmedPrinterName: confirmed });
+        setNotice('Повторное задание поставлено в очередь');
+        await load();
+      } catch (value) { setError(safeMessage(value)); }
+      return;
+    }
+    const bound = job.printerDeviceId ? printers.find((printer) => printer.id === job.printerDeviceId) ?? null : null;
+    const boundRef = bound ? ` (${String(bound.label ?? 'Принтер')}${bound.systemQueueName ? ` · ${String(bound.systemQueueName)}` : ''})` : '';
+    if (!globalThis.confirm?.(`Создать отдельное задание повторной печати${boundRef}? Повтор печатает 1 страницу заново — сначала проверьте бумагу в принтере.`)) return;
     try {
       await command('retryPrintJob', { printJobId: job.id, idempotencyKey: UUID() });
       setNotice('Повторное задание поставлено в очередь');
@@ -328,6 +347,6 @@ export const PrintingAdmin = () => {
 
     <details style={{ ...cardStyle, padding: 0, overflow: 'hidden' }}><summary style={{ padding: 18, cursor: 'pointer', color: '#f4efe5', fontSize: 17, fontWeight: 700, listStylePosition: 'inside' }}>Дополнительные маршруты блюд <span style={{ ...mutedStyle, fontSize: 12, fontWeight: 400 }}>— для особых случаев</span></summary><div style={{ padding: '0 18px 18px' }}><p style={{ ...mutedStyle, marginTop: 0 }}>Обычно достаточно маршрута станции. Здесь можно отдельно указать станцию для конкретного блюда.</p><div style={{ display: 'grid', gap: 7, overflowX: 'auto' }}>{visibleMenuItems.map((item) => <div key={item.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(180px,1fr) minmax(180px,280px) auto', gap: 8, alignItems: 'center', minWidth: 0 }}><span>{String(item.name ?? 'Блюдо')}</span><select style={selectStyle} value={routeDraft[item.id] ?? String(item.productionStationId ?? '')} onChange={(event) => setRouteDraft({ ...routeDraft, [item.id]: event.target.value })}><option value="">По маршруту станции</option>{stations.map((station) => <option key={station.id} value={station.id}>{station.label ?? 'Станция'}</option>)}</select><button type="button" onClick={() => void setRoute(item.id)} style={secondaryButtonStyle}>Сохранить</button></div>)}</div></div></details>
 
-    <details style={{ ...cardStyle, padding: 0, overflow: 'hidden' }}><summary style={{ padding: 18, cursor: 'pointer', color: '#f4efe5', fontSize: 17, fontWeight: 700, listStylePosition: 'inside' }}>Диагностика и история печати <span style={{ ...mutedStyle, fontSize: 12, fontWeight: 400 }}>— открывать при необходимости</span></summary><div style={{ padding: '0 18px 18px' }}><p style={{ ...mutedStyle, marginTop: 0 }}>Здесь находятся подробности для проверки работы шлюза и повторной отправки неудачных заданий.</p><div style={{ display: 'grid', gap: 8 }}>{humanPrinters.map((printer) => { const system = printer.systemQueueName ? systemByQueue.get(printer.systemQueueName) ?? null : null; const state = statusLabel(printer, system); const tone = statusTone(state); return <div key={printer.id} style={{ padding: 12, background: '#171719', borderRadius: 9, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}><div style={{ flex: '1 1 260px', minWidth: 0 }}><strong>{humanPrinterLabel(printer)}</strong><div style={{ display: 'inline-flex', marginTop: 5, padding: '3px 8px', borderRadius: 999, border: `1px solid ${tone.border}`, background: tone.background, color: tone.color, fontSize: 12 }}>{state}{printer.isPrecheckPrinter ? ' · пречек' : ''}</div></div>{printer.connectionType === 'WINDOWS_SPOOLER' && !system && <span style={{ color: '#f0a6aa', fontSize: 13 }}>⚠ Устройство не найдено в Windows</span>}<button type="button" onClick={() => void testPrint(printer)} disabled={printer.isActive === false || (printer.connectionType === 'WINDOWS_SPOOLER' && !system)} style={{ ...secondaryButtonStyle, ...(printer.isActive === false || (printer.connectionType === 'WINDOWS_SPOOLER' && !system) ? disabledButtonStyle : {}) }}>Тестовая печать</button><details style={{ width: '100%' }}><summary style={{ ...mutedStyle, cursor: 'pointer', fontSize: 12 }}>Технические сведения</summary><div style={{ ...mutedStyle, fontSize: 12, marginTop: 5 }}>Профиль: {printer.paperWidth ?? '80'} мм · {printer.encodingProfile ?? 'CP866'}{printer.systemQueueName ? ` · имя устройства: ${printer.systemQueueName}` : ''}</div></details></div>; })}</div>{!humanPrinters.length && <div style={{ padding: 12, ...mutedStyle }}>Настроенных пользовательских принтеров пока нет.</div>}<h3 style={{ margin: '18px 0 7px', color: '#f4efe5', fontSize: 15 }}>Последние задания</h3><div style={{ display: 'grid', gap: 6 }}>{humanJobs.slice(0, 30).map((job) => <div key={job.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto auto', gap: 8, alignItems: 'center', padding: 9, borderTop: '1px solid #34343a', minWidth: 0 }}><span style={{ minWidth: 0 }}><strong>{humanJobLabel(job.label)}</strong><small style={{ display: 'block', color: job.status === 'FAILED' ? '#f0a6aa' : '#aaa69e' }}>{jobStatusLabel(job.status)}{job.lastErrorMessage ? ` · ${safeMessage(job.lastErrorMessage)}` : ''}</small></span><span style={{ ...mutedStyle, fontSize: 12 }}>{job.createdAt ? new Date(job.createdAt).toLocaleString('ru-RU') : ''}</span>{(job.status === 'FAILED' || job.status === 'OUTCOME_UNKNOWN') && <button type="button" onClick={() => void retry(job)} style={secondaryButtonStyle}>Повторить</button>}</div>)}</div>{hiddenPrinterCount > 0 && <p style={{ ...mutedStyle, marginBottom: 0, fontSize: 12 }}>Скрыто технических тестовых устройств: {hiddenPrinterCount}. Они не участвуют в обычной настройке ресторана.</p>}</div></details>
+    <details style={{ ...cardStyle, padding: 0, overflow: 'hidden' }}><summary style={{ padding: 18, cursor: 'pointer', color: '#f4efe5', fontSize: 17, fontWeight: 700, listStylePosition: 'inside' }}>Диагностика и история печати <span style={{ ...mutedStyle, fontSize: 12, fontWeight: 400 }}>— открывать при необходимости</span></summary><div style={{ padding: '0 18px 18px' }}><p style={{ ...mutedStyle, marginTop: 0 }}>Здесь находятся подробности для проверки работы шлюза и повторной отправки неудачных заданий. Задания с неизвестным результатом не повторяются вслепую: сначала проверьте бумагу в принтере и введите его название.</p><div style={{ display: 'grid', gap: 8 }}>{humanPrinters.map((printer) => { const system = printer.systemQueueName ? systemByQueue.get(printer.systemQueueName) ?? null : null; const state = statusLabel(printer, system); const tone = statusTone(state); return <div key={printer.id} style={{ padding: 12, background: '#171719', borderRadius: 9, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}><div style={{ flex: '1 1 260px', minWidth: 0 }}><strong>{humanPrinterLabel(printer)}</strong><div style={{ display: 'inline-flex', marginTop: 5, padding: '3px 8px', borderRadius: 999, border: `1px solid ${tone.border}`, background: tone.background, color: tone.color, fontSize: 12 }}>{state}{printer.isPrecheckPrinter ? ' · пречек' : ''}</div></div>{printer.connectionType === 'WINDOWS_SPOOLER' && !system && <span style={{ color: '#f0a6aa', fontSize: 13 }}>⚠ Устройство не найдено в Windows</span>}<button type="button" onClick={() => void testPrint(printer)} disabled={printer.isActive === false || (printer.connectionType === 'WINDOWS_SPOOLER' && !system)} style={{ ...secondaryButtonStyle, ...(printer.isActive === false || (printer.connectionType === 'WINDOWS_SPOOLER' && !system) ? disabledButtonStyle : {}) }}>Тестовая печать</button><details style={{ width: '100%' }}><summary style={{ ...mutedStyle, cursor: 'pointer', fontSize: 12 }}>Технические сведения</summary><div style={{ ...mutedStyle, fontSize: 12, marginTop: 5 }}>Профиль: {printer.paperWidth ?? '80'} мм · {printer.encodingProfile ?? 'CP866'}{printer.systemQueueName ? ` · имя устройства: ${printer.systemQueueName}` : ''}</div></details></div>; })}</div>{!humanPrinters.length && <div style={{ padding: 12, ...mutedStyle }}>Настроенных пользовательских принтеров пока нет.</div>}<h3 style={{ margin: '18px 0 7px', color: '#f4efe5', fontSize: 15 }}>Последние задания</h3><div style={{ display: 'grid', gap: 6 }}>{humanJobs.slice(0, 30).map((job) => { const boundPrinter = job.printerDeviceId ? printers.find((printer) => printer.id === job.printerDeviceId) ?? null : null; const boundName = boundPrinter ? humanPrinterLabel(boundPrinter) : null; return <div key={job.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto auto', gap: 8, alignItems: 'center', padding: 9, borderTop: '1px solid #34343a', minWidth: 0 }}><span style={{ minWidth: 0 }}><strong>{humanJobLabel(job.label)}</strong><small style={{ display: 'block', color: job.status === 'FAILED' ? '#f0a6aa' : '#aaa69e' }}>{jobStatusLabel(job.status)}{boundName && job.status === 'OUTCOME_UNKNOWN' ? ` · принтер «${boundName}»` : ''}{job.lastErrorMessage ? ` · ${safeMessage(job.lastErrorMessage)}` : ''}</small></span><span style={{ ...mutedStyle, fontSize: 12 }}>{job.createdAt ? new Date(job.createdAt).toLocaleString('ru-RU') : ''}</span>{job.status === 'FAILED' && <><button type="button" onClick={() => void retry(job)} style={secondaryButtonStyle} title="Повтор печатает 1 страницу заново — сначала проверьте бумагу в принтере">Повторить</button>{job.lastErrorMessage ? <button type="button" onClick={() => { void globalThis.navigator?.clipboard?.writeText(String(job.lastErrorMessage ?? '')).then(() => setNotice('Код ошибки скопирован')).catch(() => setError('Не удалось скопировать код ошибки.')); }} style={secondaryButtonStyle} title="Скопировать текст ошибки для поддержки">Копировать код</button> : null}</>}{job.status === 'OUTCOME_UNKNOWN' && <button type="button" onClick={() => void retry(job)} style={secondaryButtonStyle} title="Сначала проверьте бумагу, затем введите название принтера">Повторить после проверки</button>}</div>; })}</div>{hiddenPrinterCount > 0 && <div><button type="button" onClick={() => setShowHiddenDevices((v) => !v)} style={secondaryButtonStyle}>{showHiddenDevices ? "Скрыть служебные устройства" : `Скрыто ${hiddenPrinterCount} служебных — показать`}</button>{showHiddenDevices && <div style={{ display: "grid", gap: 6, marginTop: 8 }}>{printers.filter((printer) => isTechnicalFixture(`${printer.label ?? ""} ${printer.systemQueueName ?? ""}`)).map((printer) => <div key={printer.id} style={{ ...mutedStyle, fontSize: 12 }}>{String(printer.label ?? "Устройство")} · {String(printer.systemQueueName ?? "")}</div>)}</div>}</div>}</div></details>
   </div>;
 };

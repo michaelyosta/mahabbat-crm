@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   dispatchPosCommand,
   executeAddStopListEntry,
+  executeAttachReservationToOrder,
   executeClearStopListEntry,
   executeCancelPrecheck,
   executeCreatePrecheck,
+  executeCreateReservation,
   executeCloseOrder,
   executeRecordPayment,
   executeOpenOrder,
@@ -30,7 +32,10 @@ type TableKind =
   | 'posPaymentMethods'
   | 'posPayments'
   | 'posPrepayments'
-  | 'posOperationalEvents';
+  | 'posReservations'
+  | 'posOperationalEvents'
+  | 'posPrintJobs'
+  | 'posPrinterDevices';
 
 class UniqueViolationError extends Error {
   constructor(message: string) {
@@ -54,7 +59,10 @@ class FakePosDb {
     posPaymentMethods: [],
     posPayments: [],
     posPrepayments: [],
+    posReservations: [],
     posOperationalEvents: [],
+    posPrintJobs: [],
+    posPrinterDevices: [],
   };
 
   seed(kind: TableKind, row: Row): Row {
@@ -96,8 +104,9 @@ class FakePosDb {
         (row) => row.menuItemId === data.menuItemId,
       );
       if (conflict) throw new UniqueViolationError('duplicate menuItemId');
+      this.assertIdempotencyUnique(this.rows.posStopListEntries, data);
+      return;
     }
-
     if (kind === 'posKitchenTickets') {
       this.assertIdempotencyUnique(this.rows.posKitchenTickets, data);
       const requestKey = data.requestIdempotencyKey;
@@ -273,17 +282,21 @@ class FakePosDb {
       updatePosKitchenTicket: 'posKitchenTickets',
       createPosPrecheck: 'posPrechecks',
       updatePosPrecheck: 'posPrechecks',
+      updatePosPrechecks: 'posPrechecks',
       createPosPaymentMethod: 'posPaymentMethods',
       updatePosPaymentMethod: 'posPaymentMethods',
       createPosPayment: 'posPayments',
       updatePosPayment: 'posPayments',
       createPosPrepayment: 'posPrepayments',
       updatePosPrepayment: 'posPrepayments',
-      updatePosPrepayments: 'posPrepayments',
       createPosOperationalEvent: 'posOperationalEvents',
       updatePosOperationalEvent: 'posOperationalEvents',
+      createPosPrintJob: 'posPrintJobs',
+      updatePosPrintJob: 'posPrintJobs',
+      createPosReservation: 'posReservations',
+      updatePosReservation: 'posReservations',
+      updatePosReservations: 'posReservations',
     };
-
     const kind = map[root];
 
     if (!kind) {
@@ -311,7 +324,10 @@ class FakePosDb {
       posPaymentMethods: 'posPaymentMethods',
       posPayments: 'posPayments',
       posPrepayments: 'posPrepayments',
+      posReservations: 'posReservations',
       posOperationalEvents: 'posOperationalEvents',
+      posPrintJobs: 'posPrintJobs',
+      posPrinterDevices: 'posPrinterDevices',
     };
 
     return map[root] ?? 'posOrders';
@@ -371,6 +387,25 @@ const dbWithBaseline = () => {
     isActive: true,
     sortOrder: 1,
   });
+  db.seed('posPrinterDevices', {
+    id: 'printer-precheck',
+    label: 'Пречек-принтер',
+    isActive: true,
+    isPrecheckPrinter: true,
+  });
+  // The print gate reads the spooler aggregate, not the cached snapshot: the
+  // fake spooler has no gateway, so mark every enqueued job SENT at creation.
+  // Print-job creates return the record directly (not wrapped in edges).
+  const innerMutation = db.mutation.bind(db);
+  db.mutation = (async (mutation: unknown) => {
+    const result = (await innerMutation(mutation)) as Record<string, { id?: string } | null>;
+    const created = result.createPosPrintJob as { id?: string; status?: string } | null | undefined;
+    if (created?.id) {
+      const row = db.rows.posPrintJobs.find((candidate) => candidate.id === created.id);
+      if (row) row.status = 'SENT';
+    }
+    return result;
+  }) as FakePosDb['mutation'];
   return db;
 };
 
@@ -659,17 +694,18 @@ describe('pos domain happy path', () => {
 
   it('supports an idempotent stop-list lifecycle and unblocks the stale menu after clear', async () => {
     const db = dbWithBaseline();
+    const admin = { staffId: OTHER_STAFF, role: 'ADMIN' as const };
     const first = await executeAddStopListEntry(
       db,
       { menuItemId: MENU_A, idempotencyKey: key(80) },
-      waiter,
+      admin,
     );
     expect(first.status).toBe(201);
 
     const replay = await executeAddStopListEntry(
       db,
       { menuItemId: MENU_A, idempotencyKey: key(80) },
-      waiter,
+      admin,
     );
     expect(replay.status).toBe(200);
     expect(db.rows.posStopListEntries.length).toBe(1);
@@ -677,7 +713,7 @@ describe('pos domain happy path', () => {
     const cleared = await executeClearStopListEntry(
       db,
       { menuItemId: MENU_A, idempotencyKey: key(81) },
-      waiter,
+      admin,
     );
     expect(cleared.status).toBe(200);
     expect(db.rows.posStopListEntries[0].isActive).toBe(false);
@@ -685,11 +721,61 @@ describe('pos domain happy path', () => {
     const reopened = await executeAddStopListEntry(
       db,
       { menuItemId: MENU_A, idempotencyKey: key(82) },
-      waiter,
+      admin,
     );
     expect(reopened.status).toBe(200);
     expect(db.rows.posStopListEntries.length).toBe(1);
     expect(db.rows.posStopListEntries[0].isActive).toBe(true);
+  });
+
+  it('rejects a waiter stop-list write at the dispatch boundary', async () => {
+    const db = dbWithBaseline();
+    const added = await dispatchPosCommand(
+      db,
+      'addStopListEntry',
+      { menuItemId: MENU_A, idempotencyKey: key(8080) },
+      waiter,
+    );
+    expect(added.status).toBe(403);
+    expect((added.body as { code: string }).code).toBe('COMMAND_FORBIDDEN');
+    const cleared = await dispatchPosCommand(
+      db,
+      'clearStopListEntry',
+      { menuItemId: MENU_A, idempotencyKey: key(8081) },
+      waiter,
+    );
+    expect(cleared.status).toBe(403);
+    expect((cleared.body as { code: string }).code).toBe('COMMAND_FORBIDDEN');
+  });
+
+  it('retires a consumed stop-list key: clear-then-add with the same key conflicts', async () => {
+    const db = dbWithBaseline();
+    const admin = { staffId: OTHER_STAFF, role: 'ADMIN' as const };
+    const added = await executeAddStopListEntry(
+      db,
+      { menuItemId: MENU_A, idempotencyKey: key(8082) },
+      admin,
+    );
+    expect(added.status).toBe(201);
+    // The clear consumes the add's own key and retires it; the events prove
+    // both halves of the chain ran exactly once.
+    const cleared = await executeClearStopListEntry(
+      db,
+      { menuItemId: MENU_A, idempotencyKey: key(8082) },
+      admin,
+    );
+    expect(cleared.status).toBe(200);
+    expect(db.rows.posStopListEntries[0].isActive).toBe(false);
+    const crossReplay = await executeAddStopListEntry(
+      db,
+      { menuItemId: MENU_A, idempotencyKey: key(8082) },
+      admin,
+    );
+    expect(crossReplay.status).toBe(409);
+    expect((crossReplay.body as { code: string }).code).toBe('IDEMPOTENCY_CONFLICT');
+    expect(db.rows.posStopListEntries[0].isActive).toBe(false);
+    expect(db.rows.posOperationalEvents.filter((row) => row.eventType === 'STOP_LIST_ENTRY_ADDED')).toHaveLength(1);
+    expect(db.rows.posOperationalEvents.filter((row) => row.eventType === 'STOP_LIST_ENTRY_CLEARED')).toHaveLength(1);
   });
 
   it('prints only unsent deltas and makes retry/no-op safe', async () => {
@@ -926,6 +1012,78 @@ describe('pos domain happy path', () => {
     expect(reopened.status).toBe(201);
     expect((reopened.body as { orderId: string }).orderId).not.toBe(orderId);
   });
+
+  it('tolerates a void retry on an already-VOIDED line with the same reason', async () => {
+    const db = dbWithBaseline();
+    const admin = { staffId: OTHER_STAFF, role: 'ADMIN' as const };
+    await executeOpenShift(db, { idempotencyKey: key(8100) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(8101) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(8102) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    const line = await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 1, idempotencyKey: key(8103) },
+      waiter,
+    );
+    const lineId = (line.body as { lineId: string }).lineId;
+
+    const first = await dispatchPosCommand(
+      db,
+      'voidOrderLines',
+      { lineIds: [lineId], preparedState: 'NOT_PREPARED', reason: 'Гость ушёл', idempotencyKey: key(8104) },
+      admin,
+    );
+    expect(first.status).toBe(201);
+    const retry = await dispatchPosCommand(
+      db,
+      'voidOrderLines',
+      { lineIds: [lineId], preparedState: 'NOT_PREPARED', reason: 'Гость ушёл', idempotencyKey: key(8105) },
+      admin,
+    );
+    expect(retry.status).toBe(200);
+    expect((retry.body as { replay: boolean }).replay).toBe(true);
+    // A foreign reason is never adopted as our own.
+    const foreign = await dispatchPosCommand(
+      db,
+      'voidOrderLines',
+      { lineIds: [lineId], preparedState: 'NOT_PREPARED', reason: 'Другая причина', idempotencyKey: key(8106) },
+      admin,
+    );
+    expect(foreign.status).toBe(400);
+    expect((foreign.body as { code: string }).code).toBe('VOID_LINE_INVALID');
+  });
+
+  it('replays an attach with the same key instead of double-applying', async () => {
+    const db = dbWithBaseline();
+    await executeOpenShift(db, { idempotencyKey: key(8200) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(8201) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const created = await executeCreateReservation(
+      db,
+      { tableId: TABLE, guestName: 'Гость', idempotencyKey: key(8202) },
+      waiter,
+    );
+    expect(created.status).toBe(201);
+    const reservationId = (created.body as { reservationId: string }).reservationId;
+    const first = await executeAttachReservationToOrder(
+      db,
+      { reservationId, orderId, idempotencyKey: key(8203) },
+      waiter,
+    );
+    expect(first.status).toBe(200);
+    // Same key after the attach reconciles against attached state: no
+    // duplicate prepayment applications, audit backfilled.
+    const retry = await executeAttachReservationToOrder(
+      db,
+      { reservationId, orderId, idempotencyKey: key(8203) },
+      waiter,
+    );
+    expect(retry.status).toBe(200);
+    expect((retry.body as { replay: boolean }).replay).toBe(true);
+    expect((retry.body as { reservationId: string }).reservationId).toBe(reservationId);
+  });
 });
 
 describe('pos cash tender and change', () => {
@@ -937,13 +1095,15 @@ describe('pos cash tender and change', () => {
     const guestId = (guest.body as { guestId: string }).guestId;
     const menu = db.rows.posMenuItems.find((row) => row.id === MENU_A)!;
     menu.price = { amountMicros: totalMicros, currencyCode: 'KZT' };
-    await dispatchPosCommand(
+    const added = await dispatchPosCommand(
       db,
       'addLine',
       { orderId, guestId, menuItemId: MENU_A, quantity: 1, idempotencyKey: key(503) },
       waiter,
     );
-    await executeCreatePrecheck(db, { orderId, idempotencyKey: key(504) }, waiter);
+    expect(added.status).toBe(201);
+    const precheck = await executeCreatePrecheck(db, { orderId, idempotencyKey: key(504) }, waiter);
+    expect(precheck.status).toBe(201);
     return orderId;
   };
 
@@ -1453,6 +1613,7 @@ describe('payment optimistic concurrency (CAS)', () => {
 
   it('repairs a stale prepaidTotal from the APPLIED prepayment ledger', async () => {
     const db = dbWithBaseline();
+
     const orderId = await setupOrder(db);
     db.seed('posPrepayments', { id: 'pp-1', orderId, amount: { amountMicros: 100_000_000, currencyCode: 'KZT' }, status: 'APPLIED', createdByStaffId: STAFF });
     db.seed('posPrepayments', { id: 'pp-2', orderId, amount: { amountMicros: 200_000_000, currencyCode: 'KZT' }, status: 'APPLIED', createdByStaffId: STAFF });
@@ -1469,5 +1630,123 @@ describe('payment optimistic concurrency (CAS)', () => {
     await _internal.reconcileOrderPrepaidTotal(db, orderId);
     const again = db.rows.posOrders.find((row) => row.id === orderId)!.prepaidTotal as { amountMicros: number };
     expect(again.amountMicros).toBe(300_000_000);
+  });
+});
+
+
+describe('precheck lifecycle and print gate (P0)', () => {
+  const setupPrintedOrder = async (db: FakePosDb, shiftKey: number) => {
+    await executeOpenShift(db, { idempotencyKey: key(shiftKey) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(shiftKey + 1) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(shiftKey + 2) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    await dispatchPosCommand(
+      db,
+      'addLine',
+      { orderId, guestId, menuItemId: MENU_A, quantity: 2, idempotencyKey: key(shiftKey + 3) },
+      waiter,
+    );
+    const created = await executeCreatePrecheck(db, { orderId, idempotencyKey: key(shiftKey + 4) }, waiter);
+    expect(created.status).toBe(201);
+    return orderId;
+  };
+
+  it('keeps a closed order CLOSED through precheck→pay→close→cancel', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrintedOrder(db, 2000);
+    const admin = { staffId: OTHER_STAFF, role: 'ADMIN' as const };
+
+    const paid = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CARD_METHOD, amountMicros: 3_000_000_000, idempotencyKey: key(2010) },
+      waiter,
+    );
+    expect(paid.status).toBe(201);
+
+    const closed = await executeCloseOrder(db, { orderId, idempotencyKey: key(2011) }, waiter);
+    expect(closed.status).toBe(201);
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.status).toBe('CLOSED');
+    // The terminal close drops the active-order lock so no cancel path can reuse it.
+    expect(db.rows.posPrechecks.some((row) => row.activeOrderKey === orderId)).toBe(false);
+
+    const cancel = await executeCancelPrecheck(db, { orderId, idempotencyKey: key(2012) }, admin);
+    expect(cancel.status).toBe(409);
+    expect((cancel.body as { code: string }).code).toBe('PRECHECK_NOT_ACTIVE');
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.status).toBe('CLOSED');
+  });
+
+  it('rejects cancel on a non-printed order without resurrecting it', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrintedOrder(db, 2030);
+    const admin = { staffId: OTHER_STAFF, role: 'ADMIN' as const };
+    const order = db.rows.posOrders.find((row) => row.id === orderId)!;
+    order.status = 'IN_PROGRESS';
+
+    const cancel = await executeCancelPrecheck(db, { orderId, idempotencyKey: key(2040) }, admin);
+    expect(cancel.status).toBe(409);
+    expect((cancel.body as { code: string }).code).toBe('PRECHECK_NOT_ACTIVE');
+    expect(db.rows.posOrders.find((row) => row.id === orderId)?.status).toBe('IN_PROGRESS');
+  });
+
+  it('blocks the first payment while the precheck is not SENT, unless ADMIN overrides FAILED', async () => {
+    const db = dbWithBaseline();
+    const orderId = await setupPrintedOrder(db, 2060);
+    const precheck = db.rows.posPrechecks.find((row) => row.orderId === orderId)!;
+    // Spooler aggregate QUEUED: no SENT job yet, cached snapshot QUEUED.
+    db.seed('posPrintJobs', {
+      id: 'job-queued',
+      sourceType: 'PRECHECK',
+      sourceId: precheck.id,
+      status: 'QUEUED',
+      idempotencyKey: 'PRECHECK:queued',
+    });
+
+    const blocked = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CARD_METHOD, amountMicros: 1_000_000_000, idempotencyKey: key(2070) },
+      waiter,
+    );
+    expect(blocked.status).toBe(400);
+    expect((blocked.body as { code: string }).code).toBe('PRECHECK_NOT_PRINTED');
+    expect(db.rows.posPayments).toHaveLength(0);
+
+    for (const job of db.rows.posPrintJobs) job.status = 'FAILED';
+    const waiterOverride = await executeRecordPayment(
+      db,
+      {
+        orderId,
+        paymentMethodId: CARD_METHOD,
+        amountMicros: 1_000_000_000,
+        idempotencyKey: key(2071),
+        forceUnprintedPrecheck: true,
+      },
+      waiter,
+    );
+    expect(waiterOverride.status).toBe(403);
+    expect((waiterOverride.body as { code: string }).code).toBe('COMMAND_FORBIDDEN');
+
+    const admin = { staffId: OTHER_STAFF, role: 'ADMIN' as const };
+    const forced = await executeRecordPayment(
+      db,
+      {
+        orderId,
+        paymentMethodId: CARD_METHOD,
+        amountMicros: 1_000_000_000,
+        idempotencyKey: key(2072),
+        forceUnprintedPrecheck: true,
+      },
+      admin,
+    );
+    expect(forced.status).toBe(201);
+
+    // Follow-up payments ride on the first payment's proof, not the spooler.
+    for (const job of db.rows.posPrintJobs) job.status = 'QUEUED';
+    const second = await executeRecordPayment(
+      db,
+      { orderId, paymentMethodId: CARD_METHOD, amountMicros: 2_000_000_000, idempotencyKey: key(2073) },
+      waiter,
+    );
+    expect(second.status).toBe(201);
   });
 });

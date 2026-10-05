@@ -42,6 +42,8 @@ export type PosCommand = (typeof POS_COMMANDS)[number];
 // operator to authenticate a second time with a POS PIN. The server route
 // still restricts this bypass to this allowlist and derives an ADMIN actor on
 // the server; POS/standalone clients continue to use PosSession authentication.
+// Every bypassed call is audited as CRM_PRINTING_BYPASS with the real
+// workspace caller (crmCallerWorkspaceId) in the event details.
 export const POS_PRINTING_COMMANDS: ReadonlySet<PosCommand> = new Set([
   'upsertPrinterDevice',
   'upsertProductionStation',
@@ -49,7 +51,6 @@ export const POS_PRINTING_COMMANDS: ReadonlySet<PosCommand> = new Set([
   'retryPrintJob',
   'testPrinterDevice',
 ]);
-
 export const POS_ACTOR_ROLES = ['ADMIN', 'WAITER'] as const;
 
 export type PosActorRole = (typeof POS_ACTOR_ROLES)[number];
@@ -71,6 +72,8 @@ const WAITER_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(
       command !== 'authenticatePosStaff' &&
       command !== 'cancelPrecheck' &&
       command !== 'voidOrderLines' &&
+      command !== 'addStopListEntry' &&
+      command !== 'clearStopListEntry' &&
       command !== 'transferOrderToTable' &&
       command !== 'transferOrderToWaiter' &&
       command !== 'transferOrderLinesToGuest' &&

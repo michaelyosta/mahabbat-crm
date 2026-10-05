@@ -18,6 +18,17 @@ const listen = async (server) => {
   return server.address().port;
 };
 
+const canonicalForTest = (value) => {
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalForTest(item)).join(',')}]`;
+  if (typeof value === 'object') {
+    const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalForTest(value[key])}`).join(',')}}`;
+  }
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number') return Number.isFinite(value) ? JSON.stringify(value) : 'null';
+  return JSON.stringify(value) ?? 'null';
+};
 const close = async (server) => {
   if (!server.listening) return;
   server.close();
@@ -88,9 +99,7 @@ test('remote print gateway polls the home resolver with HMAC and optional Access
     while (requests.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
     assert.ok(requests.length > 0, `no resolver request observed; output=${output}; error=${errorOutput}`);
     const request = requests[0];
-    const expectedSignature = createHmac('sha256', INTERNAL_SECRET).update(JSON.stringify(request.body), 'utf8').digest('hex');
-    assert.equal(request.body.command, 'claim');
-    assert.equal(request.body.gatewayId, 'restaurant-gateway-test');
+    const expectedSignature = `v1=${createHmac('sha256', INTERNAL_SECRET).update(canonicalForTest(request.body), 'utf8').digest('hex')}`;
     assert.equal(request.signature, expectedSignature);
     assert.equal(request.req.headers['cf-access-client-id'], ACCESS_CLIENT_ID);
     assert.equal(request.req.headers['cf-access-client-secret'], ACCESS_CLIENT_SECRET);

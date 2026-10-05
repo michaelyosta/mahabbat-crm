@@ -12,9 +12,12 @@ import { useRecordId } from 'twenty-sdk/front-component';
 import { CUSTOMER_360_FRONT_COMPONENT_UNIVERSAL_IDENTIFIER } from 'src/constants/universal-identifiers';
 import {
   LOYALTY_BALANCE_PAGE_SIZE,
+  LOYALTY_BALANCE_UI_LIMIT,
+  LOYALTY_LEDGER_ORDER_BY,
   computeLoyaltyBalance,
   fetchAllLoyaltyLedgerEntries,
   loyaltyLedgerNodes,
+  takeLoyaltyLedgerUiSlice,
 } from 'src/utils/loyalty-balance.util';
 
 type Money = { amountMicros?: number | string | null; currencyCode?: string | null };
@@ -63,7 +66,7 @@ const money = (value?: Money | null) => {
   return new Intl.NumberFormat('ru-KZ', { style: 'currency', currency: value.currencyCode ?? 'KZT', maximumFractionDigits: 0 }).format(tenge);
 };
 
-const cardStyle = { border: '1px solid #e8e8e8', borderRadius: '8px', padding: '14px', background: '#fff' };
+const cardStyle = { border: '1px solid #e8e8e8', borderRadius: '8px', padding: '14px', background: '#fff', minWidth: 0, maxWidth: '100%', overflowWrap: 'break-word' as const };
 const retryButtonStyle = { marginLeft: '8px', padding: '4px 8px', border: '1px solid #98a2b3', borderRadius: '5px', background: '#fff', cursor: 'pointer' };
 
 const nodes = <T,>(connection?: Connection<T> | null): T[] =>
@@ -113,6 +116,7 @@ const Customer360 = () => {
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [loyaltyStatus, setLoyaltyStatus] = useState<SectionStatus>('loading');
   const [loyaltyError, setLoyaltyError] = useState<string | null>(null);
+  const [loyaltyProgress, setLoyaltyProgress] = useState('');
   const [adjustmentAmount, setAdjustmentAmount] = useState('');
   const [adjustmentReason, setAdjustmentReason] = useState('');
   const [adjustmentError, setAdjustmentError] = useState<string | null>(null);
@@ -226,11 +230,15 @@ const Customer360 = () => {
 
     const loadLoyalty = async () => {
       try {
+        setLoyaltyProgress('');
+        // Chunked: progress text keeps the card responsive while a large
+        // ledger streams in; the balance always sums every fetched entry.
         const entries = await fetchAllLoyaltyLedgerEntries(async (after) => {
           const ledgerResult = await client.query<{ loyaltyLedgerEntries?: Connection<LedgerEntry> | null }>({
             loyaltyLedgerEntries: {
               __args: {
                 filter: { customerId: { eq: recordId } },
+                orderBy: [...LOYALTY_LEDGER_ORDER_BY],
                 first: LOYALTY_BALANCE_PAGE_SIZE,
                 ...(after ? { after } : {}),
               },
@@ -244,10 +252,14 @@ const Customer360 = () => {
             hasNextPage: connection?.pageInfo?.hasNextPage ?? false,
             endCursor: connection?.pageInfo?.endCursor ?? null,
           };
+        }, (progress) => {
+          if (!progress.done) setLoyaltyProgress(`Загружено операций: ${progress.entries}…`);
         });
+        setLoyaltyProgress('');
         setLedger(entries);
         setLoyaltyStatus('ready');
       } catch (loyaltyFailure) {
+        setLoyaltyProgress('');
         setLoyaltyError(loyaltyFailure instanceof Error ? loyaltyFailure.message : 'Не удалось загрузить операции лояльности.');
         setLoyaltyStatus('error');
       }
@@ -255,7 +267,6 @@ const Customer360 = () => {
 
     await Promise.all([loadOrders(), loadReservations(), loadLoyalty()]);
   }, [recordId]);
-
   useEffect(() => { void load(); }, [load]);
 
   const findAdjustmentRequest = async (idempotencyKey: string) => {
@@ -319,12 +330,14 @@ const Customer360 = () => {
         throw new Error('Сервер не вернул идентификатор заявки.');
       }
 
-      adjustmentIdempotencyKey.current = null;
-      setAdjustmentAmount('');
-      setAdjustmentReason('');
-
+      // The key stays pinned while the request is PENDING so a double click
+      // reuses the same idempotency key instead of minting a duplicate. It
+      // is cleared only once the outcome is APPLIED (or unrecoverable).
       const outcome = await waitForAdjustment(idempotencyKey);
       if (outcome === 'APPLIED') {
+        adjustmentIdempotencyKey.current = null;
+        setAdjustmentAmount('');
+        setAdjustmentReason('');
         setAdjustmentNotice('Корректировка сохранена в истории лояльности.');
         await load();
       } else {
@@ -335,8 +348,8 @@ const Customer360 = () => {
         const existingRequest = await findAdjustmentRequest(idempotencyKey);
         if (existingRequest) {
           const outcome = await waitForAdjustment(idempotencyKey);
-          adjustmentIdempotencyKey.current = null;
           if (outcome === 'APPLIED') {
+            adjustmentIdempotencyKey.current = null;
             setAdjustmentNotice('Корректировка уже была принята и сохранена в истории лояльности.');
             await load();
             return;
@@ -366,17 +379,19 @@ const Customer360 = () => {
   if (loading) return <div role="status" style={{ padding: '20px', fontFamily: 'sans-serif' }}>Загружаем историю клиента…</div>;
   if (error) return <div role="alert" style={{ padding: '20px', color: '#b42318', fontFamily: 'sans-serif' }}>Ошибка: {error}<button type="button" onClick={() => void load()} style={retryButtonStyle}>Повторить</button></div>;
   if (!customer) return <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>Клиент не найден.</div>;
-
   const ordersList = [...orders].sort((a, b) => String(b.orderedAt).localeCompare(String(a.orderedAt)));
   const reservationsList = [...reservations].sort((a, b) => String(b.reservationTime).localeCompare(String(a.reservationTime)));
-  const ledgerList = [...ledger].sort((a, b) => String(b.occurredAt).localeCompare(String(a.occurredAt)));
+  // Same occurredAt+id order as the server query; the balance sums the full
+  // list while the card renders at most 200 rows.
+  const ledgerList = [...ledger].sort((a, b) => String(a.occurredAt ?? '').localeCompare(String(b.occurredAt ?? '')) || String(a.id).localeCompare(String(b.id)));
+  const ledgerSlice = takeLoyaltyLedgerUiSlice(ledgerList, LOYALTY_BALANCE_UI_LIMIT);
   const balance = loyaltyStatus === 'ready'
     ? computeLoyaltyBalance(ledgerList)
     : null;
   const title = [customer.name?.firstName, customer.name?.lastName].filter(Boolean).join(' ') || 'Клиент';
 
   return (
-    <div style={{ padding: '16px', fontFamily: 'sans-serif', color: '#242424', display: 'grid', gap: '12px' }}>
+    <div style={{ padding: '16px', fontFamily: 'sans-serif', color: '#242424', display: 'grid', gap: '12px', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', overflowX: 'hidden' }}>
       <section style={cardStyle}>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', justifyContent: 'space-between', gap: '8px' }}>
           <h2 style={{ margin: 0, fontSize: '20px' }}>{title}</h2>
@@ -415,7 +430,7 @@ const Customer360 = () => {
       </section>
       <section style={cardStyle}>
         <h3 style={{ margin: '0 0 10px' }}>Лояльность ({loyaltyStatus === 'ready' ? ledgerList.length : '…'})</h3>
-        <div aria-label="Корректировка бонусов" style={{ display: 'grid', gridTemplateColumns: 'minmax(130px, 180px) minmax(220px, 1fr) auto', gap: '8px', alignItems: 'end', marginBottom: '12px' }}>
+        <div aria-label="Корректировка бонусов" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: '8px', alignItems: 'end', marginBottom: '12px', minWidth: 0 }}>
           <label style={{ display: 'grid', gap: '4px', fontSize: '12px' }}>
             Корректировка, баллы
             <input aria-label="Баллы корректировки" inputMode="numeric" value={adjustmentAmount} onChange={(event) => setAdjustmentAmount(event.target.value)} disabled={isSubmittingAdjustment} style={{ padding: '7px', border: '1px solid #d0d5dd', borderRadius: '5px' }} />
@@ -429,10 +444,12 @@ const Customer360 = () => {
         {adjustmentError ? <p role="alert" style={{ margin: '0 0 10px', color: '#b42318', fontSize: '12px' }}>{adjustmentError}</p> : null}
         {adjustmentNotice ? <p role="status" style={{ margin: '0 0 10px', color: '#067647', fontSize: '12px' }}>{adjustmentNotice}</p> : null}
         <p style={{ margin: '0 0 10px', color: '#667085', fontSize: '12px' }}>Корректировка создаёт отдельную операцию в истории лояльности; текущий баланс пересчитывается из истории.</p>
-        {loyaltyStatus === 'loading' ? <span role="status">Загружаем операции…</span> : null}
+        {loyaltyStatus === 'ready' && balance !== null && balance < 0 ? <p role="status" style={{ margin: '0 0 10px', color: '#b42318', fontSize: '12px' }}>Внимание: баланс отрицательный — проверьте списания перед новой корректировкой.</p> : null}
+        {loyaltyStatus === 'loading' ? <span role="status">{loyaltyProgress || 'Загружаем операции…'}</span> : null}
         {loyaltyStatus === 'error' ? <span role="alert" style={{ color: '#b42318' }}>Не удалось загрузить операции лояльности. {loyaltyError ?? 'Попробуйте обновить страницу.'}<button type="button" onClick={() => void load()} style={retryButtonStyle}>Повторить загрузку</button></span> : null}
         {loyaltyStatus === 'ready' && ledgerList.length === 0 ? <span>Операций пока нет.</span> : null}
-        {loyaltyStatus === 'ready' && ledgerList.length > 0 ? ledgerList.slice(0, 10).map((entry) => <div key={entry.id} style={{ padding: '8px 0', borderTop: '1px solid #f0f0f0', fontSize: '13px', display: 'flex', flexWrap: 'wrap', gap: '8px', justifyContent: 'space-between' }}><span>{dateTime(entry.occurredAt)} · {statusLabel[entry.entryType ?? ''] ?? entry.entryType}</span><span>{entry.reason ?? '—'} · <strong style={{ color: (entry.amount ?? 0) < 0 ? '#b42318' : '#067647' }}>{entry.amount ?? 0} баллов</strong></span></div>) : null}
+        {loyaltyStatus === 'ready' && ledgerList.length > 0 ? ledgerSlice.visible.map((entry) => <div key={entry.id} style={{ padding: '8px 0', borderTop: '1px solid #f0f0f0', fontSize: '13px', display: 'flex', flexWrap: 'wrap', gap: '8px', justifyContent: 'space-between' }}><span>{dateTime(entry.occurredAt)} · {statusLabel[entry.entryType ?? ''] ?? entry.entryType}</span><span>{entry.reason ?? '—'} · <strong style={{ color: (entry.amount ?? 0) < 0 ? '#b42318' : '#067647' }}>{entry.amount ?? 0} баллов</strong></span></div>) : null}
+        {loyaltyStatus === 'ready' && ledgerSlice.truncated ? <p style={{ margin: '10px 0 0', color: '#667085', fontSize: '12px' }}>Показаны первые {ledgerSlice.visible.length} из {ledgerSlice.total} операций; баланс посчитан по всей истории.</p> : null}
       </section>
     </div>
   );

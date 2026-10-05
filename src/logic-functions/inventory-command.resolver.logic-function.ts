@@ -5,7 +5,7 @@ import {
   MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME,
 } from 'src/constants/universal-identifiers';
 import { asClient } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
-import { verifyInternalRouteBodySignature } from 'src/logic-functions/utils/mahabbat-internal-route-signature.util';
+import { readInternalRouteSecondarySecrets, verifyInternalRouteBodySignature } from 'src/logic-functions/utils/mahabbat-internal-route-signature.util';
 import { getAuthenticatedPosContext } from 'src/pos/pos-auth';
 import { parseInventoryCommandEnvelope } from 'src/inventory/inventory-command-input';
 import { dispatchInventoryCommand } from 'src/inventory/inventory-dispatch';
@@ -24,6 +24,7 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
       body: event.body,
       signature: event.headers['x-mahabbat-signature'],
       secret,
+      secondarySecrets: readInternalRouteSecondarySecrets(),
     })
   ) {
     return response({ code: 'INVALID_SIGNATURE', message: 'Invalid internal signature.' }, 403);

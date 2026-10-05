@@ -39,6 +39,7 @@ import {
 } from 'src/front-components/pos-ui.helpers';
 import { POS_UI_CSS } from 'src/front-components/pos-ui.styles';
 import type { PosApi } from 'src/pos-ui/PosApi';
+import { StaffSheet } from 'src/pos-ui/StaffSheet';
 import {
   clearPosSession,
   persistPosSession,
@@ -59,11 +60,11 @@ type PosAppProps = {
   onSessionChange?: (session: PosSession | null) => void;
   gatewayBaseUrl?: string;
 };
-
 type SheetName =
   | 'reservation'
   | 'payment'
   | 'admin'
+  | 'staff'
   | 'void'
   | 'stop-list'
   | 'session'
@@ -94,10 +95,19 @@ const CORE_COLLECTIONS = [
   'posKitchenTicketLines',
   'posPrechecks',
   'posPayments',
-  'posPaymentMethods',
   'posPrepayments',
 ] as const;
-
+// printStatus приходит из replies printKitchenTicket/createPrecheck; фолбэк —
+// последний тикет заказа. Честно показываем агрегат сервера без выдумок.
+const PRINT_STATUS_LABEL: Record<string, string> = {
+  QUEUED: 'в очереди',
+  DISPATCHING: 'отправляется',
+  SENT: 'отправлено',
+  FAILED: 'ошибка',
+  OUTCOME_UNKNOWN: 'результат неизвестен — проверьте принтер',
+  CONFIRMED: 'подтверждено',
+  NO_UNSENT_LINES: 'нечего печатать',
+};
 const Sheet = ({
   title,
   subtitle,
@@ -210,7 +220,6 @@ const LoginView = ({
     </div>
   </div>
 );
-
 const PosHeader = ({
   session,
   activeShift,
@@ -219,6 +228,7 @@ const PosHeader = ({
   now,
   syncing,
   onReservation,
+  onStaff,
   onSessionMenu,
 }: {
   session: PosSession;
@@ -228,6 +238,7 @@ const PosHeader = ({
   now: number;
   syncing: boolean;
   onReservation: () => void;
+  onStaff: (() => void) | null;
   onSessionMenu: () => void;
 }) => (
   <header className="mah-pos-top">
@@ -256,6 +267,11 @@ const PosHeader = ({
       {reservationCount > 0 ? `Брони · ${reservationCount}` : 'Брони'}
       {overdueCount > 0 && <span>⚠ {overdueCount}</span>}
     </button>
+    {onStaff && (
+      <button type="button" className="mah-pos-top-action" onClick={onStaff}>
+        Сотрудники
+      </button>
+    )}
     <div className="mah-pos-top-actions">
       <div className={`mah-pos-sync ${syncing ? 'loading' : ''}`}>
         <i />
@@ -455,6 +471,7 @@ const MenuBrowser = ({
   orderEditable,
   orderLocked,
   busy,
+  isAdmin,
   onSearch,
   onCategory,
   onShowTables,
@@ -472,6 +489,7 @@ const MenuBrowser = ({
   orderEditable: boolean;
   orderLocked: boolean;
   busy: boolean;
+  isAdmin: boolean;
   onSearch: (value: string) => void;
   onCategory: (value: string) => void;
   onShowTables: () => void;
@@ -528,13 +546,20 @@ const MenuBrowser = ({
           enterKeyHint="search"
           autoComplete="off"
         />
-        <button
-          type="button"
-          className={`mah-pos-stop-button ${stopList.size > 0 ? 'active' : ''}`}
-          onClick={onStopList}
-        >
-          {stopList.size > 0 ? `Стоп-лист · ${stopList.size}` : 'Стоп-лист'}
-        </button>
+        {isAdmin ? (
+          <button
+            type="button"
+            className={`mah-pos-stop-button ${stopList.size > 0 ? 'active' : ''}`}
+            onClick={onStopList}
+            title="Стоп-лист доступен только администратору"
+          >
+            {stopList.size > 0 ? `Стоп-лист · ${stopList.size}` : 'Стоп-лист'}
+          </button>
+        ) : (
+          <span className="mah-pos-menu-context" title="Стоп-лист меняет только администратор">
+            Стоп-лист — у администратора
+          </span>
+        )}
       </div>
       {!shiftOpen && (
         <div className="mah-pos-shift-note" role="status">
@@ -739,6 +764,8 @@ const OrderPanel = ({
   remainingMicros,
   unsentCount,
   sentCount,
+  printStatus,
+  printStatusLabel,
   busy,
   onGuest,
   onAddGuest,
@@ -763,6 +790,8 @@ const OrderPanel = ({
   remainingMicros: number;
   unsentCount: number;
   sentCount: number;
+  printStatus?: string | null;
+  printStatusLabel?: string | null;
   busy: boolean;
   onGuest: (id: string) => void;
   onAddGuest: () => void;
@@ -930,6 +959,24 @@ const OrderPanel = ({
                               + ещё
                             </button>
                           </>
+                        ) : sent && !canDecrease ? (
+                          <>
+                            <span className="mah-pos-qty mah-pos-static-qty">
+                              × {quantity}
+                            </span>
+                            <span className="mah-pos-line-state sent" title="Уменьшение отправленной позиции — только через «Отмену блюда» у администратора">
+                              Уменьшение — через отмену
+                            </span>
+                            <button
+                              type="button"
+                              className="mah-pos-qty-button"
+                              aria-label={`Увеличить ${line.itemNameSnapshot}`}
+                              disabled={busy || locked || !orderEditable}
+                              onClick={() => onQuantity(line, quantity + 1)}
+                            >
+                              +
+                            </button>
+                          </>
                         ) : (
                           <>
                             <button
@@ -985,6 +1032,7 @@ const OrderPanel = ({
           <span>
             На кухне <b>{sentCount}</b>
           </span>
+          {printStatus && printStatus !== 'NO_UNSENT_LINES' ? <span>Печать: <b>{printStatusLabel ?? printStatus}</b></span> : null}
         </div>
         <div className="mah-pos-totals">
           <div className="mah-pos-total-row">
@@ -1115,6 +1163,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   const [now, setNow] = useState(Date.now());
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [shiftCloseConfirm, setShiftCloseConfirm] = useState(false);
+  const [printStatusByOrder, setPrintStatusByOrder] = useState<Record<string, string>>({});
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(
     null,
   );
@@ -1196,12 +1245,24 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
 
   useEffect(() => {
     if (!session) return;
+    const sessionMessageFor = (code: string): string | null => {
+      if (code === 'POS_STAFF_LOCKED') return 'Смена заблокирована: слишком много неверных попыток входа. Подождите и попробуйте снова.';
+      if (code === 'POS_STAFF_INACTIVE') return 'Сотрудник отключён администратором. Обратитесь к администратору.';
+      if (['POS_SESSION_EXPIRED', 'POS_SESSION_INVALID', 'POS_SESSION_REQUIRED'].includes(code)) return 'Сессия завершена. Войдите по PIN снова.';
+      return null;
+    };
+    const codeOf = (value: unknown): string => {
+      if (value && typeof value === 'object' && 'body' in value) {
+        const body = value.body;
+        if (body && typeof body === 'object' && 'code' in body) return String(body.code ?? '');
+      }
+      return '';
+    };
     void load().catch((value) => {
-      const body = (value as unknown as { body?: { code?: string } })?.body;
-      const code = String(body?.code ?? '');
-      if (['POS_SESSION_EXPIRED', 'POS_SESSION_INVALID', 'POS_SESSION_REQUIRED', 'POS_STAFF_LOCKED', 'POS_STAFF_INACTIVE'].includes(code)) {
+      const sessionMessage = sessionMessageFor(codeOf(value));
+      if (sessionMessage) {
         setSession(null);
-        setError('Сессия истекла. Введите PIN снова.');
+        setError(sessionMessage);
         return;
       }
       const msg = commandError(value);
@@ -1210,11 +1271,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     });
     const refreshTimer = globalThis.setInterval(() => {
       void load().catch((value) => {
-        const body = (value as unknown as { body?: { code?: string } })?.body;
-        const code = String(body?.code ?? '');
-        if (['POS_SESSION_EXPIRED', 'POS_SESSION_INVALID', 'POS_SESSION_REQUIRED'].includes(code)) {
+        const sessionMessage = sessionMessageFor(codeOf(value));
+        if (sessionMessage) {
           setSession(null);
-          setError('Сессия истекла. Введите PIN снова.');
+          setError(sessionMessage);
           globalThis.clearInterval(refreshTimer);
           return;
         }
@@ -1263,11 +1323,18 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
       activityRefreshInFlightRef.current = true;
       void command('refreshPosSession', {})
         .catch((value) => {
-          const code = String(
-            (value as unknown as { body?: { code?: string } })?.body?.code ??
-              '',
-          );
-          if (
+          let code = '';
+          if (value && typeof value === 'object' && 'body' in value) {
+            const body = value.body;
+            if (body && typeof body === 'object' && 'code' in body) code = String(body.code ?? '');
+          }
+          if (code === 'POS_STAFF_LOCKED') {
+            setSession(null);
+            setError('Смена заблокирована: слишком много неверных попыток входа. Подождите и попробуйте снова.');
+          } else if (code === 'POS_STAFF_INACTIVE') {
+            setSession(null);
+            setError('Сотрудник отключён администратором. Обратитесь к администратору.');
+          } else if (
             [
               'POS_SESSION_EXPIRED',
               'POS_SESSION_INVALID',
@@ -1275,7 +1342,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
             ].includes(code)
           ) {
             setSession(null);
-            setError('Сессия истекла. Введите PIN снова.');
+            setError('Сессия завершена. Войдите по PIN снова.');
           }
         })
         .finally(() => {
@@ -1308,13 +1375,29 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
         return result;
       } catch (value) {
         const msg = commandError(value);
-        const raw = String((value as unknown as { message?: string })?.message ?? '');
+        let raw = '';
+        if (value instanceof Error) raw = value.message;
+        else if (value && typeof value === 'object' && 'body' in value) {
+          const body = value.body;
+          if (body && typeof body === 'object' && 'message' in body) raw = String(body.message ?? '');
+        }
+        let code = '';
+        if (value && typeof value === 'object' && 'body' in value) {
+          const body = value.body;
+          if (body && typeof body === 'object' && 'code' in body) code = String(body.code ?? '');
+        }
         const isFetch = raw.toLowerCase().includes('fetch') || raw.toLowerCase().includes('network') || msg.includes('Нет связи');
         if (isFetch && msg === 'Не удалось выполнить операцию. Обновите данные и попробуйте снова') {
           setError('Нет связи с сервером. Проверьте сеть и попробуйте снова.');
-        } else if (String((value as unknown as { body?: { code?: string } })?.body?.code ?? '') === 'POS_SESSION_EXPIRED' || String((value as unknown as { body?: { code?: string } })?.body?.code ?? '') === 'POS_SESSION_INVALID') {
+        } else if (code === 'POS_STAFF_LOCKED') {
           setSession(null);
-          setError('Сессия истекла. Введите PIN снова.');
+          setError('Смена заблокирована: слишком много неверных попыток входа. Подождите и попробуйте снова.');
+        } else if (code === 'POS_STAFF_INACTIVE') {
+          setSession(null);
+          setError('Сотрудник отключён администратором. Обратитесь к администратору.');
+        } else if (['POS_SESSION_EXPIRED', 'POS_SESSION_INVALID', 'POS_SESSION_REQUIRED'].includes(code)) {
+          setSession(null);
+          setError('Сессия завершена. Войдите по PIN снова.');
         } else {
           setError(msg);
         }
@@ -1325,6 +1408,38 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     },
     [command, load, setSession],
   );
+  // Сотрудники (ADMIN). run() сам зовёт load() → rows.posStaffs обновляется.
+  // Парсеры не читают idempotencyKey — от дабл-клика защищает busy.
+  const createStaff = async (input: {
+    displayName: string;
+    staffRole: 'WAITER' | 'ADMIN';
+    pin: string;
+  }): Promise<boolean> => {
+    const result = await run(
+      'createPosStaff',
+      { displayName: input.displayName, staffRole: input.staffRole, pin: input.pin },
+      'Сотрудник добавлен',
+    );
+    return result !== null;
+  };
+
+  const setStaffPin = async (staffId: string, pin: string): Promise<boolean> => {
+    const result = await run(
+      'setPosStaffPin',
+      { targetStaffId: staffId, pin },
+      'PIN обновлён',
+    );
+    return result !== null;
+  };
+
+  const setStaffActive = async (staffId: string, isActive: boolean): Promise<boolean> => {
+    const result = await run(
+      'setPosStaffActive',
+      { targetStaffId: staffId, isActive },
+      isActive ? 'Сотрудник включён' : 'Сотрудник отключён',
+    );
+    return result !== null;
+  };
 
   const login = async () => {
     if (!/^\d{4,8}$/.test(pin)) {
@@ -1519,6 +1634,15 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
         ),
       0,
     );
+  // printStatus приходит из replies printKitchenTicket/createPrecheck; фолбэк —
+  // последний тикет заказа из списка. Честно показываем агрегат без выдумок.
+  const ticketStatuses = (rows.posKitchenTickets ?? [])
+    .filter((row) => row.orderId === orderId)
+    .map((row) => String(row.printStatus ?? ''))
+    .filter(Boolean);
+  const ticketStatusForOrder = ticketStatuses.length ? ticketStatuses[ticketStatuses.length - 1] : null;
+  const printStatusForOrder = orderId ? (printStatusByOrder[orderId] ?? ticketStatusForOrder) : null;
+  const printStatusLabelForOrder = printStatusForOrder ? (PRINT_STATUS_LABEL[printStatusForOrder] ?? printStatusForOrder) : null;
   const staffNames = useMemo(
     () =>
       new Map(
@@ -1624,6 +1748,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     if (result?.guestId) setGuestId(String(result.guestId));
   };
 
+  // Стратегия слияния: повторяющийся тап по блюду увеличивает последнюю ACTIVE-
+  // линию этого гостя (findMergeablePosLine), а не создаёт новую. Дешевле CAS на
+  // клиенте: сервер держит идемпотентность addLine и честный changeLineQuantity,
+  // параллельные тапы с разных терминалов сходятся без потери строк.
   const addLine = (item: PosRow) => {
     if (
       !orderId ||
@@ -1935,6 +2063,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
         now={now}
         syncing={syncing}
         onReservation={() => openReservationSheet()}
+        onStaff={session.staff.role === 'ADMIN' ? () => setSheet('staff') : null}
         onSessionMenu={() => setSheet('session')}
       />
       <div className="mah-pos-shell">
@@ -1979,6 +2108,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
             orderEditable={selectedOrderEditable}
             orderLocked={Boolean(orderPrecheck)}
             busy={busy}
+            isAdmin={session.staff.role === 'ADMIN'}
             onSearch={(value) => {
               setSearch(value);
               if (value.trim()) setCategory('Все');
@@ -2014,6 +2144,8 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
               remainingMicros={remainingMicros}
               unsentCount={unsentCount}
               sentCount={sentCount}
+              printStatus={printStatusForOrder}
+              printStatusLabel={printStatusLabelForOrder}
               busy={busy}
               onGuest={setGuestId}
               onAddGuest={() => void addGuest()}
@@ -2023,14 +2155,20 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                   'printKitchenTicket',
                   { orderId: selectedOrder.id, idempotencyKey: uuid() },
                   'Новые блюда отправлены на кухню',
-                )
+                ).then((result) => {
+                  const status = result ? String(result.printStatus ?? '') : '';
+                  if (status) setPrintStatusByOrder((current) => ({ ...current, [selectedOrder.id]: status }));
+                })
               }
               onPrecheck={() =>
                 void run(
                   'createPrecheck',
                   { orderId: selectedOrder.id, idempotencyKey: uuid() },
                   'Пречек сформирован · заказ заблокирован',
-                )
+                ).then((result) => {
+                  const status = result ? String(result.printStatus ?? '') : '';
+                  if (status) setPrintStatusByOrder((current) => ({ ...current, [selectedOrder.id]: status }));
+                })
               }
               onPayment={() => {
                 setPaymentAmount(formatMicrosForInput(remainingMicros));
@@ -2451,7 +2589,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
         </Sheet>
       )}
 
-      {sheet === 'stop-list' && (
+      {sheet === 'stop-list' && session.staff.role === 'ADMIN' && (
         <Sheet
           title="Стоп-лист"
           subtitle={
@@ -2531,8 +2669,25 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
           </div>
         </Sheet>
       )}
+      {sheet === 'staff' && session.staff.role === 'ADMIN' && (
+        <Sheet
+          title="Сотрудники"
+          subtitle="PIN — 4–8 цифр · изменения попадут в аудит"
+          onClose={() => setSheet(null)}
+          wide
+        >
+          <StaffSheet
+            staff={rows.posStaffs ?? []}
+            currentStaffId={session.staff.id}
+            busy={busy}
+            onCreate={createStaff}
+            onSetPin={setStaffPin}
+            onSetActive={setStaffActive}
+          />
+        </Sheet>
+      )}
 
-      {sheet === 'admin' && selectedOrder && session.staff.role === 'ADMIN' && (
+      {sheet === 'admin' && selectedOrder && session.staff.role === 'ADMIN' && selectedOrderEditable && (
         <Sheet
           title="Действия администратора"
           subtitle={`Стол ${selectedTable?.number ?? '—'} · изменения попадут в аудит`}
@@ -2725,7 +2880,7 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
         </Sheet>
       )}
 
-      {sheet === 'void' && session.staff.role === 'ADMIN' && (
+      {sheet === 'void' && session.staff.role === 'ADMIN' && selectedOrderEditable && (
         <Sheet
           title="Отмена блюда"
           subtitle={`${selectedLines.length} позиций · запись останется в истории`}

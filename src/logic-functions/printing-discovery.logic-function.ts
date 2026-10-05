@@ -13,7 +13,15 @@ const response = (body: unknown, status: number) =>
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
   });
 
-export const handler = async (): Promise<Response> => {
+export const handler = async (event?: unknown): Promise<Response> => {
+  const headers = (event as { headers?: Record<string, string | undefined> } | undefined)?.headers;
+  const auth = headers?.authorization ?? headers?.Authorization;
+  if (!auth || !/^Bearer\s+\S+$/i.test(auth)) {
+    // The discovery proxy reaches the Windows spooler through the signed
+    // local gateway; an anonymous browser must never enumerate printers.
+    return response({ code: 'PRINT_DISCOVERY_UNAUTHORIZED', message: 'Требуется вход в систему.' }, 401);
+  }
+
   const secret = process.env[MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME];
   const gatewayUrl = (process.env.MAHABBAT_PRINT_GATEWAY_URL ?? 'http://host.docker.internal:3110').replace(/\/+$/, '');
   if (!secret) return response({ code: 'PRINT_GATEWAY_NOT_CONFIGURED', message: 'Печатный шлюз не настроен.' }, 503);
@@ -27,6 +35,7 @@ export const handler = async (): Promise<Response> => {
     const text = await delegated.text();
     let payload: unknown = {};
     try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
+    if (delegated.status === 401 || delegated.status === 403) return response({ code: 'PRINT_DISCOVERY_UNAUTHORIZED', message: 'Требуется вход в систему.' }, 401);
     if (!delegated.ok) return response({ code: 'PRINT_DISCOVERY_UNAVAILABLE', message: 'Список системных принтеров недоступен.' }, 503);
     return response(payload, 200);
   } catch {

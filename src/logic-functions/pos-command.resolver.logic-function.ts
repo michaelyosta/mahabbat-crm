@@ -5,10 +5,11 @@ import {
   POS_COMMAND_RESOLVER_LOGIC_FUNCTION_UNIVERSAL_IDENTIFIER,
 } from 'src/constants/universal-identifiers';
 import { asClient } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
-import { verifyInternalRouteBodySignature } from 'src/logic-functions/utils/mahabbat-internal-route-signature.util';
+import { readInternalRouteSecondarySecrets, verifyInternalRouteBodySignature } from 'src/logic-functions/utils/mahabbat-internal-route-signature.util';
 import {
   authenticatePosStaff,
   getAuthenticatedPosContext,
+  posIdleTtlMsForRole,
   refreshPosSessionActivity,
   revokePosSession,
 } from 'src/pos/pos-auth';
@@ -51,6 +52,7 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
       body: event.body,
       signature: event.headers['x-mahabbat-signature'],
       secret,
+      secondarySecrets: readInternalRouteSecondarySecrets(),
     })
   ) {
     return response(
@@ -77,9 +79,35 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
     if (sessionToken !== undefined || !POS_PRINTING_COMMANDS.has(command)) {
       return response({ code: 'COMMAND_FORBIDDEN', message: 'Команда недоступна через CRM.' }, 403);
     }
+    const callerWorkspaceId =
+      event.body && typeof event.body === 'object'
+        ? (event.body as Record<string, unknown>).crmCallerWorkspaceId
+        : undefined;
     const actor = await crmPrintingActor(client);
     if (!actor) return response({ code: 'PRINT_ADMIN_NOT_CONFIGURED', message: 'Администратор печати не настроен.' }, 503);
     const result = await dispatchPosCommand(client, command, parsedPayload.data as Record<string, unknown>, actor);
+    try {
+      await client.mutation({
+        createPosOperationalEvent: {
+          __args: {
+            data: {
+              label: 'CRM_PRINTING_BYPASS',
+              eventType: 'CRM_PRINTING_BYPASS',
+              actorStaffId: actor.staffId,
+              occurredAt: new Date().toISOString(),
+              details: JSON.stringify({
+                command,
+                callerWorkspaceId: typeof callerWorkspaceId === 'string' ? callerWorkspaceId : null,
+              }),
+              idempotencyKey: `crm-bypass:${typeof callerWorkspaceId === 'string' ? callerWorkspaceId : 'unknown'}:${command}:${JSON.stringify(parsedPayload.data).slice(0, 64)}`,
+            },
+          },
+          id: true,
+        },
+      });
+    } catch {
+      // Audit is best-effort: the printing command already succeeded.
+    }
     return response(result.body, result.status);
   }
 
@@ -103,9 +131,13 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
   // dispatch so a command made near the old deadline cannot succeed and then
   // immediately eject the employee on the following data refresh. Background
   // REST polling goes through the standalone gateway and does not touch it.
+  // Mahabbat P1 TTL ceiling: role-derived TTL (ADMIN 5m, WAITER 15m) and the
+  // absolute 12h session ceiling enforced inside refreshPosSessionActivity.
   const activeContext = await refreshPosSessionActivity(
     client,
     authenticated.context,
+    new Date(),
+    posIdleTtlMsForRole(authenticated.context.role),
   );
 
   if (command === 'refreshPosSession') {

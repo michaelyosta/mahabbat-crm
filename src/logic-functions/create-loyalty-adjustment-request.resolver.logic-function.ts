@@ -7,7 +7,7 @@ import {
 } from 'src/constants/universal-identifiers';
 import { asClient } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
 import { createPendingLoyaltyAdjustment } from 'src/logic-functions/create-loyalty-adjustment-request.logic-function';
-import { verifyInternalRouteBodySignature } from 'src/logic-functions/utils/mahabbat-internal-route-signature.util';
+import { readInternalRouteSecondarySecrets, verifyInternalRouteBodySignature } from 'src/logic-functions/utils/mahabbat-internal-route-signature.util';
 import {
   parseCreateLoyaltyAdjustmentBody,
   type CreateLoyaltyAdjustmentInput,
@@ -30,6 +30,7 @@ export const handler = async (
       body: event.body,
       signature: event.headers['x-mahabbat-signature'],
       secret,
+      secondarySecrets: readInternalRouteSecondarySecrets(),
     })
   ) {
     return response(

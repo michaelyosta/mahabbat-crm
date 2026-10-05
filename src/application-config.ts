@@ -13,9 +13,15 @@ export default defineApplication({
   serverVariables: {
     MAHABBAT_INTERNAL_ROUTE_SECRET: {
       description:
-        'Secret used only between the authenticated adjustment route and the app-only server resolver. Configure and rotate before production use.',
+        'Primary secret for internal route HMAC (v1=<hex>). Rotate via MAHABBAT_INTERNAL_ROUTE_SECRET_PREVIOUS grace: set the previous value there, deploy, then switch primary.',
       isSecret: true,
       isRequired: true,
+    },
+    MAHABBAT_INTERNAL_ROUTE_SECRET_PREVIOUS: {
+      description:
+        'Previous internal route secret accepted alongside the primary during rotation grace. Empty outside rotation.',
+      isSecret: true,
+      isRequired: false,
     },
   },
 });

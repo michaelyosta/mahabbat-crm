@@ -24,12 +24,14 @@ export const handler = async (event: RoutePayload): Promise<Response> => {
   // `isAuthRequired` has already validated the CRM/ Twenty workspace session
   // before this handler runs. Mark only the printing configuration subset as
   // CRM-authenticated; every other POS command still requires PosSession.
+  // The real workspace caller (userWorkspaceId) travels with the delegation
+  // so the resolver can audit who actually pressed the button.
   const crmPrintingRequest =
     event.userWorkspaceId !== null &&
     parsed.data.sessionToken === undefined &&
     POS_PRINTING_COMMANDS.has(parsed.data.command);
   const delegatedEnvelope = crmPrintingRequest
-    ? { ...parsed.data, crmWorkspaceAuthenticated: true }
+    ? { ...parsed.data, crmWorkspaceAuthenticated: true, crmCallerWorkspaceId: event.userWorkspaceId }
     : parsed.data;
 
   const secret = process.env[MAHABBAT_INTERNAL_ROUTE_SECRET_ENV_VAR_NAME];
