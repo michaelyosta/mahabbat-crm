@@ -1372,46 +1372,46 @@ export const executeCreatePosStaff = async (
 
 export const executeSetPosStaffPin = async (
   client: CoreApiClientLike,
-  payload: { staffId: string; pin: string },
+  payload: { targetStaffId: string; pin: string },
   actor: PosActor,
 ): Promise<CommandResult> => {
-  const staff = await findStaffById(client, payload.staffId);
+  const staff = await findStaffById(client, payload.targetStaffId);
   if (!staff) return errorResult('STAFF_NOT_FOUND', 'Сотрудник не найден.');
   const pinHash = await hashPosPin(payload.pin);
   try {
-    await client.mutation({ updatePosStaff: { __args: { id: payload.staffId, data: { pinHash, failedLoginCount: 0, lockedUntil: null } }, id: true } });
+    await client.mutation({ updatePosStaff: { __args: { id: payload.targetStaffId, data: { pinHash, failedLoginCount: 0, lockedUntil: null } }, id: true } });
   } catch {
     return errorResult('CONFLICT', 'PIN не обновлён.');
   }
   await createOperationalEvent(client, {
     eventType: 'POS_STAFF_PIN_CHANGED',
     actorStaffId: actor.staffId,
-    details: { staffId: payload.staffId },
-    idempotencyKey: `staff-pin:${payload.staffId}:${Date.now()}`,
+    details: { staffId: payload.targetStaffId },
+    idempotencyKey: `staff-pin:${payload.targetStaffId}:${Date.now()}`,
   });
-  return okResult(200, { staffId: payload.staffId });
+  return okResult(200, { staffId: payload.targetStaffId });
 };
 
 export const executeSetPosStaffActive = async (
   client: CoreApiClientLike,
-  payload: { staffId: string; isActive: boolean },
+  payload: { targetStaffId: string; isActive: boolean },
   actor: PosActor,
 ): Promise<CommandResult> => {
-  if (payload.staffId === actor.staffId) return errorResult('CONFLICT', 'Нельзя отключить самого себя.');
-  const staff = await findStaffById(client, payload.staffId);
+  if (payload.targetStaffId === actor.staffId) return errorResult('CONFLICT', 'Нельзя отключить самого себя.');
+  const staff = await findStaffById(client, payload.targetStaffId);
   if (!staff) return errorResult('STAFF_NOT_FOUND', 'Сотрудник не найден.');
   try {
-    await client.mutation({ updatePosStaff: { __args: { id: payload.staffId, data: { isActive: payload.isActive } }, id: true } });
+    await client.mutation({ updatePosStaff: { __args: { id: payload.targetStaffId, data: { isActive: payload.isActive } }, id: true } });
   } catch {
     return errorResult('CONFLICT', 'Статус не обновлён.');
   }
   await createOperationalEvent(client, {
     eventType: payload.isActive ? 'POS_STAFF_ACTIVATED' : 'POS_STAFF_DEACTIVATED',
     actorStaffId: actor.staffId,
-    details: { staffId: payload.staffId },
-    idempotencyKey: `staff-active:${payload.staffId}:${payload.isActive}:${Date.now()}`,
+    details: { staffId: payload.targetStaffId },
+    idempotencyKey: `staff-active:${payload.targetStaffId}:${payload.isActive}:${Date.now()}`,
   });
-  return okResult(200, { staffId: payload.staffId, isActive: payload.isActive });
+  return okResult(200, { staffId: payload.targetStaffId, isActive: payload.isActive });
 };
 export const executeTestPrinterDevice = async (
   client: CoreApiClientLike,
@@ -3860,12 +3860,12 @@ export const dispatchPosCommand = async (
       }, actor);
     case 'setPosStaffPin':
       return executeSetPosStaffPin(client, {
-        staffId: payload.staffId as string,
+        targetStaffId: payload.targetStaffId as string,
         pin: payload.pin as string,
       }, actor);
     case 'setPosStaffActive':
       return executeSetPosStaffActive(client, {
-        staffId: payload.staffId as string,
+        targetStaffId: payload.targetStaffId as string,
         isActive: payload.isActive as boolean,
       }, actor);
     case 'authenticatePosStaff':

@@ -208,12 +208,12 @@ export type CreatePosStaffPayload = {
 };
 
 export type SetPosStaffPinPayload = {
-  staffId: string;
+  targetStaffId: string;
   pin: string;
 };
 
 export type SetPosStaffActivePayload = {
-  staffId: string;
+  targetStaffId: string;
   isActive: boolean;
 };
 
@@ -772,18 +772,18 @@ const parseCreatePosStaffPayload = (payload: unknown): ParseResult<CreatePosStaf
 const parseSetPosStaffPinPayload = (payload: unknown): ParseResult<SetPosStaffPinPayload> => {
   if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
   const value = payload as Record<string, unknown>;
-  if (!isUuid(value.staffId)) return invalid('INVALID_PAYLOAD', 'staffId must be a UUID');
+  if (!isUuid(value.targetStaffId)) return invalid('INVALID_PAYLOAD', 'staffId must be a UUID');
   const pin = parseStaffPin(value.pin);
   if (!pin.ok) return pin;
-  return { ok: true, data: { staffId: value.staffId, pin: pin.data } };
+  return { ok: true, data: { targetStaffId: value.targetStaffId, pin: pin.data } };
 };
 
 const parseSetPosStaffActivePayload = (payload: unknown): ParseResult<SetPosStaffActivePayload> => {
   if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
   const value = payload as Record<string, unknown>;
-  if (!isUuid(value.staffId)) return invalid('INVALID_PAYLOAD', 'staffId must be a UUID');
+  if (!isUuid(value.targetStaffId)) return invalid('INVALID_PAYLOAD', 'staffId must be a UUID');
   if (typeof value.isActive !== 'boolean') return invalid('INVALID_PAYLOAD', 'isActive must be a boolean');
-  return { ok: true, data: { staffId: value.staffId, isActive: value.isActive } };
+  return { ok: true, data: { targetStaffId: value.targetStaffId, isActive: value.isActive } };
 };
 
 export const parsePosCommandEnvelope = (
