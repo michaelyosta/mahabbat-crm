@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
+import { hashPosPin } from 'src/pos/pos-auth';
 
 import { type CoreApiClientLike } from 'src/logic-functions/apply-loyalty-adjustment-request.logic-function';
 import {
@@ -1339,6 +1340,79 @@ export const executeUpsertProductionStation = async (
   }
 };
 
+export const executeCreatePosStaff = async (
+  client: CoreApiClientLike,
+  payload: { displayName: string; staffRole: 'WAITER' | 'ADMIN'; pin: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const pinHash = await hashPosPin(payload.pin);
+  try {
+    const created = (await client.mutation({
+      createPosStaff: {
+        __args: {
+          data: { displayName: payload.displayName, staffRole: payload.staffRole, pinHash, isActive: true, failedLoginCount: 0 },
+        },
+        id: true,
+        displayName: true,
+        staffRole: true,
+      },
+    })) as unknown as { createPosStaff?: { id: string; displayName?: string; staffRole?: string } };
+    if (!created.createPosStaff?.id) return errorResult('CONFLICT', 'Сотрудник не создан.');
+    await createOperationalEvent(client, {
+      eventType: 'POS_STAFF_CREATED',
+      actorStaffId: actor.staffId,
+      details: { staffId: created.createPosStaff.id, displayName: payload.displayName, staffRole: payload.staffRole },
+      idempotencyKey: `staff-create:${created.createPosStaff.id}`,
+    });
+    return okResult(201, { staffId: created.createPosStaff.id, displayName: created.createPosStaff.displayName, staffRole: created.createPosStaff.staffRole });
+  } catch {
+    return errorResult('CONFLICT', 'Сотрудник не создан. Проверьте имя.');
+  }
+};
+
+export const executeSetPosStaffPin = async (
+  client: CoreApiClientLike,
+  payload: { staffId: string; pin: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const staff = await findStaffById(client, payload.staffId);
+  if (!staff) return errorResult('STAFF_NOT_FOUND', 'Сотрудник не найден.');
+  const pinHash = await hashPosPin(payload.pin);
+  try {
+    await client.mutation({ updatePosStaff: { __args: { id: payload.staffId, data: { pinHash, failedLoginCount: 0, lockedUntil: null } }, id: true } });
+  } catch {
+    return errorResult('CONFLICT', 'PIN не обновлён.');
+  }
+  await createOperationalEvent(client, {
+    eventType: 'POS_STAFF_PIN_CHANGED',
+    actorStaffId: actor.staffId,
+    details: { staffId: payload.staffId },
+    idempotencyKey: `staff-pin:${payload.staffId}:${Date.now()}`,
+  });
+  return okResult(200, { staffId: payload.staffId });
+};
+
+export const executeSetPosStaffActive = async (
+  client: CoreApiClientLike,
+  payload: { staffId: string; isActive: boolean },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  if (payload.staffId === actor.staffId) return errorResult('CONFLICT', 'Нельзя отключить самого себя.');
+  const staff = await findStaffById(client, payload.staffId);
+  if (!staff) return errorResult('STAFF_NOT_FOUND', 'Сотрудник не найден.');
+  try {
+    await client.mutation({ updatePosStaff: { __args: { id: payload.staffId, data: { isActive: payload.isActive } }, id: true } });
+  } catch {
+    return errorResult('CONFLICT', 'Статус не обновлён.');
+  }
+  await createOperationalEvent(client, {
+    eventType: payload.isActive ? 'POS_STAFF_ACTIVATED' : 'POS_STAFF_DEACTIVATED',
+    actorStaffId: actor.staffId,
+    details: { staffId: payload.staffId },
+    idempotencyKey: `staff-active:${payload.staffId}:${payload.isActive}:${Date.now()}`,
+  });
+  return okResult(200, { staffId: payload.staffId, isActive: payload.isActive });
+};
 export const executeTestPrinterDevice = async (
   client: CoreApiClientLike,
   payload: { printerDeviceId: string; idempotencyKey: string },
@@ -3777,6 +3851,22 @@ export const dispatchPosCommand = async (
       return executeTestPrinterDevice(client, {
         printerDeviceId: payload.printerDeviceId as string,
         idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'createPosStaff':
+      return executeCreatePosStaff(client, {
+        displayName: payload.displayName as string,
+        staffRole: payload.staffRole as 'WAITER' | 'ADMIN',
+        pin: payload.pin as string,
+      }, actor);
+    case 'setPosStaffPin':
+      return executeSetPosStaffPin(client, {
+        staffId: payload.staffId as string,
+        pin: payload.pin as string,
+      }, actor);
+    case 'setPosStaffActive':
+      return executeSetPosStaffActive(client, {
+        staffId: payload.staffId as string,
+        isActive: payload.isActive as boolean,
       }, actor);
     case 'authenticatePosStaff':
     case 'logoutPosStaff':

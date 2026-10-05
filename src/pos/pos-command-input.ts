@@ -201,6 +201,22 @@ export type TestPrinterDevicePayload = {
   idempotencyKey: string;
 };
 
+export type CreatePosStaffPayload = {
+  displayName: string;
+  staffRole: 'WAITER' | 'ADMIN';
+  pin: string;
+};
+
+export type SetPosStaffPinPayload = {
+  staffId: string;
+  pin: string;
+};
+
+export type SetPosStaffActivePayload = {
+  staffId: string;
+  isActive: boolean;
+};
+
 const parseIdempotencyKey = (value: unknown): ParseResult<string> => {
   if (!isUuid(value)) {
     return invalid('INVALID_PAYLOAD', 'idempotencyKey must be a UUID');
@@ -731,6 +747,45 @@ const parseTestPrinterDevicePayload = (payload: unknown): ParseResult<TestPrinte
   return { ok: true, data: { printerDeviceId: value.printerDeviceId, idempotencyKey: key.data } };
 };
 
+const parseStaffRole = (value: unknown): ParseResult<'WAITER' | 'ADMIN'> => {
+  if (value !== 'WAITER' && value !== 'ADMIN') return invalid('INVALID_PAYLOAD', 'staffRole must be WAITER or ADMIN');
+  return { ok: true, data: value };
+};
+
+const parseStaffPin = (value: unknown): ParseResult<string> => {
+  if (typeof value !== 'string' || !/^\d{4,8}$/.test(value.trim())) return invalid('INVALID_PAYLOAD', 'pin must be 4 to 8 digits');
+  return { ok: true, data: value.trim() };
+};
+
+const parseCreatePosStaffPayload = (payload: unknown): ParseResult<CreatePosStaffPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const value = payload as Record<string, unknown>;
+  const name = parseBoundedLabel(value.displayName, 'displayName');
+  if (!name.ok) return name;
+  const role = parseStaffRole(value.staffRole);
+  if (!role.ok) return role;
+  const pin = parseStaffPin(value.pin);
+  if (!pin.ok) return pin;
+  return { ok: true, data: { displayName: name.data, staffRole: role.data, pin: pin.data } };
+};
+
+const parseSetPosStaffPinPayload = (payload: unknown): ParseResult<SetPosStaffPinPayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const value = payload as Record<string, unknown>;
+  if (!isUuid(value.staffId)) return invalid('INVALID_PAYLOAD', 'staffId must be a UUID');
+  const pin = parseStaffPin(value.pin);
+  if (!pin.ok) return pin;
+  return { ok: true, data: { staffId: value.staffId, pin: pin.data } };
+};
+
+const parseSetPosStaffActivePayload = (payload: unknown): ParseResult<SetPosStaffActivePayload> => {
+  if (typeof payload !== 'object' || payload === null) return invalid('INVALID_PAYLOAD', 'payload must be an object');
+  const value = payload as Record<string, unknown>;
+  if (!isUuid(value.staffId)) return invalid('INVALID_PAYLOAD', 'staffId must be a UUID');
+  if (typeof value.isActive !== 'boolean') return invalid('INVALID_PAYLOAD', 'isActive must be a boolean');
+  return { ok: true, data: { staffId: value.staffId, isActive: value.isActive } };
+};
+
 export const parsePosCommandEnvelope = (
   body: unknown,
 ): ParseResult<PosCommandEnvelope> => {
@@ -866,5 +921,11 @@ export const parseCommandPayload = <T>(
       return parseRetryPrintJobPayload(payload) as unknown as ParseResult<T>;
     case 'testPrinterDevice':
       return parseTestPrinterDevicePayload(payload) as unknown as ParseResult<T>;
+    case 'createPosStaff':
+      return parseCreatePosStaffPayload(payload) as unknown as ParseResult<T>;
+    case 'setPosStaffPin':
+      return parseSetPosStaffPinPayload(payload) as unknown as ParseResult<T>;
+    case 'setPosStaffActive':
+      return parseSetPosStaffActivePayload(payload) as unknown as ParseResult<T>;
   }
 };
