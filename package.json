@@ -21,6 +21,8 @@
     "seed:demo:dry": "node scripts/seed-demo.mjs --dry-run",
     "seed:pos": "node scripts/seed-pos.mjs",
     "seed:pos:dry": "node scripts/seed-pos.mjs --dry-run",
+    "seed:venue": "node scripts/seed-venue.mjs",
+    "seed:venue:dry": "node scripts/seed-venue.mjs --dry-run",
     "cleanup:pos:review-fixtures": "node scripts/cleanup-pos-review-fixtures.mjs",
     "seed:inventory:review": "node scripts/seed-inventory-human-review.mjs",
     "verify-runtime-api-parity": "node scripts/verify-runtime-api-parity.mjs",
