@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   authenticatePosStaff,
@@ -111,6 +111,8 @@ const staffRow = async (
 });
 
 describe('POS authentication context', () => {
+  // 30+ scrypt trials in the step-up test exceed the default 5s per-file budget.
+  vi.setConfig({ testTimeout: 30_000 });
   beforeEach(() => resetPosAuthRateLimiterForTests());
 
   it('hashes PINs without retaining plaintext and verifies them', async () => {
