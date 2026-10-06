@@ -1311,6 +1311,34 @@ describe('pos domain concurrency races', () => {
     expect(db.rows.posOrderLines.length).toBe(1);
   });
 
+  it('converges totals when the fresh line is invisible to re-read (read-your-write)', async () => {
+    const db = dbWithBaseline();
+    await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
+    const guest = await dispatchPosCommand(db, 'addGuest', { orderId, idempotencyKey: key(3) }, waiter);
+    const guestId = (guest.body as { guestId: string }).guestId;
+    // Hide freshly created lines from re-read: totals must still converge
+    // via the known-lines passthrough from executeAddLine.
+    const realLines = db.rows.posOrderLines;
+    const hidden: typeof realLines = [];
+    Object.defineProperty(db.rows, 'posOrderLines', { configurable: true, get: () => hidden, set: (v) => { hidden.length = 0; hidden.push(...v); } });
+    try {
+      const added = await dispatchPosCommand(
+        db,
+        'addLine',
+        { orderId, guestId, menuItemId: MENU_A, quantity: 1, idempotencyKey: key(4) },
+        waiter,
+      );
+      expect(added.status).toBe(201);
+    } finally {
+      Object.defineProperty(db.rows, 'posOrderLines', { configurable: true, value: realLines, writable: true });
+    }
+    const order = db.rows.posOrders.find((row) => row.id === orderId)!;
+    expect((order.total as { amountMicros: number }).amountMicros).toBeGreaterThan(0);
+    expect(order.status).toBe('IN_PROGRESS');
+  });
+
   it('blocks adding a stop-listed menu item server-side', async () => {
     const db = dbWithBaseline();
     db.seed('posStopListEntries', {

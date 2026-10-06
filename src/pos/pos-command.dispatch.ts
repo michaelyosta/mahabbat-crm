@@ -1103,8 +1103,18 @@ const assertOrderEditableForActor = (
 const updateLinesTotals = async (
   client: CoreApiClientLike,
   order: OrderRecord,
+  knownLines?: LineRecord[],
 ): Promise<{ activeLineCount: number }> => {
-  const lines = await findLinesByOrder(client, order.id);
+  // Read-your-write: сразу после createPosOrderLine свежая линия может быть
+  // невидима re-read в том же resolver-вызове (живьём воспроизведено:
+  // totals оставался null). Переданная линия учитывается напрямую.
+  let lines = await findLinesByOrder(client, order.id);
+  if (knownLines && knownLines.length > 0) {
+    const seen = new Set(lines.map((line) => line.id));
+    for (const known of knownLines) {
+      if (known?.id && !seen.has(known.id)) lines = [...lines, known];
+    }
+  }
   const activeLines = lines.filter((line) => line.status === 'ACTIVE');
 
   const orderSubtotalMicros = sumActiveLinesMicros(
@@ -1889,7 +1899,7 @@ export const executeAddLine = async (
       throw new Error('Line was created but could not be read back.');
     }
 
-    await updateLinesTotals(client, order);
+    await updateLinesTotals(client, order, [{ ...created, orderId: payload.orderId, guestId: payload.guestId, menuItemId: payload.menuItemId, quantity: payload.quantity, unitPrice, status: 'ACTIVE' } as LineRecord]);
 
     return okResult(201, { lineId: created.id, orderId: payload.orderId });
   } catch {
