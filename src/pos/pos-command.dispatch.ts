@@ -302,6 +302,7 @@ export const POS_ERROR_CODES = [
   'GUEST_TRANSFER_INVALID',
   'VOID_LINE_INVALID',
   'TOTALS_NOT_CONVERGED',
+  'SHIFT_HAS_OPEN_ORDERS',
   'CONFLICT',
 ] as const;
 
@@ -997,6 +998,22 @@ const findActiveOrderForTable = async (
   );
 };
 
+const findOpenOrdersByShift = async (
+  client: CoreApiClientLike,
+  shiftId: string,
+): Promise<OrderRecord[]> => {
+  const orders = await queryConnection<OrderRecord>(
+    client,
+    'posOrders',
+    { filter: { shiftId: { eq: shiftId } }, first: 100 },
+    ORDER_FIELDS,
+  );
+
+  return orders.filter((order) =>
+    isPosOrderActive(order.status as PosOrderStatus),
+  );
+};
+
 const findGuestById = async (
   client: CoreApiClientLike,
   guestId: string,
@@ -1616,6 +1633,23 @@ export const executeCloseShift = async (
 
   if (!shiftCanBeClosedBy(shift.staffId, actor)) {
     return errorResult('SHIFT_NOT_OWNED', 'Shift belongs to another staff member.');
+  }
+
+  const openOrders = await findOpenOrdersByShift(client, shift.id);
+  if (openOrders.length > 0) {
+    const detail = openOrders.map((order) => ({
+      orderId: order.id,
+      status: order.status ?? null,
+    }));
+    return {
+      status: 409,
+      body: {
+        code: 'SHIFT_HAS_OPEN_ORDERS' as PosErrorCode,
+        message: 'Shift has open orders. Close or cancel them before closing the shift.',
+        detail,
+        orderIds: detail.map((entry) => entry.orderId),
+      },
+    };
   }
 
   const closedAt = new Date().toISOString();

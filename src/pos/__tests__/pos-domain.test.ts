@@ -628,26 +628,25 @@ describe('pos domain happy path', () => {
     expect(db.rows.posOrderLines.find((row) => row.id === lineId)?.status).toBe('ACTIVE');
   });
 
-  it('closes a shift but leaves orders open and owned', async () => {
+  it('refuses to close a shift while an order is still open (guard)', async () => {
     const db = dbWithBaseline();
     const shift = await executeOpenShift(db, { idempotencyKey: key(1) }, waiter);
     const shiftId = (shift.body as { shiftId: string }).shiftId;
-    await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
+    const opened = await executeOpenOrder(db, { tableId: TABLE, idempotencyKey: key(2) }, waiter);
+    const orderId = (opened.body as { orderId: string }).orderId;
 
-    const closed = await dispatchPosCommand(db, 'closeShift', { shiftId }, waiter);
-    expect(closed.status).toBe(200);
+    const refused = await dispatchPosCommand(db, 'closeShift', { shiftId }, waiter);
+    expect(refused.status).toBe(409);
+    expect((refused.body as { code: string }).code).toBe('SHIFT_HAS_OPEN_ORDERS');
+    expect((refused.body as { orderIds: string[] }).orderIds).toContain(orderId);
 
-    const closedAgain = await dispatchPosCommand(db, 'closeShift', { shiftId }, waiter);
-    expect(closedAgain.status).toBe(200);
-
+    // Shift and order are untouched by the refusal.
+    const shifted = db.rows.posShifts[0];
+    expect(shifted.status).toBe('OPEN');
+    expect(shifted.isOpen).toBe(true);
     const order = db.rows.posOrders[0];
     expect(order.status).toBe('OPEN');
     expect(order.ownerStaffId).toBe(STAFF);
-
-    const shifted = db.rows.posShifts[0];
-    expect(shifted.isOpen).toBeNull();
-    expect(shifted.openToken).toBeNull();
-    expect(shifted.status).toBe('CLOSED');
   });
 
   it('blocks editing an order owned by another waiter', async () => {
