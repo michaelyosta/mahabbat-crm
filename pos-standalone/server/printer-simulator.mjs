@@ -10,6 +10,7 @@ export const createPrinterSimulator = ({ host = '127.0.0.1', port = 0, mode = 's
   const sockets = new Set();
   const server = net.createServer((socket) => {
     sockets.add(socket);
+    socket.on('error', () => {});
     socket.once('close', () => sockets.delete(socket));
     connections += 1;
     if (mode === 'timeout') return;
