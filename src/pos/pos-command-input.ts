@@ -900,6 +900,7 @@ export const parseCommandPayload = <T>(
     case 'recordPayment':
       return parseRecordPaymentPayload(payload) as unknown as ParseResult<T>;
     case 'closeOrder':
+    case 'reconcileDamagedOrderTotals':
       return parsePrecheckPayload(payload) as unknown as ParseResult<T>;
     case 'createReservation':
       return parseCreateReservationPayload(payload) as unknown as ParseResult<T>;

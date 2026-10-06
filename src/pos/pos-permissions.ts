@@ -22,6 +22,7 @@ export const POS_COMMANDS = [
   'applyPrepayment',
   'attachReservationToOrder',
   'voidOrderLines',
+  'reconcileDamagedOrderTotals',
   'transferOrderToTable',
   'transferOrderToWaiter',
   'transferOrderLinesToGuest',
@@ -72,6 +73,7 @@ const WAITER_ALLOWED_COMMANDS: ReadonlySet<PosCommand> = new Set(
       command !== 'authenticatePosStaff' &&
       command !== 'cancelPrecheck' &&
       command !== 'voidOrderLines' &&
+      command !== 'reconcileDamagedOrderTotals' &&
       command !== 'addStopListEntry' &&
       command !== 'clearStopListEntry' &&
       command !== 'transferOrderToTable' &&
