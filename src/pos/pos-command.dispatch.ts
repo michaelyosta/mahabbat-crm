@@ -302,6 +302,7 @@ export const POS_ERROR_CODES = [
   'GUEST_TRANSFER_INVALID',
   'VOID_LINE_INVALID',
   'TOTALS_NOT_CONVERGED',
+  'CONFLICT',
 ] as const;
 
 export type PosErrorCode = (typeof POS_ERROR_CODES)[number];
@@ -2859,6 +2860,7 @@ const buildPrecheckSnapshot = async (
   const totals = await updateLinesTotals(client, order);
   if (!totals.converged) throw new Error('Order totals could not be converged before printing the precheck.');
   const refreshedOrder = await findOrderById(client, order.id);
+  if (!refreshedOrder) throw new Error('Order disappeared while creating precheck.');
 
   const guests = await findGuestsByOrder(client, order.id);
   const lines = (await findLinesByOrder(client, order.id)).filter(
