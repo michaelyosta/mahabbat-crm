@@ -1002,15 +1002,41 @@ const findOpenOrdersByShift = async (
   client: CoreApiClientLike,
   shiftId: string,
 ): Promise<OrderRecord[]> => {
-  const orders = await queryConnection<OrderRecord>(
-    client,
-    'posOrders',
-    { filter: { shiftId: { eq: shiftId } }, first: 100 },
-    ORDER_FIELDS,
-  );
-
-  return orders.filter((order) =>
-    isPosOrderActive(order.status as PosOrderStatus),
+  // Paginated exhaustively: a single first:100 page lets one active order
+  // past the page hide from the guard (shift closes with open orders).
+  // Fail closed on absurd volumes instead of silently truncating.
+  const open: OrderRecord[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < 100; page += 1) {
+    const result = (await client.query({
+      posOrders: {
+        __args: {
+          filter: { shiftId: { eq: shiftId } },
+          first: 100,
+          ...(after === undefined ? {} : { after }),
+        },
+        edges: { node: ORDER_FIELDS },
+        pageInfo: { hasNextPage: true, endCursor: true },
+      },
+    })) as Record<string, Connection<OrderRecord>>;
+    const connection = result.posOrders;
+    for (const edge of connection?.edges ?? []) {
+      const node = edge?.node;
+      if (node && isPosOrderActive(node.status as PosOrderStatus)) {
+        open.push(node);
+      }
+    }
+    if (connection?.pageInfo?.hasNextPage !== true) {
+      return open;
+    }
+    const cursor = connection?.pageInfo?.endCursor;
+    if (typeof cursor !== 'string' || cursor.length === 0) {
+      return open;
+    }
+    after = cursor;
+  }
+  throw new Error(
+    'Shift order volume exceeds the guard page budget; refusing to close.',
   );
 };
 
@@ -1635,7 +1661,23 @@ export const executeCloseShift = async (
     return errorResult('SHIFT_NOT_OWNED', 'Shift belongs to another staff member.');
   }
 
-  const openOrders = await findOpenOrdersByShift(client, shift.id);
+  let openOrders: OrderRecord[];
+  try {
+    openOrders = await findOpenOrdersByShift(client, shift.id);
+  } catch {
+    // Fail closed: when the full order volume cannot be verified (page
+    // budget exhausted), the shift must NOT close. A 500 here would also
+    // refuse, but 409 names the guard contract for the operator.
+    return {
+      status: 409,
+      body: {
+        code: 'SHIFT_HAS_OPEN_ORDERS' as PosErrorCode,
+        message: 'Shift orders could not be fully verified. Resolve open orders before closing the shift.',
+        detail: [],
+        orderIds: [],
+      },
+    };
+  }
   if (openOrders.length > 0) {
     const detail = openOrders.map((order) => ({
       orderId: order.id,

@@ -44,11 +44,24 @@ class CloseShiftFakeDb {
     const filter = (args.filter ?? {}) as Record<string, unknown>;
     const limit = typeof args.first === 'number' ? args.first : 100;
     const source = root === 'posShifts' ? this.shifts : this.orders;
-    const filtered = this.applyEqFilter(source, filter).slice(0, limit);
+    const filtered = this.applyEqFilter(source, filter);
+    // Cursor pagination: `after` is the endCursor (index) of the previous
+    // page. Unknown/absent cursor starts at 0. This mirrors the Twenty
+    // connection contract the server paginates with.
+    let start = 0;
+    if (typeof args.after === 'string' && args.after.length > 0) {
+      const parsed = Number.parseInt(args.after, 10);
+      start = Number.isNaN(parsed) ? 0 : parsed + 1;
+    }
+    const page = filtered.slice(start, start + limit);
+    const end = start + page.length;
     return Promise.resolve({
       [root]: {
-        edges: filtered.map((row) => ({ node: { ...row } })),
-        pageInfo: { hasNextPage: false, endCursor: null },
+        edges: page.map((row) => ({ node: { ...row } })),
+        pageInfo: {
+          hasNextPage: end < filtered.length,
+          endCursor: page.length > 0 ? String(end - 1) : null,
+        },
       },
     });
   }
@@ -168,5 +181,31 @@ describe('closeShift guard against open orders (UI-SPEC IN#1)', () => {
     expect(result.status).toBe(200);
     expect(db.shifts.find((row) => row.id === SHIFT_ID)?.status).toBe('CLOSED');
     expect(db.orders).toHaveLength(1);
+  });
+
+  it('refuses when the only active order sits past the first page (100 closed + 1 open)', async () => {
+    const db = dbWithOpenShift();
+    for (let i = 0; i < 100; i += 1) {
+      db.seedOrder({ id: `closed-${i}`, shiftId: SHIFT_ID, status: 'CLOSED' });
+    }
+    db.seedOrder({ id: 'hidden-active', shiftId: SHIFT_ID, status: 'OPEN' });
+
+    const result = await executeCloseShift(db, { shiftId: SHIFT_ID }, waiter);
+
+    expect(result.status).toBe(409);
+    expect(db.shifts.find((row) => row.id === SHIFT_ID)?.status).toBe('OPEN');
+    expect((result.body as { orderIds: string[] }).orderIds).toContain('hidden-active');
+  });
+
+  it('closes when 150 orders are all closed (multi-page, none active)', async () => {
+    const db = dbWithOpenShift();
+    for (let i = 0; i < 150; i += 1) {
+      db.seedOrder({ id: `closed-${i}`, shiftId: SHIFT_ID, status: 'CLOSED' });
+    }
+
+    const result = await executeCloseShift(db, { shiftId: SHIFT_ID }, waiter);
+
+    expect(result.status).toBe(200);
+    expect(db.shifts.find((row) => row.id === SHIFT_ID)?.status).toBe('CLOSED');
   });
 });
