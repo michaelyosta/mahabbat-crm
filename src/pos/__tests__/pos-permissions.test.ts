@@ -38,9 +38,10 @@ describe('pos permissions', () => {
     expect(shiftCanBeClosedBy('10000000-0000-4000-8000-000000000099', admin)).toBe(true);
   });
 
-  it('keeps void and transfer commands ADMIN-only', () => {
+  it('keeps void, reconcile and transfer commands ADMIN-only', () => {
     for (const command of [
       'voidOrderLines',
+      'reconcileDamagedOrderTotals',
       'transferOrderToTable',
       'transferOrderToWaiter',
       'transferOrderLinesToGuest',

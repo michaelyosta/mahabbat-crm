@@ -301,8 +301,7 @@ export const POS_ERROR_CODES = [
   'STAFF_INACTIVE',
   'GUEST_TRANSFER_INVALID',
   'VOID_LINE_INVALID',
-  'IDEMPOTENCY_CONFLICT',
-  'CONFLICT',
+  'TOTALS_NOT_CONVERGED',
 ] as const;
 
 export type PosErrorCode = (typeof POS_ERROR_CODES)[number];
@@ -1104,28 +1103,24 @@ const updateLinesTotals = async (
   client: CoreApiClientLike,
   order: OrderRecord,
   knownLines?: LineRecord[],
-): Promise<{ activeLineCount: number }> => {
-  // Read-your-write: сразу после createPosOrderLine свежая линия может быть
-  // невидима re-read в том же resolver-вызове (живьём воспроизведено:
-  // totals оставался null). Переданная линия учитывается напрямую.
-  let lines = await findLinesByOrder(client, order.id);
-  if (knownLines && knownLines.length > 0) {
-    const seen = new Set(lines.map((line) => line.id));
-    for (const known of knownLines) {
-      if (known?.id && !seen.has(known.id)) lines = [...lines, known];
+): Promise<{ activeLineCount: number; converged: boolean }> => {
+  const computeActiveLines = async () => {
+    // Read-your-write: сразу после createPosOrderLine свежая линия может быть
+    // невидима re-read в том же resolver-вызове (живьём воспроизведено:
+    // totals оставался null). Переданная линия учитывается напрямую.
+    let lines = await findLinesByOrder(client, order.id);
+    if (knownLines && knownLines.length > 0) {
+      const seen = new Set(lines.map((line) => line.id));
+      for (const known of knownLines) {
+        if (known?.id && !seen.has(known.id)) lines = [...lines, known];
+      }
     }
-  }
-  const activeLines = lines.filter((line) => line.status === 'ACTIVE');
+    return lines.filter((line) => line.status === 'ACTIVE');
+  };
+  let activeLines = await computeActiveLines();
 
-  const orderSubtotalMicros = sumActiveLinesMicros(
-    activeLines.map((line) => ({
-      unitPrice: line.unitPrice,
-      quantity: line.quantity ?? 0,
-      status: line.status,
-    })),
-  );
-  const subtotal =
-    activeLines.length === 0 ? null : microsToCurrency(orderSubtotalMicros);
+  // (Guest subtotals are computed below from the same activeLines; the order
+  // expectation itself is recomputed inside the CAS loop per attempt.)
 
   const guests = await findGuestsByOrder(client, order.id);
 
@@ -1160,19 +1155,39 @@ const updateLinesTotals = async (
   // Compare-and-swap the order projection so a concurrent payment/close that
   // advanced paidTotal or status is not overwritten with a stale recompute:
   // the loser re-reads and converges instead of clobbering the newer total.
-  // Orders are created with subtotal/total null, so a null row matches a null
-  // expectation without a nested currency filter.
+  // Currency expectations are tri-state: an absent (JS null/undefined row) or
+  // live null-composite {amountMicros:null,currencyCode:null} row carries NO
+  // currency predicate (matches on id+status only), while a real value row
+  // carries an exact nested filter. normalizeCurrency MUST NOT be used here —
+  // it collapses absent/null-composite/zero into one zero and the CAS would
+  // match (or miss) the wrong rows.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const fresh = attempt === 0 ? order : ((await findOrderById(client, order.id)) ?? order);
-    const currentSubtotal = normalizeCurrency(fresh.subtotal);
-    const currentTotal = normalizeCurrency(fresh.total);
+    // Recompute the expectation from the current line set on every attempt:
+    // a concurrent line write between attempts must converge to the fresh
+    // sum, never to a stale first-attempt snapshot.
+    if (attempt > 0) activeLines = await computeActiveLines();
+    const attemptSubtotalMicros = sumActiveLinesMicros(
+      activeLines.map((line) => ({
+        unitPrice: line.unitPrice,
+        quantity: line.quantity ?? 0,
+        status: line.status,
+      })),
+    );
+    const attemptSubtotal =
+      activeLines.length === 0 ? null : microsToCurrency(attemptSubtotalMicros);
+    const freshSubtotal = readCurrencyState(fresh.subtotal);
+    const freshTotal = readCurrencyState(fresh.total);
 
     const needsTotalsUpdate =
-      subtotal === null ||
-      currentSubtotal.amountMicros !== subtotal.amountMicros ||
-      currentSubtotal.currencyCode !== subtotal.currencyCode ||
-      currentTotal.amountMicros !== subtotal.amountMicros ||
-      currentTotal.currencyCode !== subtotal.currencyCode;
+      attemptSubtotal === null
+        ? fresh.subtotal !== null || fresh.total !== null
+        : freshSubtotal.kind !== 'value' ||
+          freshTotal.kind !== 'value' ||
+          freshSubtotal.amountMicros !== attemptSubtotal.amountMicros ||
+          freshSubtotal.currencyCode !== attemptSubtotal.currencyCode ||
+          freshTotal.amountMicros !== attemptSubtotal.amountMicros ||
+          freshTotal.currencyCode !== attemptSubtotal.currencyCode;
 
     const nextStatus = nextPosOrderStatusAfterLineChange(
       fresh.status as PosOrderStatus,
@@ -1182,18 +1197,23 @@ const updateLinesTotals = async (
     const needsStatusUpdate = nextStatus !== fresh.status;
 
     if (!needsTotalsUpdate && !needsStatusUpdate) {
-      return { activeLineCount: activeLines.length };
+      return { activeLineCount: activeLines.length, converged: true };
     }
 
     const filter: Record<string, unknown> = { id: { eq: order.id }, status: { eq: fresh.status } };
-    if (fresh.subtotal != null) filter.subtotal = currencyFilter(currentSubtotal.amountMicros);
-    if (fresh.total != null) filter.total = currencyFilter(currentTotal.amountMicros);
+    if (needsTotalsUpdate) {
+      // Predicate only for real values. Null/absent rows match on id+status:
+      // a zero currency predicate would never match the live null composite
+      // ({null,null} vs {eq:0}) and could wrongly match a genuine zero row.
+      if (freshSubtotal.kind === 'value') filter.subtotal = currencyFilter(freshSubtotal.amountMicros);
+      if (freshTotal.kind === 'value') filter.total = currencyFilter(freshTotal.amountMicros);
+    }
     const result = await client.mutation({
       updatePosOrders: {
         __args: {
           filter,
           data: {
-            ...(needsTotalsUpdate ? { subtotal, total: subtotal } : {}),
+            ...(needsTotalsUpdate ? { subtotal: attemptSubtotal, total: attemptSubtotal } : {}),
             ...(needsStatusUpdate ? { status: nextStatus } : {}),
           },
         },
@@ -1201,11 +1221,11 @@ const updateLinesTotals = async (
       },
     });
     if (mutationUpdatedRows(result, 'updatePosOrders') > 0) {
-      return { activeLineCount: activeLines.length };
+      return { activeLineCount: activeLines.length, converged: true };
     }
   }
 
-  return { activeLineCount: activeLines.length };
+  return { activeLineCount: activeLines.length, converged: false };
 };
 
 const createOperationalEvent = async (
@@ -1863,9 +1883,15 @@ export const executeAddLine = async (
       );
     }
 
+    // The line exists but the totals projection may not have converged
+    // (crash between line commit and CAS). Converge it now, without
+    // creating a second line or duplicating side effects.
+    const totals = await updateLinesTotals(client, order, [{ ...existingByIdempotency } as LineRecord]);
+    if (!totals.converged) {
+      return { status: 409, body: { code: 'TOTALS_NOT_CONVERGED', message: 'Line already exists but order totals could not be converged after a concurrent update. Retry with the same idempotency key.' } };
+    }
     return okResult(200, { lineId: existingByIdempotency.id });
   }
-
   try {
     assertSafeMicros(payload.quantity, 'quantity');
     assertSafeMicros(unitPrice.amountMicros * Math.max(0, payload.quantity), 'quantity*unitPrice');
@@ -1899,13 +1925,19 @@ export const executeAddLine = async (
       throw new Error('Line was created but could not be read back.');
     }
 
-    await updateLinesTotals(client, order, [{ ...created, orderId: payload.orderId, guestId: payload.guestId, menuItemId: payload.menuItemId, quantity: payload.quantity, unitPrice, status: 'ACTIVE' } as LineRecord]);
+    const totals = await updateLinesTotals(client, order, [{ ...created, orderId: payload.orderId, guestId: payload.guestId, menuItemId: payload.menuItemId, quantity: payload.quantity, unitPrice, status: 'ACTIVE' } as LineRecord]);
+    if (!totals.converged) {
+      return { status: 409, body: { code: 'TOTALS_NOT_CONVERGED', message: 'Order totals could not be converged after a concurrent update. The line was saved; retry with the same idempotency key to converge the projection.' } };
+    }
 
     return okResult(201, { lineId: created.id, orderId: payload.orderId });
   } catch {
     // A concurrent duplicate can commit the line before its indexed read is
     // visible to the retrying resolver. Give the authoritative record a short
     // bounded convergence window before returning a transport-looking 500.
+    // A raced line is only returned after converging the totals projection:
+    // returning its id without converging would repeat the F01 shape (line
+    // saved, totals stale) under an innocent-looking 200.
     for (const delayMs of [0, 25, 75, 150]) {
       if (delayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -1913,6 +1945,10 @@ export const executeAddLine = async (
 
       const raced = await findLineByIdempotencyKey(client, payload.idempotencyKey);
       if (raced) {
+        const totals = await updateLinesTotals(client, order, [{ ...raced } as LineRecord]);
+        if (!totals.converged) {
+          return { status: 409, body: { code: 'TOTALS_NOT_CONVERGED', message: 'Duplicate line found but order totals could not be converged after a concurrent update. Retry with the same idempotency key.' } };
+        }
         return okResult(200, { lineId: raced.id });
       }
     }
@@ -1971,8 +2007,10 @@ export const executeChangeLineQuantity = async (
     },
   });
 
-  await updateLinesTotals(client, order);
-
+  const totals = await updateLinesTotals(client, order);
+  if (!totals.converged) {
+    return { status: 409, body: { code: 'TOTALS_NOT_CONVERGED', message: 'Line quantity saved but order totals could not be converged after a concurrent update. Refresh and retry.' } };
+  }
   return okResult(200, { lineId: line.id, quantity: payload.quantity });
 };
 
@@ -2033,8 +2071,10 @@ export const executeRemoveUnsentLine = async (
     },
   });
 
-  await updateLinesTotals(client, order);
-
+  const totals = await updateLinesTotals(client, order);
+  if (!totals.converged) {
+    return { status: 409, body: { code: 'TOTALS_NOT_CONVERGED', message: 'Line removed but order totals could not be converged after a concurrent update. Refresh and retry.' } };
+  }
   return okResult(201, { lineId: line.id, removed: true });
 };
 
@@ -2538,6 +2578,9 @@ export const executeVoidOrderLines = async (
   }
   if (toVoid.length === 0 && alreadyVoided.length > 0) {
     const totals = await updateLinesTotals(client, order);
+    if (!totals.converged) {
+      return { status: 409, body: { code: 'TOTALS_NOT_CONVERGED', message: 'Void already applied but order totals could not be converged after a concurrent update. Retry with the same idempotency key.' } };
+    }
     const details = {
       orderId,
       lineIds: payload.lineIds,
@@ -2583,6 +2626,9 @@ export const executeVoidOrderLines = async (
     ? await createCancellationKitchenTicket(client, orderId, existingLines, actor, payload.idempotencyKey)
     : null;
   const totals = await updateLinesTotals(client, order);
+  if (!totals.converged) {
+    return { status: 409, body: { code: 'TOTALS_NOT_CONVERGED', message: 'Lines voided but order totals could not be converged after a concurrent update. Retry with the same idempotency key.' } };
+  }
   if (totals.activeLineCount === 0) {
     // Release the (tableId, claimToken) claim so the table can be re-opened.
     await client.mutation({
@@ -2710,11 +2756,65 @@ export const executeTransferOrderLinesToGuest = async (
       await client.mutation({ updatePosOrderLine: { __args: { id: line.id, data: { guestId: payload.targetGuestId } }, id: true } });
     }
   }
-  await updateLinesTotals(client, checked.order);
+  const totals = await updateLinesTotals(client, checked.order);
+  if (!totals.converged) {
+    return { status: 409, body: { code: 'TOTALS_NOT_CONVERGED', message: 'Lines transferred but order totals could not be converged after a concurrent update. Retry with the same idempotency key.' } };
+  }
   const details = { orderId, lineIds: payload.lineIds, fromGuestIds, targetGuestId: payload.targetGuestId };
   const event = await createOperationalEvent(client, { eventType: 'TRANSFER_ORDER_LINES_TO_GUEST', actorStaffId: actor.staffId, orderId, details, idempotencyKey: payload.idempotencyKey });
   if (!event?.id) return errorResult('CONFLICT', 'Guest transfer audit could not be recorded.');
   return okResult(201, { ...details, eventId: event.id });
+};
+
+// Reconcile a damaged order projection (F01 live shape: ACTIVE lines exist
+// but subtotal/total stayed null and status stayed OPEN). Idempotent: a
+// converged order returns 200 with replay:true and writes nothing. Only
+// OPEN/IN_PROGRESS orders without payments are reconciled — CLOSED, paid,
+// prepaid-applied, and cancelled orders are NEVER rewritten by this path.
+export const executeReconcileDamagedOrderTotals = async (
+  client: CoreApiClientLike,
+  payload: { orderId: string; idempotencyKey: string },
+  actor: PosActor,
+): Promise<CommandResult> => {
+  const replay = await findOperationalEventByIdempotencyKey(client, payload.idempotencyKey);
+  if (replay) {
+    const details = parseEventDetails(replay);
+    return okResult(200, { ...details, eventId: replay.id, replay: true });
+  }
+  const order = await findOrderById(client, payload.orderId);
+  if (!order) return errorResult('ORDER_NOT_FOUND', 'Order does not exist.');
+  if (order.status !== 'OPEN' && order.status !== 'IN_PROGRESS') {
+    return errorResult('ORDER_NOT_EDITABLE', 'Only OPEN or IN_PROGRESS orders can be reconciled.');
+  }
+  if (!orderCanBeEditedBy(order.ownerStaffId, actor)) {
+    return errorResult('ORDER_NOT_OWNED', 'Order belongs to another staff member.');
+  }
+  const paidMicros = normalizeCurrency(order.paidTotal).amountMicros;
+  const prepaidMicros = normalizeCurrency(order.prepaidTotal).amountMicros;
+  if (paidMicros !== 0 || prepaidMicros !== 0) {
+    return errorResult('ORDER_NOT_EDITABLE', 'Orders with payments or applied prepayments cannot be reconciled by totals replay.');
+  }
+  const totals = await updateLinesTotals(client, order);
+  if (!totals.converged) {
+    return { status: 409, body: { code: 'TOTALS_NOT_CONVERGED', message: 'Order totals could not be converged after a concurrent update. Retry with the same idempotency key.' } };
+  }
+  const refreshed = (await findOrderById(client, payload.orderId)) ?? order;
+  const details = {
+    orderId: order.id,
+    activeLineCount: totals.activeLineCount,
+    subtotal: refreshed.subtotal ?? null,
+    total: refreshed.total ?? null,
+    status: refreshed.status ?? null,
+  };
+  const event = await createOperationalEvent(client, {
+    eventType: 'RECONCILE_ORDER_TOTALS',
+    actorStaffId: actor.staffId,
+    orderId: order.id,
+    details,
+    idempotencyKey: payload.idempotencyKey,
+  });
+  if (!event?.id) return errorResult('CONFLICT', 'Reconcile audit could not be recorded.');
+  return okResult(200, { ...details, eventId: event.id, replay: true });
 };
 
 const repairPrecheckOrderLock = async (
@@ -2756,9 +2856,9 @@ const buildPrecheckSnapshot = async (
   tableNumber: string;
   waiterName: string;
 }> => {
-  await updateLinesTotals(client, order);
+  const totals = await updateLinesTotals(client, order);
+  if (!totals.converged) throw new Error('Order totals could not be converged before printing the precheck.');
   const refreshedOrder = await findOrderById(client, order.id);
-  if (!refreshedOrder) throw new Error('Order disappeared while creating precheck.');
 
   const guests = await findGuestsByOrder(client, order.id);
   const lines = (await findLinesByOrder(client, order.id)).filter(
@@ -3152,6 +3252,47 @@ const mutationUpdatedRows = (result: unknown, root: string): number => {
   const value = (result as Record<string, unknown> | null)?.[root];
   if (Array.isArray(value)) return value.length;
   return value && typeof value === 'object' && 'id' in value ? 1 : 0;
+};
+
+// Tri-state currency read for compare-and-swap: the live wire carries three
+// distinct shapes — an absent field (JS null/undefined), an explicit null
+// composite {amountMicros:null,currencyCode:null}, and a real zero/value.
+// normalizeCurrency collapses all three to zeroCurrency, so it MUST NOT be
+// used to build CAS expectations. readCurrencyState preserves the distinction.
+type CurrencyState =
+  | { kind: 'absent' }
+  | { kind: 'null-composite' }
+  | { kind: 'value'; amountMicros: number; currencyCode: string };
+
+const readCurrencyState = (value: unknown): CurrencyState => {
+  if (value === null || value === undefined) return { kind: 'absent' };
+  if (typeof value === 'object') {
+    const candidate = value as { amountMicros?: unknown; currencyCode?: unknown };
+    const amount = candidate.amountMicros;
+    const code = candidate.currencyCode;
+    if (amount === null || amount === undefined || code === null || code === undefined) {
+      if (typeof amount === 'number' || typeof code === 'string') {
+        return {
+          kind: 'value',
+          amountMicros: typeof amount === 'number' ? amount : 0,
+          currencyCode: typeof code === 'string' ? code : POS_CURRENCY_CODE,
+        };
+      }
+      return { kind: 'null-composite' };
+    }
+    if (typeof amount === 'number' && Number.isSafeInteger(amount)) {
+      return {
+        kind: 'value',
+        amountMicros: amount,
+        currencyCode: typeof code === 'string' ? code : POS_CURRENCY_CODE,
+      };
+    }
+    return { kind: 'null-composite' };
+  }
+  if (typeof value === 'number' && Number.isSafeInteger(value)) {
+    return { kind: 'value', amountMicros: value, currencyCode: POS_CURRENCY_CODE };
+  }
+  return { kind: 'absent' };
 };
 
 // Twenty's CurrencyFilterInput compares each component independently; it does
@@ -4056,6 +4197,11 @@ export const dispatchPosCommand = async (
     case 'attachReservationToOrder':
       return executeAttachReservationToOrder(client, {
         reservationId: payload.reservationId as string,
+        orderId: payload.orderId as string,
+        idempotencyKey: payload.idempotencyKey as string,
+      }, actor);
+    case 'reconcileDamagedOrderTotals':
+      return executeReconcileDamagedOrderTotals(client, {
         orderId: payload.orderId as string,
         idempotencyKey: payload.idempotencyKey as string,
       }, actor);
