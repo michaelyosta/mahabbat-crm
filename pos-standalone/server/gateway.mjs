@@ -11,6 +11,11 @@ const SERVICE_API_KEY = process.env.TWENTY_API_KEY ?? process.env.MAHABBAT_API_K
 const INTERNAL_SECRET = process.env.MAHABBAT_INTERNAL_ROUTE_SECRET ?? '';
 const RESOLVER_ID = process.env.POS_COMMAND_RESOLVER_ID ?? '54be0dfa-2fd6-45bc-be93-6ba4c64a21d9';
 const STATIC_DIR = process.env.POS_STATIC_DIR ? path.resolve(process.env.POS_STATIC_DIR) : null;
+// Экран «О кассе»: путь к release/mahabbat-release.json задаёт стенд через
+// окружение (MAHABBAT_RELEASE_MANIFEST). Чтение — строго как UTF-8: R10
+// показало, что чтение без явной кодировки (Get-Content -Raw без
+// -Encoding utf8) возвращает испорченный русский changelog («С„Рё...»).
+const RELEASE_MANIFEST_PATH = process.env.MAHABBAT_RELEASE_MANIFEST ?? '';
 // Mahabbat P1: CORS allowlist. Empty/unset POS_CORS_ORIGIN = same-origin
 // only (no ACAO header). Explicit origins are reflected; '*' is back-compat
 // only (warns in logs) — venue setup writes empty, see FixP1Secrets half.
@@ -243,6 +248,56 @@ const proxyRest = async (collection, search, token) => {
   return { status: r.status, body };
 };
 
+// Экран «О кассе» (IN#2): release/mahabbat-release.json читается ЯВНО как
+// UTF-8. Без кодировки кириллический changelog превращается в «С„Рё...»
+// (наблюдение R10). Значения возвращаются как есть — UI сверяет их с
+// acceptance packet побайтово на T7; manifestSha256 — sha256 сырых байт файла.
+const readReleaseManifest = async () => {
+  if (!RELEASE_MANIFEST_PATH) {
+    return { ok: false, code: 'RELEASE_INFO_UNAVAILABLE', message: 'Данные о версии недоступны: файл релиза не настроен.' };
+  }
+  let text;
+  try {
+    text = await readFile(RELEASE_MANIFEST_PATH, 'utf8');
+  } catch {
+    return { ok: false, code: 'RELEASE_INFO_UNAVAILABLE', message: 'Данные о версии недоступны: файл релиза не найден.' };
+  }
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { ok: false, code: 'RELEASE_INFO_UNAVAILABLE', message: 'Данные о версии недоступны: файл релиза повреждён.' };
+  }
+  if (!raw || typeof raw !== 'object' || typeof raw.mahabbatVersion !== 'string' || !raw.mahabbatVersion || typeof raw.crmSha !== 'string' || !raw.crmSha) {
+    return { ok: false, code: 'RELEASE_INFO_UNAVAILABLE', message: 'Данные о версии недоступны: файл релиза неполон.' };
+  }
+  const manifestSha256 = createHash('sha256').update(text, 'utf8').digest('hex');
+  const images = {};
+  if (raw.images && typeof raw.images === 'object') {
+    for (const [name, entry] of Object.entries(raw.images)) {
+      if (entry && typeof entry === 'object') {
+        images[name] = {
+          immutableTag: typeof entry.immutableTag === 'string' ? entry.immutableTag : '',
+          digest: typeof entry.digest === 'string' ? entry.digest : '',
+        };
+      }
+    }
+  }
+  return {
+    ok: true,
+    body: {
+      mahabbatVersion: raw.mahabbatVersion,
+      windowsFileVersion: typeof raw.windowsFileVersion === 'string' ? raw.windowsFileVersion : '',
+      deploymentSha: typeof raw.deploymentSha === 'string' ? raw.deploymentSha : '',
+      crmSha: raw.crmSha,
+      backupVersion: typeof raw.backupVersion === 'number' ? raw.backupVersion : null,
+      images,
+      changelogSource: typeof raw.changelogSource === 'string' ? raw.changelogSource : '',
+      manifestSha256,
+    },
+  };
+};
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -431,6 +486,31 @@ const handler = async (req, res) => {
       send(503, { code: 'ROUTE_UNAVAILABLE', message: 'Нет связи с сервером' });
       log(503, { collection, error: String(e).slice(0, 200) });
     }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/about') {
+    const token = bearerToken(req);
+    if (!token) {
+      const missing = gatewayError('POS_SESSION_REQUIRED');
+      send(missing.status, missing.body);
+      log(401, { path: url.pathname });
+      return;
+    }
+    const authOk = await validateSession(token);
+    if (!authOk.ok) {
+      send(401, { code: authOk.code ?? 'POS_SESSION_INVALID', message: 'Требуется действующая POS-сессия.' });
+      log(401, { path: url.pathname });
+      return;
+    }
+    const release = await readReleaseManifest();
+    if (!release.ok) {
+      send(503, { code: release.code, message: release.message });
+      log(503, { path: url.pathname });
+      return;
+    }
+    send(200, release.body);
+    log(200, { path: url.pathname });
     return;
   }
 

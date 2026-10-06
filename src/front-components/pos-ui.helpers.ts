@@ -205,6 +205,7 @@ const POS_ERROR_MESSAGES: Record<string, string> = {
   SHIFT_NOT_FOUND: 'Смена не найдена. Обновите экран',
   SHIFT_ALREADY_CLOSED: 'Смена уже закрыта',
   SHIFT_NOT_OWNED: 'Эта смена открыта другим сотрудником',
+  SHIFT_HAS_OPEN_ORDERS: 'Смена не закрыта: есть открытые заказы. Закройте их и повторите попытку',
   TABLE_NOT_FOUND: 'Стол не найден. Обновите зал',
   TABLE_INACTIVE: 'Этот стол временно недоступен',
   TABLE_NOT_AVAILABLE: 'Стол уже открыт другим сотрудником',
@@ -256,6 +257,7 @@ const POS_ERROR_MESSAGES: Record<string, string> = {
   TOTALS_NOT_CONVERGED: 'Суммы заказа не сошлись из-за параллельного изменения. Обновите экран и повторите',
   PRECHECK_NOT_PRINTED: 'Пречек ещё не напечатан. Дождитесь печати',
   INVALID_SIGNATURE: 'Нет связи с сервером. Проверьте сеть и попробуйте снова',
+  RELEASE_INFO_UNAVAILABLE: 'Данные о версии недоступны',
 };
 
 export const uuid = (): string => {
@@ -483,3 +485,129 @@ export const initials = (value: string): string =>
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase() ?? '')
     .join('') || 'M';
+
+// --- POS UI states (gauntlet/pos-ui-states): closeShift guard, double-submit,
+// about/release. Pure helpers — covered by unit tests. ---
+
+export const russianPlural = (
+  count: number,
+  one: string,
+  few: string,
+  many: string,
+): string => {
+  const mod100 = Math.abs(Math.trunc(count)) % 100;
+  const mod10 = mod100 % 10;
+  if (mod100 > 10 && mod100 < 20) return many;
+  if (mod10 > 1 && mod10 < 5) return few;
+  if (mod10 === 1) return one;
+  return many;
+};
+
+export const formatOpenOrderCount = (count: number): string =>
+  `${count} ${russianPlural(count, 'заказ', 'заказа', 'заказов')}`;
+
+// Открытые заказы смены для предпроверки закрытия смены в UI. Сервер
+// (executeCloseShift) считает заказы смены со статусом OPEN / IN_PROGRESS /
+// PRECHECK_PRINTED; здесь тот же предикат isActiveOrder. Строки posOrders из
+// load() переиспользуются — отдельного запроса нет. Если ни одна строка не
+// несёт shiftId (ограниченная REST-проекция), честно считаем все активные:
+// сервер остаётся источником истины, а его 409 закрывает гонку.
+export const countShiftOpenOrders = (
+  orders: PosRow[],
+  shiftId?: string | null,
+): number => {
+  const active = orders.filter(
+    (order) =>
+      isActiveOrder(order) &&
+      !isSyntheticPosRecord(order),
+  );
+  if (!shiftId) return active.length;
+  const withShift = active.filter((order) => order.shiftId !== undefined);
+  if (withShift.length === 0) return active.length;
+  return withShift.filter((order) => order.shiftId === shiftId).length;
+};
+
+export type ReleaseImageInfo = {
+  immutableTag: string;
+  digest: string;
+};
+
+export type ReleaseSummary = {
+  mahabbatVersion: string;
+  windowsFileVersion: string;
+  deploymentSha: string;
+  crmSha: string;
+  backupVersion: number | null;
+  images: Record<string, ReleaseImageInfo>;
+  changelog: string;
+  manifestSha256: string | null;
+};
+
+// Нормализует сырой release/mahabbat-release.json в то, что показывает экран
+// «О кассе». Значения передаются как есть, без trim/перекодировок, чтобы на
+// приёмке совпадать с acceptance packet побайтово. Возвращает null, когда
+// обязательные поля отсутствуют (UI показывает честный фолбэк, а не выдумку).
+export const summarizeReleaseManifest = (
+  raw: unknown,
+  manifestSha256?: string | null,
+): ReleaseSummary | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const mahabbatVersion = record.mahabbatVersion;
+  const crmSha = record.crmSha;
+  if (typeof mahabbatVersion !== 'string' || !mahabbatVersion) return null;
+  if (typeof crmSha !== 'string' || !crmSha) return null;
+  const images: Record<string, ReleaseImageInfo> = {};
+  const rawImages = record.images;
+  if (rawImages && typeof rawImages === 'object') {
+    for (const [name, entry] of Object.entries(
+      rawImages as Record<string, unknown>,
+    )) {
+      if (entry && typeof entry === 'object') {
+        const item = entry as Record<string, unknown>;
+        images[name] = {
+          immutableTag: typeof item.immutableTag === 'string' ? item.immutableTag : '',
+          digest: typeof item.digest === 'string' ? item.digest : '',
+        };
+      }
+    }
+  }
+  return {
+    mahabbatVersion,
+    windowsFileVersion:
+      typeof record.windowsFileVersion === 'string'
+        ? record.windowsFileVersion
+        : '',
+    deploymentSha:
+      typeof record.deploymentSha === 'string' ? record.deploymentSha : '',
+    crmSha,
+    backupVersion:
+      typeof record.backupVersion === 'number' ? record.backupVersion : null,
+    images,
+    changelog:
+      typeof record.changelogSource === 'string' ? record.changelogSource : '',
+    manifestSha256: manifestSha256 ?? null,
+  };
+};
+
+// Защита от двойной отправки: синхронный guard на intent. Первый клик
+// занимает intent одним idempotencyKey; повторный клик, пока полёт не
+// завершён (включая окно до ре-рендера disabled), не шлёт второй запрос.
+// После settle intent освобождается — следующая попытка пользователя берёт
+// свежий ключ.
+export const createSubmitGuard = () => {
+  const inflight = new Map<string, string>();
+  return {
+    acquire: (intent: string, makeKey: () => string): string | null => {
+      if (inflight.has(intent)) return null;
+      const key = makeKey();
+      inflight.set(intent, key);
+      return key;
+    },
+    release: (intent: string): void => {
+      inflight.delete(intent);
+    },
+  };
+};
+
+export type SubmitGuard = ReturnType<typeof createSubmitGuard>;

@@ -29,6 +29,12 @@ export type PosApi = {
     name: string,
     payload: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  // Экран «О кассе»: сырой release/mahabbat-release.json через gateway
+  // (GET /api/about). Опционально: в embedded-режиме Twenty релизного
+  // эндпоинта нет — UI показывает честный фолбэк. Значения нормализует
+  // summarizeReleaseManifest без перекодировок (побайтовое соответствие
+  // acceptance packet проверяет T7 вживую).
+  about?: () => Promise<Record<string, unknown>>;
 };
 
 export const POS_SESSION_STORAGE_KEY = 'mahabbat:pos:session';

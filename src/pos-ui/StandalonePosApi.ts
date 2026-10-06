@@ -121,5 +121,16 @@ export const createStandalonePosApi = (options: {
       }
       return envelope as Record<string, unknown>;
     },
+    about: async () => {
+      const session = options.getSession();
+      const response = await fetchImpl(`${baseUrl}/api/about`, {
+        headers: headersFor(session),
+      });
+      const envelope = await parseJson(response);
+      if (!response.ok) {
+        throw toError(envelope, 'Данные о версии недоступны');
+      }
+      return envelope as Record<string, unknown>;
+    },
   };
 };

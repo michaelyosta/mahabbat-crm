@@ -9,11 +9,14 @@
 
 import {
   commandError,
+  countShiftOpenOrders,
+  createSubmitGuard,
   dateTime,
   filterPosMenu,
   findMergeablePosLine,
   formatMicrosForInput,
   formatNegativeTimer,
+  formatOpenOrderCount,
   formatShiftDuration,
   initials,
   isActiveOrder,
@@ -29,6 +32,7 @@ import {
   sortPosTables,
   sortPosZones,
   summarizePosDayPayments,
+  summarizeReleaseManifest,
   tableVisualState,
   tableDisplayName,
   timeOnly,
@@ -36,6 +40,8 @@ import {
   type PosRow,
   type PosSession,
   type PosTableVisualState,
+  type ReleaseSummary,
+  type SubmitGuard,
 } from 'src/front-components/pos-ui.helpers';
 import { POS_UI_CSS } from 'src/front-components/pos-ui.styles';
 import type { PosApi } from 'src/pos-ui/PosApi';
@@ -69,6 +75,7 @@ type SheetName =
   | 'stop-list'
   | 'session'
   | 'confirm'
+  | 'about'
   | null;
 
 type PendingAction = {
@@ -767,6 +774,7 @@ const OrderPanel = ({
   printStatus,
   printStatusLabel,
   busy,
+  busyCommand = null,
   onGuest,
   onAddGuest,
   onQuantity,
@@ -793,6 +801,7 @@ const OrderPanel = ({
   printStatus?: string | null;
   printStatusLabel?: string | null;
   busy: boolean;
+  busyCommand?: string | null;
   onGuest: (id: string) => void;
   onAddGuest: () => void;
   onQuantity: (line: PosRow, quantity: number) => void;
@@ -1063,9 +1072,10 @@ const OrderPanel = ({
               className="mah-pos-btn success"
               style={{ width: '100%' }}
               disabled={busy || !orderEditable}
+              aria-busy={busyCommand === 'closeOrder'}
               onClick={onCloseOrder}
             >
-              ОПЛАЧЕНО · ЗАКРЫТЬ СТОЛ
+              {busyCommand === 'closeOrder' ? 'Отправляем…' : 'ОПЛАЧЕНО · ЗАКРЫТЬ СТОЛ'}
             </button>
           ) : (
             <button
@@ -1084,9 +1094,10 @@ const OrderPanel = ({
               type="button"
               className="mah-pos-btn primary"
               disabled={busy || !orderEditable || unsentCount === 0}
+              aria-busy={busyCommand === 'printKitchenTicket'}
               onClick={onPrint}
             >
-              ПЕЧАТЬ · {unsentCount}
+              {busyCommand === 'printKitchenTicket' ? 'Отправляем…' : <>ПЕЧАТЬ · {unsentCount}</>}
             </button>
             <button
               type="button"
@@ -1096,9 +1107,10 @@ const OrderPanel = ({
                 !orderEditable ||
                 lines.every((line) => line.status !== 'ACTIVE')
               }
+              aria-busy={busyCommand === 'createPrecheck'}
               onClick={onPrecheck}
             >
-              ПРЕЧЕК
+              {busyCommand === 'createPrecheck' ? 'Отправляем…' : 'ПРЕЧЕК'}
             </button>
           </div>
         )}
@@ -1167,6 +1179,18 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(
     null,
   );
+  // Защита от двойной отправки: синхронный guard на intent переживает
+  // ре-рендеры (ref) и блокирует повторный клик до ре-рендера disabled.
+  const submitGuardRef = useRef<SubmitGuard | null>(null);
+  // Отказ closeShift 409 SHIFT_HAS_OPEN_ORDERS: счётчик + действие, ввод цел.
+  const [shiftBlocked, setShiftBlocked] = useState<{
+    count: number;
+    orderIds: string[];
+  } | null>(null);
+  // Экран «О кассе»: релизная информация с gateway, значения — как есть.
+  const [release, setRelease] = useState<ReleaseSummary | null>(null);
+  const [releaseError, setReleaseError] = useState('');
+  const [releaseLoading, setReleaseLoading] = useState(false);
 
   useEffect(() => {
     if (mode === 'standalone') {
@@ -1296,6 +1320,45 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     return () => globalThis.clearTimeout(timer);
   }, [notice]);
 
+  // Экран «О кассе»: релизная информация с gateway — один раз за монт,
+  // значения как есть (сверка с acceptance packet — живая проверка T7).
+  const loadRelease = useCallback(async () => {
+    if (!api.about) {
+      setRelease(null);
+      setReleaseError(
+        'Информация о версии доступна только в standalone-кассе',
+      );
+      return;
+    }
+    setReleaseLoading(true);
+    setReleaseError('');
+    try {
+      const raw = await api.about();
+      const summary = summarizeReleaseManifest(
+        raw,
+        typeof raw.manifestSha256 === 'string' ? raw.manifestSha256 : null,
+      );
+      if (!summary) {
+        setRelease(null);
+        setReleaseError('Данные о версии неполны');
+        return;
+      }
+      setRelease(summary);
+    } catch (value) {
+      setRelease(null);
+      setReleaseError(commandError(value));
+    } finally {
+      setReleaseLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    if (!session || !api.about || release || releaseLoading || releaseError) {
+      return;
+    }
+    void loadRelease();
+  }, [session, api, release, releaseLoading, releaseError, loadRelease]);
+
   const command = useCallback(
     async (name: string, payload: Record<string, unknown>) => {
       return (await api.command(name, payload)) as ApiEnvelope;
@@ -1407,6 +1470,30 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
       }
     },
     [command, load, setSession],
+  );
+  // Одиночный полёт на intent: повторный клик, пока запрос в пути (включая
+  // окно до ре-рендера disabled), не шлёт второй запрос. Ключ генерируется
+  // один на полёт и уходит в payload построителе — сервер видит тот же
+  // idempotencyKey, даже если гонка каким-то образом прорвётся.
+  const runGuarded = useCallback(
+    async (
+      intent: string,
+      name: string,
+      buildPayload: (idempotencyKey: string) => Record<string, unknown>,
+      success?: string,
+    ): Promise<ApiEnvelope | null> => {
+      if (!submitGuardRef.current) {
+        submitGuardRef.current = createSubmitGuard();
+      }
+      const key = submitGuardRef.current.acquire(intent, uuid);
+      if (!key) return null;
+      try {
+        return await run(name, buildPayload(key), success);
+      } finally {
+        submitGuardRef.current.release(intent);
+      }
+    },
+    [run],
   );
   // Сотрудники (ADMIN). run() сам зовёт load() → rows.posStaffs обновляется.
   // Парсеры не читают idempotencyKey — от дабл-клика защищает busy.
@@ -1571,6 +1658,24 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
   const activeShift = (rows.posShifts ?? []).find(
     (row) => row.staffId === session?.staff.id && row.isOpen === true,
   );
+  // Предпроверка закрытия смены: открытые заказы из уже загруженных
+  // posOrders (отдельного запроса нет). Сервер — источник истины, его 409
+  // закрывает гонку между load() и closeShift.
+  const shiftOpenOrderCount = activeShift
+    ? countShiftOpenOrders(rows.posOrders ?? [], activeShift.id)
+    : 0;
+  // Блокировка закрытия: предпроверка UI или уже прилетевший 409 сервера.
+  const shiftCloseBlocked =
+    shiftBlocked ??
+    (shiftOpenOrderCount > 0
+      ? { count: shiftOpenOrderCount, orderIds: [] as string[] }
+      : null);
+
+  useEffect(() => {
+    // Серверный 409 устаревает, как только открытых заказов не осталось:
+    // возвращаем обычное подтверждение закрытия смены.
+    if (shiftOpenOrderCount === 0) setShiftBlocked(null);
+  }, [shiftOpenOrderCount]);
   const orderPrecheck = (rows.posPrechecks ?? []).find(
     (row) => row.orderId === orderId && row.status === 'ACTIVE',
   );
@@ -1887,14 +1992,21 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
     }
     const selectedMethod = (rows.posPaymentMethods ?? []).find((row) => row.id === paymentMethodId);
     const isCash = selectedMethod?.methodType === 'CASH';
-    const payload: Record<string, unknown> = {
-      orderId,
-      paymentMethodId,
-      amountMicros,
-      idempotencyKey: uuid(),
-    };
-    if (isCash) payload.tenderedAmountMicros = amountMicros;
-    const result = await run('recordPayment', payload, 'Оплата принята');
+    const result = await runGuarded(
+      'record-payment',
+      'recordPayment',
+      (idempotencyKey) => {
+        const payload: Record<string, unknown> = {
+          orderId,
+          paymentMethodId,
+          amountMicros,
+          idempotencyKey,
+        };
+        if (isCash) payload.tenderedAmountMicros = amountMicros;
+        return payload;
+      },
+      'Оплата принята',
+    );
     if (result) {
       // Show change toast for cash when server returns changeMicros
       const changeMicros = Number((result as any)?.changeMicros ?? 0);
@@ -1907,9 +2019,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
 
   const closeOrder = async () => {
     if (!orderId) return;
-    const result = await run(
+    const result = await runGuarded(
+      'close-order',
       'closeOrder',
-      { orderId, idempotencyKey: uuid() },
+      (idempotencyKey) => ({ orderId, idempotencyKey }),
       'Заказ закрыт · стол свободен',
     );
     if (result) {
@@ -1917,6 +2030,71 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
       setTableId(null);
       setGuestId(null);
       setSheet(null);
+    }
+  };
+
+  // Закрытие смены: предпроверка открытых заказов в UI + честный разбор
+  // серверного 409 SHIFT_HAS_OPEN_ORDERS с действием. Ввод пользователя
+  // (суммы, черновики) не трогаем — только обновляем данные и показываем
+  // счётчик. Повторный клик, пока запрос в пути, второй запрос не шлёт.
+  const closeActiveShift = async () => {
+    if (!activeShift) return;
+    const shiftId = activeShift.id;
+    if (!submitGuardRef.current) {
+      submitGuardRef.current = createSubmitGuard();
+    }
+    const idempotencyKey = submitGuardRef.current.acquire(
+      'close-shift',
+      uuid,
+    );
+    if (!idempotencyKey) return;
+    setBusyCommand('closeShift');
+    setError('');
+    try {
+      await command('closeShift', { shiftId, idempotencyKey });
+      await load();
+      setShiftCloseConfirm(false);
+      setShiftBlocked(null);
+      setNotice('Смена закрыта');
+    } catch (value) {
+      const body =
+        value && typeof value === 'object' && 'body' in value
+          ? (value.body as Record<string, unknown> | undefined)
+          : undefined;
+      const code =
+        body && typeof body === 'object' ? String(body.code ?? '') : '';
+      if (code === 'SHIFT_HAS_OPEN_ORDERS') {
+        const fromIds = Array.isArray(body?.orderIds)
+          ? (body.orderIds as unknown[]).map(String)
+          : [];
+        const detail = Array.isArray(body?.detail)
+          ? (body.detail as unknown[])
+          : [];
+        const fromDetail = detail
+          .map((entry) =>
+            entry && typeof entry === 'object'
+              ? String(
+                  (entry as Record<string, unknown>).orderId ?? '',
+                )
+              : '',
+          )
+          .filter(Boolean);
+        const orderIds = fromIds.length ? fromIds : fromDetail;
+        const count =
+          orderIds.length > 0
+            ? orderIds.length
+            : countShiftOpenOrders(rows.posOrders ?? [], shiftId);
+        setShiftBlocked({ count, orderIds });
+        await load().catch(() => undefined);
+        setError(
+          `Смена не закрыта: ${formatOpenOrderCount(count)}. Закройте их и повторите попытку.`,
+        );
+      } else {
+        setError(commandError(value));
+      }
+    } finally {
+      submitGuardRef.current.release('close-shift');
+      setBusyCommand(null);
     }
   };
 
@@ -2147,13 +2325,15 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
               printStatus={printStatusForOrder}
               printStatusLabel={printStatusLabelForOrder}
               busy={busy}
+              busyCommand={busyCommand}
               onGuest={setGuestId}
               onAddGuest={() => void addGuest()}
               onQuantity={changeQuantity}
               onPrint={() =>
-                void run(
+                void runGuarded(
+                  'print-kitchen',
                   'printKitchenTicket',
-                  { orderId: selectedOrder.id, idempotencyKey: uuid() },
+                  (idempotencyKey) => ({ orderId: selectedOrder.id, idempotencyKey }),
                   'Новые блюда отправлены на кухню',
                 ).then((result) => {
                   const status = result ? String(result.printStatus ?? '') : '';
@@ -2161,9 +2341,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                 })
               }
               onPrecheck={() =>
-                void run(
+                void runGuarded(
+                  'print-precheck',
                   'createPrecheck',
-                  { orderId: selectedOrder.id, idempotencyKey: uuid() },
+                  (idempotencyKey) => ({ orderId: selectedOrder.id, idempotencyKey }),
                   'Пречек сформирован · заказ заблокирован',
                 ).then((result) => {
                   const status = result ? String(result.printStatus ?? '') : '';
@@ -2210,6 +2391,22 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
           )}
         </aside>
       </div>
+      <footer className="mah-pos-footer">
+        <span className="mah-pos-footer-version">
+          {release
+            ? `Mahabbat ${release.mahabbatVersion} · CRM ${release.crmSha.slice(0, 12)}`
+            : releaseLoading
+              ? 'Загружаем версию…'
+              : 'Mahabbat · версия недоступна'}
+        </span>
+        <button
+          type="button"
+          className="mah-pos-footer-about"
+          onClick={() => setSheet('about')}
+        >
+          О кассе
+        </button>
+      </footer>
 
       {sheet === 'payment' && selectedOrder && (
         <Sheet
@@ -2223,9 +2420,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                 className="mah-pos-btn success"
                 style={{ width: '100%' }}
                 disabled={busy}
+                aria-busy={busyCommand === 'closeOrder'}
                 onClick={() => void closeOrder()}
               >
-                ЗАКРЫТЬ СТОЛ
+                {busyCommand === 'closeOrder' ? 'Отправляем…' : 'ЗАКРЫТЬ СТОЛ'}
               </button>
             ) : (
               <button
@@ -2233,9 +2431,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                 className="mah-pos-btn primary"
                 style={{ width: '100%' }}
                 disabled={busy || !paymentMethodId || !paymentAmount}
+                aria-busy={busyCommand === 'recordPayment'}
                 onClick={() => void recordPayment()}
               >
-                ПРИНЯТЬ ОПЛАТУ
+                {busyCommand === 'recordPayment' ? 'Отправляем…' : 'ПРИНЯТЬ ОПЛАТУ'}
               </button>
             )
           }
@@ -3057,10 +3256,36 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
               >
                 Открыть смену
               </button>
+            ) : shiftCloseBlocked ? (
+              <div className="mah-pos-confirm">
+                <strong>Смена не может быть закрыта</strong>
+                Открыто: {formatOpenOrderCount(shiftCloseBlocked.count)}.
+                Закройте заказы — после этого смену можно будет закрыть.
+                <div className="mah-pos-actions" style={{ marginTop: 10 }}>
+                  <button
+                    type="button"
+                    className="mah-pos-btn"
+                    onClick={() => {
+                      setShiftCloseConfirm(false);
+                      setSheet(null);
+                    }}
+                  >
+                    К открытым заказам
+                  </button>
+                  <button
+                    type="button"
+                    className="mah-pos-btn danger"
+                    disabled
+                    title="Закройте открытые заказы, затем повторите"
+                  >
+                    Закройте {formatOpenOrderCount(shiftCloseBlocked.count)}
+                  </button>
+                </div>
+              </div>
             ) : shiftCloseConfirm ? (
               <div className="mah-pos-confirm">
                 <strong>Закрыть текущую смену?</strong>
-                Открытые заказы и столы останутся активными.
+                Открытых заказов нет — смену можно закрыть.
                 <div className="mah-pos-actions" style={{ marginTop: 10 }}>
                   <button
                     type="button"
@@ -3073,15 +3298,10 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
                     type="button"
                     className="mah-pos-btn danger"
                     disabled={busy}
-                    onClick={() =>
-                      void run(
-                        'closeShift',
-                        { shiftId: activeShift.id },
-                        'Смена закрыта · открытые столы сохранены',
-                      )
-                    }
+                    aria-busy={busyCommand === 'closeShift'}
+                    onClick={() => void closeActiveShift()}
                   >
-                    Закрыть смену
+                    {busyCommand === 'closeShift' ? 'Отправляем…' : 'Закрыть смену'}
                   </button>
                 </div>
               </div>
@@ -3121,6 +3341,100 @@ export const PosApp = ({ api, mode = 'embedded', initialSession = null, onSessio
               Выйти из POS
             </button>
           </div>
+        </Sheet>
+      )}
+
+      {sheet === 'about' && (
+        <Sheet
+          title="О кассе"
+          subtitle="Версия, сборка и изменения выпуска"
+          onClose={() => setSheet(null)}
+        >
+          {releaseLoading && !release ? (
+            <div className="mah-pos-sheet-section">
+              <div className="mah-pos-empty-lines compact">
+                Загружаем данные о версии…
+              </div>
+            </div>
+          ) : release ? (
+            <>
+              <div className="mah-pos-sheet-section">
+                <div className="mah-pos-payment-summary">
+                  <div className="mah-pos-total-row">
+                    <span>Mahabbat</span>
+                    <strong>{release.mahabbatVersion}</strong>
+                  </div>
+                  {release.windowsFileVersion && (
+                    <div className="mah-pos-total-row">
+                      <span>Сборка Windows</span>
+                      <strong>{release.windowsFileVersion}</strong>
+                    </div>
+                  )}
+                  <div className="mah-pos-total-row">
+                    <span>CRM</span>
+                    <strong className="mah-pos-mono">{release.crmSha}</strong>
+                  </div>
+                  {release.deploymentSha && (
+                    <div className="mah-pos-total-row">
+                      <span>Deployment</span>
+                      <strong className="mah-pos-mono">{release.deploymentSha}</strong>
+                    </div>
+                  )}
+                  {release.backupVersion !== null && (
+                    <div className="mah-pos-total-row">
+                      <span>Формат бэкапа</span>
+                      <strong>v{release.backupVersion}</strong>
+                    </div>
+                  )}
+                </div>
+              </div>
+              {Object.keys(release.images).length > 0 && (
+                <div className="mah-pos-sheet-section">
+                  <h3>Образы и дайджесты</h3>
+                  <div className="mah-pos-payment-summary">
+                    {Object.entries(release.images).map(([name, image]) => (
+                      <div className="mah-pos-total-row" key={name}>
+                        <span>{name}</span>
+                        <strong className="mah-pos-mono" title={image.digest}>
+                          {image.digest ? image.digest.slice(0, 19) : '—'}
+                        </strong>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {release.changelog && (
+                <div className="mah-pos-sheet-section">
+                  <h3>Что изменилось</h3>
+                  <div className="mah-pos-about-changelog">{release.changelog}</div>
+                </div>
+              )}
+              {release.manifestSha256 && (
+                <div className="mah-pos-sheet-section">
+                  <h3>Сверка выпуска</h3>
+                  <div className="mah-pos-about-hash" title={release.manifestSha256}>
+                    manifest sha256: {release.manifestSha256}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="mah-pos-sheet-section">
+              <div className="mah-pos-empty-lines compact">
+                {releaseError || 'Данные о версии недоступны'}
+              </div>
+              <div className="mah-pos-form" style={{ marginTop: 12 }}>
+                <button
+                  type="button"
+                  className="mah-pos-btn"
+                  disabled={releaseLoading}
+                  onClick={() => void loadRelease()}
+                >
+                  {releaseLoading ? 'Загружаем…' : 'Повторить'}
+                </button>
+              </div>
+            </div>
+          )}
         </Sheet>
       )}
 
